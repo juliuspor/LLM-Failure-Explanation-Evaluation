@@ -1,0 +1,49 @@
+What happened (where): The failure occurs inside LocaleUtils.to_locale, specifically in the branch around lines 243–247 shown in your slice. That code assumes any string with at least 5 characters is a language_country or language_country_variant and returns immediately:
+
+ 243 |                 return Locale(locale_str[0:2], locale_str[3:5])
+ 245 |                 if locale_str[5] != '_':
+ 246 |                     raise ValueError(f"Invalid locale format: {locale_str}")
+ 247 |                 return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why it fails (root cause, precisely): For an input like "fr__POSIX" the code returns at line 243 before checking for the empty-country case. The code slices locale_str[3:5] as the country and returns a Locale immediately. For "fr__POSIX":
+
+- locale_str[0:2] -> "fr" (correct language)
+- locale_str[3:5] -> "_P" (incorrect: because index 3 is the second underscore and index 4 is 'P')
+
+So LocaleUtils.to_locale returns Locale("fr", "_P") and never reaches the later checks that would detect the variant. The code never handles the double-underscore (empty country) pattern because the early return assumes a non-empty country whenever length >= 5.
+
+What exactly went wrong in code terms:
+- The function assumes a country is present when the string is long enough and returns before checking for an empty country.
+- It never tests for the double-underscore pattern (locale_str[2] == '_' and locale_str[3] == '_') that signals an empty country and a variant.
+- As a result, the variant "POSIX" is lost and the country becomes garbage ("_P").
+
+How to fix it (concrete steps and code to apply):
+1. At the point where the code decides how to parse after the language and initial underscore, explicitly check for the empty-country pattern (second underscore immediately after the first).
+2. If you detect locale_str[3] == '_', treat the country as "" and set the variant to the remainder of the string starting at index 4.
+3. Otherwise, parse the 2-character country at locale_str[3:5] and continue to the variant checks as before.
+
+A concrete replacement for the problematic lines (243–247) — adjust indices to match the surrounding code—but the idea is:
+
+Replace the early return with:
+
+    # after verifying language and that locale_str[2] == '_'
+    if len(locale_str) >= 4 and locale_str[3] == '_':
+        # language__variant -> empty country, variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # otherwise parse a two-character country
+    if len(locale_str) >= 5:
+        country = locale_str[3:5]
+        if len(locale_str) == 5:
+            return Locale(locale_str[0:2], country)
+        # if there's more, it must be variant and next char must be underscore
+        if len(locale_str) > 5:
+            if locale_str[5] != '_':
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            return Locale(locale_str[0:2], country, locale_str[6:])
+
+Notes and checks to add:
+- Verify the initial separator underscore is at index 2 before these branches.
+- Ensure variant slicing uses the correct start index (4 when country is empty, 6 when a two-letter country is present).
+- Add unit tests you've already written (fr__POSIX and en__UNIX) to confirm the fix.
+
+This explains exactly where (lines 243–247), why (early return treating locale_str[3:5] as country even when it's the second underscore), and how to fix it (detect locale_str[3] == '_' and parse empty country + variant from index 4).

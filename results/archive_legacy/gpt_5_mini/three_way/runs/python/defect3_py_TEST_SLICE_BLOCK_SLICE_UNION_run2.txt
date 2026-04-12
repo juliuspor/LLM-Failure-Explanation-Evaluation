@@ -1,0 +1,48 @@
+What happened (what fails)
+- The IndexError comes from the bounds check at lines 35–36 where code_point_at (or the function that accesses code_units) does:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- That IndexError is triggered because the translator later tries to read a code unit at an index that no longer exists in code_units.
+
+Why it happens (root cause, with exact names & lines)
+- The code converts the Python string to UTF-16 code units (to_utf16_code_units → code_units).
+- When the translator sees a UTF-16 surrogate pair (a supplementary character, e.g. an emoji), code_point_at correctly returns the combined Unicode code point by reading two code units:
+  - lines 38–44: it reads high = code_units[index], checks for a high surrogate and a following low surrogate (index + 1 < len(code_units)), and returns the combined value.
+- But the translator's main loop (CsvEscaper.translate_string) only advances index by 1 after processing that code point. In other words, it treats a surrogate pair as one code unit for the code point calculation but only moves the loop index by one code unit.
+- Because the loop index is not advanced by 2 when a surrogate pair was consumed, the next iteration starts at the low surrogate instead of the next logical character. That leads to:
+  - either trying to read another low surrogate as if it were a standalone high surrogate (wrong)
+  - or, when the surrogate pair is at or near the end of the string, advancing incorrectly so a later lookup uses index == len(code_units), triggering the check at lines 35–36 and raising IndexError.
+
+Where it occurs
+- In CsvEscaper.translate_string (the main loop that iterates over code_units or indexes returned by code_point_at).
+- The safe/combined-reading logic is in code_point_at (lines 38–44), but the caller (translate_string) fails to update index correctly after seeing a supplementary code point.
+
+How to fix it (concrete steps you can apply)
+Option A — update translate_string to advance by the correct number of UTF-16 code units:
+1. After you call code_point_at and get a code point cp, determine whether it came from a surrogate pair:
+   - If cp > 0xFFFF, it came from two UTF-16 code units.
+2. Advance index by 2 for those, otherwise advance by 1.
+Example change in translate_string loop:
+- Replace index += 1
+- With:
+    if code_point > 0xFFFF:
+        index += 2
+    else:
+        index += 1
+
+Option B — change code_point_at to return both the code point and how many code units were consumed:
+1. Let code_point_at(index, code_units) return (code_point, consumed_units).
+2. In translate_string do:
+    code_point, consumed = code_point_at(index, code_units)
+    index += consumed
+
+Option C — avoid manual UTF-16 handling:
+- Work at Python's native code point level (iterate over the string directly). Python strings handle supplementary characters as single code points, so you won't need surrogate logic. This is the simplest fix if there is no strict reason to use UTF-16 code units.
+
+Why these fixes work
+- The logic in code_point_at already correctly recognizes surrogate pairs and returns the right combined code point (lines 38–44). The bug is only in index management in the caller: the loop must advance by the number of code units actually consumed. Fixing the index advancement prevents the loop from trying to read beyond len(code_units) and eliminates the IndexError at lines 35–36.
+
+Summary (short)
+- Root cause: translate_string advances index by 1 even when code_point_at consumed two UTF-16 code units for a surrogate pair.
+- Symptom: IndexError at the bounds check (lines 35–36) when a surrogate pair is followed by another character or at end-of-string.
+- Fix: make translate_string advance index by 2 for supplementary code points (or have code_point_at return consumed length, or iterate Python code points directly).

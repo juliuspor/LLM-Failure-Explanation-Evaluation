@@ -1,0 +1,61 @@
+What happened (what failed)
+- The IndexError is raised from code_point_at(...) when the code tries to read past the end of code_units. That check is at SLICE_BLOCK lines 35–36:
+  - 35 | if index < 0 or index >= len(code_units):
+  - 36 |     raise IndexError(f"String index out of range: {index}")
+- The immediate culprit is this loop in your code (from the snippet you showed):
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it fails (root cause)
+- translate_codepoint(...) returns a non-zero consumed value to tell the caller how many codepoints the translator handled.
+- Your loop then calls code_point_at(code_units, pos) to compute how many UTF-16 code units to advance (char_count result). But code_point_at may itself need to read a low surrogate at pos+1 when the codepoint is a surrogate pair.
+- If consumed > 0 and pos points to the final code unit (the last index), code_point_at(code_units, pos) tries to inspect pos+1 and raises IndexError because pos+1 == len(code_units) is out of bounds. That is exactly what the error message (index 2 out of range) indicates.
+- In short: you asked code_point_at to read a codepoint at a position where there is no next code unit available, because you rely on translate_codepoint to already have consumed the pair. The loop then redundantly attempts to inspect the same code units and steps past the array boundary.
+
+Where it happens (specific variables / lines)
+- Variable names: pos, length, code_units, consumed.
+- The failure occurs inside the for-loop:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+  code_point_at(...) performs a bounds check (line 35–36 of SLICE_BLOCK) and throws IndexError when pos+1 is accessed while pos is the last index.
+
+How to fix it (concrete, specific steps)
+You have two clear options. Pick the one that best matches what translate_codepoint is supposed to report.
+
+Option A — If translate_codepoint returns the number of UTF-16 code units consumed (1 or 2):
+- Replace the entire for-loop with:
+    pos += consumed
+- Why: consumed already tells you how many code_units were consumed, so you should advance pos by that number. This avoids calling code_point_at at the boundary.
+
+Option B — If translate_codepoint returns the number of codepoints consumed (not code units) and you must compute code units to advance:
+- Change the loop so it advances by single code units without calling code_point_at on a possibly incomplete surrogate pair. For example:
+    for _ in range(consumed):
+        # advance by one UTF-16 code unit
+        pos += 1
+- If you actually need to skip full codepoints (i.e., skip combined surrogate pairs correctly), compute the code unit count only when you know a full codepoint is available. A safe approach:
+    for _ in range(consumed):
+        if pos >= length:
+            break   # defensive: avoid reading past end
+        cp = code_point_at(code_units, pos)   # only call when pos and pos+1 are valid for surrogate
+        pos += char_count(cp)
+  But this requires ensuring code_point_at checks and handles an isolated trailing high surrogate in the input or that translate_codepoint never claims to consume such a codepoint.
+
+Recommended fix
+- Likely the simplest and most correct fix is Option A: treat consumed as the number of UTF-16 code units consumed by translate_codepoint and do pos += consumed. That matches your comment "they just took care of a surrogate pair" and avoids calling code_point_at at the array end.
+
+One-line replacement to make now (line numbers relative to your snippet):
+- Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with
+    pos += consumed
+
+Extra defensive improvement
+- Add an assertion or check after compute consumed to ensure pos + consumed <= length, and raise a clear error if translate_codepoint lied about consumption:
+    if pos + consumed > length:
+        raise ValueError("translate_codepoint reported consuming more code units than available")
+
+That will make future bugs visible with a clear message instead of an IndexError deep in code_point_at.

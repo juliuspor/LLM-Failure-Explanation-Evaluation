@@ -1,0 +1,36 @@
+What happened (where it failed)
+- The code raises ValueError at line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check fires before the code on lines 406/408 that adjusts minutes based on the hour sign:
+  406 |                 minutes_offset = hours_in_minutes - minutes_offset
+  408 |                 minutes_offset = hours_in_minutes + minutes_offset
+- Because the range check executes too early, a minutes value that the later logic expects to normalize is rejected immediately. In short: the method validated minutes (line 400) before the code that transforms minutes into the final offset (lines 406/408). The ValueError therefore occurs even when the later logic could have produced a valid result.
+
+Why it fails (root cause)
+- The minutes validation at line 400 assumes minutes must already be in final canonical range (0–59) and rejects any other value.
+- Later code (lines 406 and 408) intentionally modifies minutes_offset (for negative offsets or other normalization), so the initial check is placed at the wrong time. That makes the code reject inputs that would otherwise be fixed by the normalization step.
+- Concretely: an input that requires normalization of the minutes field (for example when minutes need to be subtracted from hours or when minutes carry into hours) is invalidated by the check before normalization runs.
+
+Exactly where to change it (steps to fix)
+1. Move the minutes-range validation so it runs after normalization:
+   - Remove or disable the check at line 400.
+   - Insert an equivalent validation after the code that sets minutes_offset at lines 406/408 and before you compute offset with:
+     offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+   - That ensures you validate the final minutes value, not the pre-normalized value.
+2. Alternatively, if you intend to allow minute values like 60 to carry into hours, explicitly handle that case before the check:
+   - If minutes_offset == hours_in_minutes (usually 60), increment the hours and set minutes_offset to 0, then perform the range check.
+3. Always keep one final validation immediately before computing millis (before the call to FieldUtils.safe_multiply) so malformed values cannot slip through.
+
+Minimal example patch (conceptual)
+- Delete or comment out lines 400–401.
+- After lines 406/408 and before line 409, add:
+    if minutes_offset < 0 or minutes_offset >= hours_in_minutes:
+        raise ValueError(f"Minutes out of range after normalization: {minutes_offset}")
+- Then continue to compute offset and call cls.for_offset_millis(offset).
+
+Why these fixes solve it
+- They let the normalization code (lines 406/408) run first, so minutes are converted to the canonical form the code expects.
+- They still enforce a valid final minute range before multiplying by DateTimeConstants.MILLIS_PER_MINUTE and returning cls.for_offset_millis(offset).
+
+If you want, tell me the method name that contains these lines and I can produce an exact diff to apply.

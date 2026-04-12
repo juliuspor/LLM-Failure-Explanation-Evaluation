@@ -1,0 +1,52 @@
+What happens
+- At line 346 the code executes the comparison if start < min_start.
+- On some call paths either start or min_start (or both) have never been set before that comparison.
+- When Python reaches the comparison it raises UnboundLocalError (local variable 'start' referenced before assignment or 'min_start' referenced before assignment). That is why the code fails.
+
+Where it happens (exact places in your slice)
+- start is assigned only inside the block that begins at line 331:
+  - line 331: if isinstance(period, SimpleTimePeriod):
+  - line 332 or 335: start = period.get_start_millis() (older API) or start = int(period.get_start().timestamp() * 1000) (newer API).
+  If that isinstance(...) test is False, start is not assigned.
+- min_start is assigned only inside the block that begins at line 342:
+  - line 342: if isinstance(min_start_period, SimpleTimePeriod):
+  - line 343 or 345: min_start = min_start_period.get_start_millis() or min_start = int(min_start_period.get_start().timestamp() * 1000)
+  If that isinstance(...) test is False, min_start is not assigned.
+- The code compares them at line 346: if start < min_start:
+  That comparison runs regardless of whether either assignment above happened.
+
+Why that causes the error
+- Python requires local variables to be assigned before use. If period is not a SimpleTimePeriod, start will not be created. If min_start_period is not a SimpleTimePeriod, min_start will not be created. Either missing name causes an UnboundLocalError when doing start < min_start.
+- The logic implicitly assumes both period and min_start_period are SimpleTimePeriod, but that assumption is not enforced. The code therefore has a missing initialization path.
+
+Concrete fixes (step‑by‑step)
+1. Decide the intended behavior when period or min_start_period are not SimpleTimePeriod. Two common choices:
+   - Convert other period types to a numeric start value in the same way (e.g., use .get_start().timestamp() * 1000) so start/min_start are always set.
+   - Or skip the comparison when either value is not available.
+
+2. Minimal safe change (skip comparison unless both values defined):
+   - Before line 346, add an explicit check that both values exist, for example:
+     if 'start' in locals() and 'min_start' in locals():
+         if start < min_start:
+             self._min_start_index = index
+   - This prevents the UnboundLocalError and keeps current behavior when both values exist.
+
+3. Better robust change (compute numeric values for all period types):
+   - Replace the type-specific assignments with functions that always return an integer millisecond start:
+     def _start_millis_of(period):
+         if isinstance(period, SimpleTimePeriod):
+             return period.get_start_millis()
+         else:
+             return int(period.get_start().timestamp() * 1000)
+   - Then call start = _start_millis_of(period) and min_start = _start_millis_of(min_start_period) so start and min_start are always defined before comparison.
+
+4. Also check the code at line 349:
+   - Currently there is an unconditional self._min_start_index = index at line 349 which will overwrite the update from inside the if at line 346. Confirm intended logic: if you only want to set _min_start_index when either you had no previous min or start < min_start, remove or change the unconditional assignment.
+
+Summary (what you need to change)
+- Ensure start is assigned on every path before using it (lines 331–335 and 346).
+- Ensure min_start is assigned on every path before using it (lines 342–345 and 346).
+- Or add an explicit guard before comparing (check locals() or the isinstance checks).
+- Review and fix the unconditional assignment at line 349 if it is not intended.
+
+This pinpoints exactly where the uninitialized variable use occurs (lines 331–346, 342–346, 346) and gives concrete code-level steps to prevent the UnboundLocalError.

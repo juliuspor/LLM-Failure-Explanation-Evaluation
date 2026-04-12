@@ -1,0 +1,56 @@
+What happened (root cause)
+- The code tries to ignore entries where search_list[i] or replacement_list[i] is None, but it still evaluates len(search_list[i]) (and/or calls text.find(search_list[i])) before that ignore check is guaranteed to run.
+- When search_list[i] is None, calling len(search_list[i]) raises TypeError ("object of type 'NoneType' has no len()"), and calling text.find(None, ...) also raises TypeError. Those calls occur around the block shown at lines 102–110, so the function crashes instead of skipping that entry.
+
+Where it occurs (precise lines)
+- Lines 102–105: the condition is intended to detect entries to skip:
+    no_more_matches_for_repl_index[i]
+    or search_list[i] is None
+    or len(search_list[i]) == 0
+    or replacement_list[i] is None
+  Because len(search_list[i]) is evaluated while search_list[i] may be None, a TypeError can occur here.
+- Line 108: temp_index = text.find(search_list[i], start)
+  If the guard failed to skip a None search_list entry, this call will raise TypeError because text.find(None, ...) is invalid.
+
+Why the guard failed
+- The guard mixes checks that are safe (search_list[i] is None) with a check that is unsafe when search_list[i] is None (len(search_list[i]) == 0). Python evaluates the right-hand parts of the condition only as needed, but because the unsafe check appears unprotected in the same boolean expression, len(None) can still be evaluated in some code paths and crash.
+- Also, even if the boolean expression were safely ordered, other places of the loop (for example the text.find call at line 108 and the later use of replacement_list[replace_index] at line 92) assume non-None values and will crash unless entries with None are explicitly skipped beforehand.
+
+Exact consequence
+- If either search_list[i] or replacement_list[i] is None, the code may try to call len(search_list[i]) or text.find(search_list[i], ...) or later use replacement_list[replace_index], causing TypeError exceptions and a crash instead of simply ignoring that replacement pair.
+
+Concrete steps to fix (clear, actionable)
+1. Do the cheap None checks first and skip immediately, before any len() or text.find() calls. For example:
+   - At the start of the per-index loop (the loop that examines i), add:
+     if no_more_matches_for_repl_index[i]:
+         continue
+     if search_list[i] is None or replacement_list[i] is None:
+         no_more_matches_for_repl_index[i] = True
+         continue
+     if len(search_list[i]) == 0:
+         no_more_matches_for_repl_index[i] = True
+         continue
+   This guarantees len() and text.find() run only on real strings.
+
+2. Guard the place where a replacement is appended (line 92). Before parts.append(replacement_list[replace_index]) ensure replacement_list[replace_index] is not None. If it can be None, decide a consistent behavior (skip or treat as empty string) and implement it:
+   - If skip: do not append and do not advance start using that index.
+   - If treat as empty replacement: append "".
+
+3. Audit every use of search_list[i] (len() and text.find()) and of replacement_list[i] so that None is never passed to len()/find() or appended. The simplest approach is to ensure entries with None are marked no_more_matches and never considered again (step 1).
+
+Minimal code example of the safe check around line 102:
+   if no_more_matches_for_repl_index[i]:
+       continue
+   if search_list[i] is None or replacement_list[i] is None:
+       no_more_matches_for_repl_index[i] = True
+       continue
+   if len(search_list[i]) == 0:
+       no_more_matches_for_repl_index[i] = True
+       continue
+   temp_index = text.find(search_list[i], start)
+   ...
+
+Why this fixes it
+- By checking for None before calling len() or text.find(), you avoid trying to run those operations on None and therefore avoid TypeError crashes. Marking that index as "no more matches" ensures later code (including append of replacement_list[replace_index]) never sees None.
+
+If you want, I can produce a patched version of the loop with these checks inserted at the exact line numbers you provided.

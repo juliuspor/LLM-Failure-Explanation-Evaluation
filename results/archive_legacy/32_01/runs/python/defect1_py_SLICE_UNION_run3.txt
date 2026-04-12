@@ -1,0 +1,37 @@
+What happened (where it fails)
+- The code validates the minutes part at line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  So minutes_offset is guaranteed to be 0..59 after that check.
+- Later (lines 406 and 408) the code modifies minutes_offset to hold a combined minutes value:
+  406:     minutes_offset = hours_in_minutes - minutes_offset
+  408:     minutes_offset = hours_in_minutes + minutes_offset
+- Then that same variable is passed to FieldUtils.safe_multiply at line 409:
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- If the sign handling or arithmetic is wrong, that leads to an incorrect total and triggers the "Offset is too large" ValueError at line 411.
+
+Root cause (why it fails)
+- The bug is reusing minutes_offset to store the total-minute offset instead of computing a new variable for the total. That reuse hides intent and produces wrong arithmetic when applying the sign of the hours.
+  - minutes_offset originally means "minutes part (0..59)". After the assignments at lines 406/408 it is overwritten with "total minutes" (hours*60 ± minutes).
+  - The subtraction/addition at lines 406/408 looks like it’s trying to apply a sign, but because minutes_offset was already validated as non-negative, the sign logic is fragile: the code conflates the sign of the hours with the sign of the minutes part and ends up producing an incorrect total that can be outside expected bounds.
+- Because the wrong value is passed to FieldUtils.safe_multiply, the code can produce a value considered too large and raise the ValueError at line 411. In short: incorrect variable reuse + incorrect sign application = wrong total offset, which triggers the later overflow/limit check.
+
+Exactly where to change it (concrete steps)
+1. Do not overwrite minutes_offset. Introduce a new variable total_minutes (or minutes_total) for the combined value.
+2. Apply the sign to the minutes part explicitly, using the sign of the hour portion (or an explicit sign variable), then compute total_minutes = hours_in_minutes ± minutes_offset.
+3. Pass total_minutes to FieldUtils.safe_multiply.
+
+Suggested patch (replace lines 406–409 with these lines)
+- Determine sign (example assumes you have an is_negative boolean or are checking hours < 0). Then:
+  if is_negative:
+      total_minutes = hours_in_minutes - minutes_offset
+  else:
+      total_minutes = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- Keeps the meaning of minutes_offset (0..59) intact for validation and clarity.
+- Explicitly computes a total value with the correct sign, avoiding accidental sign inversion or overflow caused by variable reuse.
+- Makes the code readable and prevents the incorrect value that triggers the "Offset is too large" check at line 411.
+
+If you want, paste the surrounding method (lines ~390–420) and I will produce an exact 1:1 replacement patch that compiles and preserves existing behavior while fixing this bug.

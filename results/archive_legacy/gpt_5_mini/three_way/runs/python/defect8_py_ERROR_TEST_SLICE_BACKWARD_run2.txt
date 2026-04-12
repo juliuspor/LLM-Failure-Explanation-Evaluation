@@ -1,0 +1,45 @@
+What happened (where and why)
+- Failure occurs inside LocaleUtils.to_locale at the checks around lines 237–240.
+- For the input "fr__POSIX" the code does:
+  - length = len(locale_str)
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - then it requires ch3 and ch4 to be uppercase letters (ch3 < 'A' or ch3 > 'Z' ...).
+- For "fr__POSIX", characters by index are:
+  - index 0: 'f', 1: 'r', 2: '_', 3: '_' (the second underscore), 4: 'P'...
+- The code therefore reads ch3 as '_' (not a capital letter) and fails the uppercase check, raising ValueError("Invalid locale format: fr__POSIX").
+
+Root cause
+- The method assumes that when a third character exists it must be the start of a two-letter country code (uppercase letters at locale_str[3] and locale_str[4]). It does not handle the legal Java-style format language__variant (an empty country with two underscores), where the underscore at index 3 is part of the empty country separator, not an uppercase letter. The check at lines 237–240 is too strict and runs before accounting for the empty-country case.
+
+Exactly where to change
+- The problematic code is at/around lines 237–240 (ch3 = locale_str[3]; ch4 = locale_str[4]; uppercase check).
+- You must detect the double-underscore empty-country pattern (locale_str[2] == '_' and locale_str[3] == '_') before validating ch3/ch4 as uppercase letters.
+
+Concrete fixes (clear steps)
+1. Before reading/validating ch3 and ch4, check for the empty-country pattern:
+   - if locale_str[2] == '_' and locale_str[3] == '_':
+       - treat country = "" and variant = locale_str[4:].
+       - skip the uppercase-country checks.
+2. Otherwise proceed with the existing behavior: read ch3 and ch4 and enforce they are uppercase letters for a two-letter country.
+3. Be careful with string length checks so you don't index past the end (ensure length >= 5 before accessing locale_str[4]).
+
+Alternative simpler approach
+- Split on underscore with a max of two splits and handle empty parts:
+  - parts = locale_str.split('_', 2)
+  - then:
+    - language = parts[0]
+    - country = parts[1] if len(parts) > 1 else ""
+    - variant = parts[2] if len(parts) > 2 else ""
+  - Validate cases (language lowercase, country uppercase when non-empty) and accept country == "" when parts[1] is empty (this handles "fr__POSIX" naturally).
+
+Minimal example patch (pseudo-Python)
+- Before the ch3/ch4 check add:
+  - if length >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+      country = ""
+      variant = locale_str[4:]
+      return Locale(language, country, variant)
+- Or replace the parsing with the split-based approach shown above.
+
+Why this fixes it
+- Detecting the double-underscore pattern avoids treating the second underscore as an expected uppercase country letter, so "fr__POSIX" becomes language="fr", country="", variant="POSIX", matching the intended behavior and the tests (Java behaviour: "fr__POSIX" → "fr", "", "POSIX").

@@ -1,0 +1,43 @@
+What happened (where): on lines 176–194 the code tests "if x == int(x) ..." and then does "value = int(x)". For x == -0.0 that test is true because -0.0 == 0.0 and int(-0.0) == 0. Converting -0.0 to an int (value == 0) loses the negative sign. Later you call self.add(str(value)) (line 192) which yields "0" instead of the expected "-0.0". The test failure (Expected -0.0, got 0) therefore comes from treating -0.0 as an ordinary integer zero and dropping the sign.
+
+Why it happens (root cause): floating-point negative zero compares equal to positive zero, so x == int(x) is true and int(x) is 0 for both 0.0 and -0.0. The code never checks for the sign of zero, so the sign bit is lost when you convert to int and format.
+
+Exact place to change: inside add_number, before you convert x to int or before you decide how to format the integer branch (i.e. before line 176 or immediately after line 176 but before line 177’s assignment), detect negative zero and handle it specially.
+
+Concrete fixes (pick one):
+
+1) Handle negative zero up-front (recommended — explicit, minimal change)
+- Add this check right after prev is computed (before the integer branch):
+  if x == 0.0 and math.copysign(1.0, x) < 0:
+      # keep the negative zero formatting your tests expect
+      self.add("-0.0")
+      return
+
+2) Preserve sign when value == 0
+- If you must keep the integer-path logic, detect sign when value == 0:
+  value = int(x)
+  if value == 0 and math.copysign(1.0, x) < 0:
+      self.add("-0.0")
+      return
+  # continue with existing integer formatting for non-zero values
+
+3) Use struct/bit-twiddling (less readable)
+- Inspect the sign bit using struct.pack/unpack if you prefer not to rely on copysign. Example:
+  sign = struct.unpack('!Q', struct.pack('!d', x))[0] >> 63
+  if x == 0.0 and sign:
+      self.add("-0.0"); return
+
+Suggested minimal patch (apply exactly at top of method, before the integer branch):
+
+    prev = self.get_last_char()
+    if x < 0 and prev == '-':
+        self.add(" ")
+
+    # Handle negative zero explicitly (fixes test expecting "-0.0")
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        self.add("-0.0")
+        return
+
+Then the rest of your code can remain unchanged.
+
+This fixes the failing test because it preserves the negative-zero sign before any int conversion can discard it.

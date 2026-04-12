@@ -1,0 +1,63 @@
+What happened (what failed)
+- The test calls ArrayUtils.add(None, None, expected_type=str).
+- Inside ArrayUtils.add the local variable inferred_type ends up being object because both the input array and the element are None (no runtime type information).
+- Lines 346–351 then treat that situation as an irrecoverable type mismatch:
+
+  346 |             if inferred_type == object and expected_type != object:
+  347 |                 raise TypeError(
+  348 |                     f"Cannot cast object list to {expected_type.__name__} list "
+  349 |                     f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  350 |                     f"[Ljava.lang.{expected_type.__name__};)"
+  351 |                 )
+
+- Because inferred_type == object and expected_type == str, the code raises TypeError (simulating Java's ClassCastException). That causes the test to fail even though the sensible Python result would be ["None"] (a list containing a None) or a list whose declared element type is str — there's nothing to cast at runtime in Python and returning [None] is valid.
+
+Why this is the root cause (why it happens)
+- inferred_type becomes object when the method cannot determine a more specific type (both array and element are None).
+- The code incorrectly treats "unknown / object" as an incompatible type when an expected_type is supplied. In the null/null case there is no real incompatibility — you can create a list of the expected_type and place None in it, or in dynamic Python semantics simply return [None].
+- The check is overly strict: it raises whenever inferred_type is object and expected_type is not object, rather than interpreting object-as-unknown and allowing construction of a list of the expected type (or at least allowing None elements).
+
+Where exactly (line numbers and variables)
+- Variable: inferred_type (computed earlier in ArrayUtils.add).
+- Variable: expected_type (the optional argument passed by the caller).
+- Failure occurs at lines 346–351 in the slice you provided, where the code raises TypeError when inferred_type == object and expected_type != object.
+
+Concrete fixes (specific steps and code suggestions)
+Option A — Treat object as "unknown" and use expected_type
+- Replace the raise with assigning inferred_type = expected_type when inferred_type is object and an expected_type was provided. That will let the method create a list with the expected element type.
+
+Example change (replace lines 346–351):
+
+  if inferred_type == object and expected_type != object:
+      # treat object as unknown: prefer the caller's expected_type
+      inferred_type = expected_type
+
+Option B — Only raise on a real incompatibility between concrete types
+- Change the condition to raise only when inferred_type is concrete and not compatible with expected_type (for example, not issubclass(inferred_type, expected_type) in a typed setting), and do not raise just because inferred_type == object.
+
+Example change:
+
+  if inferred_type is not object and expected_type is not object:
+      if not issubclass(inferred_type, expected_type) and not issubclass(expected_type, inferred_type):
+          raise TypeError(...)
+
+Option C — Special-case None element(s)
+- If both array and element are None, simply return a list of one None (or create list of expected_type) instead of raising.
+
+Example:
+
+  if array is None and element is None:
+      return [None]  # or construct typed list if necessary
+
+Which to pick
+- Option A is the simplest and matches the intent of the caller: when the code cannot infer a type, prefer the caller's expected_type.
+- Option B is more conservative: raises only for real incompatible concrete types.
+- Option C is minimal and fixes only the null/null test case.
+
+Tests to run after fix
+- test_add_null_to_null_with_expected_type should now succeed: ArrayUtils.add(None, None, expected_type=str) returns [None].
+- All other existing tests (adding to None array, adding elements to existing arrays, add_at_index, etc.) should be re-run to ensure no regressions.
+
+Summary
+- The code raised on lines 346–351 because it treated inferred_type == object (unknown) as incompatible with a provided expected_type (str).
+- The correct behavior is to treat object as "unknown" and accept the expected_type (or at least not raise in the null/null case). Replace the raise with logic that prefers expected_type or only raises on actual incompatible concrete types.

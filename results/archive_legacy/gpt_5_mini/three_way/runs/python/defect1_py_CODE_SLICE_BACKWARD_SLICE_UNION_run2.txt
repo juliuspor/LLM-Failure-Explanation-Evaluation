@@ -1,0 +1,30 @@
+What goes wrong
+- Root cause: an integer overflow happens while computing the millisecond offset because the code does the minute→millisecond multiplication using an int-width intermediate. That overflow is raised inside FieldUtils.safe_multiply on line 405 (offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)), which then makes the method fail with the "Offset is too large" ValueError from the except block (line 407).
+- Where it occurs: the problem is introduced when the code builds the total minute offset into the same int variable minutes_offset (lines 402–404) and then multiplies that int by DateTimeConstants.MILLIS_PER_MINUTE on line 405.
+- Why it happens: minutes_offset is treated as a 32-bit int in the FieldUtils.safe_multiply call. When the total minutes are large enough that minutes * MILLIS_PER_MINUTE exceeds the int range, FieldUtils.safe_multiply detects overflow and raises ArithmeticError which the method catches and converts to ValueError("Offset is too large").
+
+Concrete example (shows how overflow can happen in an int-based environment)
+- Suppose the platform or FieldUtils uses 32-bit signed ints internally for the multiplication check. Even if your input validation restricts hours_offset to -23..23 and minutes_offset to 0..59, if other callers use larger values (or if minutes_offset was accidentally mutated earlier) the multiplication can overflow. The overflow is triggered at the multiply step (line 405), not at the minutes range check (line 396–397).
+
+What to change (step-by-step fixes)
+1. Stop reusing the parameter minutes_offset for the accumulated value. Introduce a new local variable totalMinutes to hold the combined value:
+   - compute hours_in_minutes = hours_offset * 60 (line 401)
+   - if hours_in_minutes < 0: totalMinutes = hours_in_minutes - minutes_offset (line 402)
+     else: totalMinutes = hours_in_minutes + minutes_offset (line 404)
+2. Perform the minutes→milliseconds conversion with a 64-bit/long-aware safe multiply or by converting to a long/BigInteger before multiplying, so intermediate does not overflow:
+   - offset = FieldUtils.safe_multiply((long) totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - or use a safe add/multiply API that accepts long and checks overflow correctly.
+3. Keep the original minutes_offset unchanged if you need it later; use totalMinutes for calculations.
+4. If FieldUtils.safe_multiply only accepts ints, replace it with a method that accepts longs or do the overflow check yourself using long arithmetic before casting to the target type.
+
+Why these steps fix it
+- Using a separate totalMinutes avoids accidental reuse/mutation of the input parameter (clarifies intent).
+- Using 64-bit arithmetic for the multiplication prevents the overflow that triggers the ArithmeticError inside FieldUtils.safe_multiply.
+
+References to code lines
+- Input validation that still runs: minutes range check at lines 396–397.
+- Combining minutes and hours into one value: lines 401–405.
+- Overflow detection point: line 405 (FieldUtils.safe_multiply(...)).
+- Error handling that exposes the symptom: line 407 (raise ValueError("Offset is too large")).
+
+If you want, I can produce the corrected code snippet that uses totalMinutes and performs the multiplication in 64-bit-safe fashion.

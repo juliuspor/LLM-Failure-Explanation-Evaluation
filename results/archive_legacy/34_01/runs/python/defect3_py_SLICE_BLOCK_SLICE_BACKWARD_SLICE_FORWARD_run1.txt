@@ -1,0 +1,47 @@
+What happens
+- At lines 35–36 you raise IndexError when index is out of range of code_units:
+  - 35: if index < 0 or index >= len(code_units):
+  - 36:     raise IndexError(f"String index out of range: {index}")
+- Later (lines 38–44) the code assumes code_units contains UTF‑16 16‑bit code units and tries to read a low surrogate at index+1:
+  - 38: high = code_units[index]
+  - 39–41: if high is a high surrogate and index+1 < len(code_units): low = code_units[index + 1]
+  - 43: return combined code point for a surrogate pair
+
+Why it fails (root cause)
+- to_utf16_code_units(s: str) is producing the wrong kind of list in code_units. Instead of a list of UTF‑16 16‑bit code units (values in 0x0000..0xFFFF, with surrogate pairs split into two entries), it produces entries that are full Unicode code points (ord(c)). For characters above U+FFFF that should be represented by two 16‑bit code units, your code_units ends up with a single integer > 0xFFFF.
+- As a result:
+  - len(code_units) is smaller than the number of UTF‑16 code units the rest of the logic expects, so index checks (line 35) can fail incorrectly (IndexError), or later code that looks for a low surrogate at index+1 finds there is no following 16‑bit unit to read.
+  - The subsequent surrogate logic (lines 38–44) expects two 16‑bit units (high and low). Because code_units contains single full code points instead, you either hit the index check (line 35) or skip the surrogate handling and return a wrong value.
+
+Where it occurred
+- The mismatch occurs inside to_utf16_code_units (lines shown in the backward slice). The check and the surrogate-handling code (lines 35–44) operate on the list returned by to_utf16_code_units, but that function is not actually producing UTF‑16 code units.
+
+How to fix (step-by-step, concrete)
+Choose one of the two correct ways to produce UTF‑16 code units:
+
+Option A — use Python encoding to generate 16‑bit units:
+1. Encode the string to UTF‑16 little endian bytes (no BOM):
+   - data = s.encode('utf-16-le')
+2. Turn bytes into 16‑bit integers in order:
+   - code_units = [data[i] | (data[i+1] << 8) for i in range(0, len(data), 2)]
+3. Now code_units is a list of 0x0000..0xFFFF values where surrogate pairs are two consecutive entries.
+4. Keep the existing index check (lines 35–36) and surrogate handling (38–44).
+
+Option B — construct surrogate pairs manually from code points:
+1. Iterate over code points: for cp in (ord(c) for c in s):
+2. If cp <= 0xFFFF: append cp
+3. Else (cp > 0xFFFF): compute high and low surrogates and append both:
+   - cp -= 0x10000
+   - high = 0xD800 + (cp >> 10)
+   - low = 0xDC00 + (cp & 0x3FF)
+   - append high, append low
+4. Resulting code_units matches UTF‑16 16‑bit layout expected by the rest of the code.
+
+Summary of concrete code (Option A example)
+- Replace the body of to_utf16_code_units with:
+  - data = s.encode('utf-16-le')
+  - code_units = [data[i] | (data[i+1] << 8) for i in range(0, len(data), 2)]
+This yields the 16‑bit units that lines 35–44 expect and prevents the IndexError caused by missing low-surrogate entries.
+
+Why these fixes work
+- They ensure code_units contains 16‑bit units (0x0000..0xFFFF), so len(code_units) and index+1 checks are meaningful and surrogate-pair detection at lines 39–43 works correctly.

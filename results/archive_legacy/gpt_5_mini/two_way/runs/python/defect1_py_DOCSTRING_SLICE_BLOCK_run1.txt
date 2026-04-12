@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The check at lines 396–397 rejects any negative minutes:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That causes a ValueError whenever minutes_offset is negative, even though the docstring explicitly allows negative minutes in some combinations (for example (0, -15) and (-2, -15) are valid in the doc).
+- So a call like make_zone(0, -15) or make_zone(-2, -15) will fail at line 396 with "Minutes out of range: -15", which contradicts the documented behavior.
+
+Why it fails (root cause)
+- The condition is too strict: it forbids any negative minutes. The doc requires minutes to be between -59 and +59 (inclusive). The code only enforces 0..59.
+- Beyond that, the allowed sign combinations are context-sensitive:
+  - hours > 0: minutes must be >= 0 (positive hours with negative minutes is invalid).
+  - hours == 0: minutes may be positive, zero, or negative (minute sign determines overall sign).
+  - hours < 0: minutes may be positive, zero, or negative (both (-2,15) and (-2,-15) should result in -02:15).
+- The current check enforces neither the documented range nor the sign rules.
+
+How to fix it (exact changes to make)
+1. Replace the range check at lines 396–397 with an absolute-value range check:
+   - Change:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - To:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Add a sign-consistency check immediately after that to enforce the documented rule that positive hours cannot have negative minutes:
+   - Add:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Negative minutes not allowed when hours_offset is positive")
+
+3. (Optional but recommended) Keep the existing overall-offset limit check you already have (you mention raising if resulting offset exceeds +/- 23:59:59.000). Compute total seconds using signed combination (e.g., total_minutes = hours_offset * 60 + (minutes_offset if hours_offset >= 0 else -abs(minutes_offset) ?)). More explicitly, build the signed total like:
+   - If hours_offset > 0: total_minutes = hours_offset * 60 + minutes_offset
+   - If hours_offset < 0: total_minutes = hours_offset * 60 - abs(minutes_offset)  (or simply total_minutes = hours_offset*60 - math.copysign(minutes))
+   - If hours_offset == 0: total_minutes = minutes_offset
+   - Then check abs(total_minutes) <= 23*60 + 59 (and any seconds precision as required).
+
+Reproduction example
+- Failing call:
+  - make_zone(0, -15) -> raises ValueError at line 396 ("Minutes out of range: -15")
+- After the fix above, make_zone(0, -15) and make_zone(-2, -15) will be accepted, while make_zone(2, -15) will correctly raise a ValueError.
+
+Why this explanation is certain
+- The docstring explicitly lists allowed minute ranges and sign combinations. The code at lines 396–397 contradicts that docstring by disallowing negative minutes unconditionally; changing that check and adding the sign rule aligns implementation with documentation.

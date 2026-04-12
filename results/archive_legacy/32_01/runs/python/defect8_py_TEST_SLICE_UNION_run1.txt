@@ -1,0 +1,47 @@
+What happened (what failed)
+- When calling LocaleUtils.to_locale('fr__POSIX') the method tries to read locale_str[3] at line 242. That raises an IndexError because the code is inside a branch guarded by the wrong length test, so the string positions being accessed do not actually exist for the branch taken.
+
+Where it happened (exact places)
+- Method: to_locale (line 193)
+- Length computed: line 227
+- Wrong branch check: line 236 — "if length == 2:"
+- Out-of-range indexing: line 242 — "ch3 = locale_str[3]" (also line 243 accesses locale_str[4])
+
+Why it happened (root cause)
+- The branch condition at line 236 is incorrect. The code uses "if length == 2:" but immediately inside that branch it assumes the string is much longer (accesses indices 3 and 4, slices 3:5, checks locale_str[5], etc.). That mismatch means the code takes a branch intended for longer strings only when length equals 2, so indexing blows up for any other length. In short: the conditional is inverted/wrong, so the parser tries to read characters that aren't there.
+
+How to fix it (explicit steps)
+1. Replace the incorrect condition at line 236 with correct branching that reflects the actual formats you want to accept. For example:
+   - if length == 2: return Locale(language=locale_str[0:2])  # just language
+   - elif length == 5: validate and return Locale(language, country)  # language_country
+   - elif length > 5: validate and return Locale(language, country, variant)
+2. Concretely, change the single "if length == 2:" at line 236 to something like:
+   - if length == 2:
+         return Locale(locale_str[0:2])
+     elif length == 5:
+         ch3 = locale_str[3]; ch4 = locale_str[4]; ...  # keep existing checks/slices
+     else:  # length > 5
+         ...  # keep existing checks for underscore at [5] and slice variant from [6:]
+3. Add explicit bounds checks before any indexing (as insurance): verify length before accessing locale_str[3], locale_str[4], locale_str[5].
+
+Minimal corrected fragment (replace the block starting at line 236):
+- if length == 2:
+      return Locale(locale_str[0:2])
+  elif length == 5:
+      ch3 = locale_str[3]
+      ch4 = locale_str[4]
+      if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+          raise ValueError(...)
+      return Locale(locale_str[0:2], locale_str[3:5])
+  elif length > 5:
+      if locale_str[5] != '_':
+          raise ValueError(...)
+      return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+  else:
+      raise ValueError(...)
+
+Test to run after fix
+- Run your failing test again:
+  result = LocaleUtils.to_locale('fr__POSIX'); assert result == Locale('fr', '', 'POSIX')
+
+This will remove the IndexError (it was caused by indexing into positions that don't exist because of the incorrect "if length == 2" condition) and allow the parser to follow the intended branches.

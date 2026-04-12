@@ -1,0 +1,59 @@
+What goes wrong
+- The bug is in add_number(), in the block that strips trailing zeros from an integer value:
+  - value = int(x)
+  - mantissa = value
+  - while mantissa % 10 == 0:
+      check_val = (mantissa // 10) * (10 ** (exp + 1))
+      ...
+- That code treats mantissa as if dividing by 10 repeatedly will give the next digit-group (as it does for positive integers). For negative integers, Python’s // and % do floor division / modulo, not truncation toward zero. That changes results for negative numbers and breaks the check_val comparison and the loop logic.
+- Consequences:
+  - The loop produces wrong mantissa/exp for negative values (or may exit early), so you can end up with wrong output like "-1E3" for -1000 or otherwise incorrect canonicalization.
+  - The wrong mantissa makes the later formatting (self.add(str(mantissa) + "E" + str(exp))) produce incorrect numeric text.
+
+Where it happens in the code
+- add_number(): the failing lines are the int(x)/mantissa initialization and the while loop that uses mantissa % 10 and mantissa // 10.
+- The check that tries to verify the division result uses (mantissa // 10) * (10 ** (exp + 1)) and compares to value; that comparison is invalid once mantissa is negative because // rounds down.
+
+How to reproduce quickly
+- Call add_number with x = -1000.0:
+  - value = int(x) => -1000
+  - mantissa loop yields mantissa = -1 and exp = 3 (because of floor // behavior), so you get "-1E3" instead of "-1000" or "-1E3" with sign handled differently than intended.
+- Call with other negative round numbers and observe wrong mantissa/exp.
+
+Concrete fix (step-by-step)
+1. Separate sign from magnitude before trimming zeros. Work with the positive magnitude so // and % behave as intended:
+   - sign = "-" if value < 0 else ""
+   - mag = abs(value)
+2. Run the zero-stripping loop on mag (a non-negative int):
+   - while mag % 10 == 0:
+       next_mag = mag // 10
+       if next_mag * (10 ** (exp + 1)) == mag * (10 ** exp)  # or compare next_mag * 10**(exp+1) to value_mag
+           mag = next_mag
+           exp += 1
+       else: break
+   (simpler: repeatedly divide mag by 10 while mag % 10 == 0, increment exp)
+3. Format using the sign and the positive mantissa:
+   - if exp > 2: self.add(sign + str(mag) + "E" + str(exp))
+     else: self.add(sign + str(value))  (or sign + str(mag * (10**exp)) if you stored mag/exp)
+4. Replace the existing mantissa/value loop with the above.
+
+Minimal code change example
+- Replace:
+    mantissa = value
+    ...
+- With:
+    sign = "-" if value < 0 else ""
+    mag = abs(value)
+    exp = 0
+    if mag >= 100:
+        while mag % 10 == 0:
+            mag //= 10
+            exp += 1
+    if exp > 2:
+        self.add(sign + str(mag) + "E" + str(exp))
+    else:
+        self.add(str(value))
+(Adjust check logic if you relied on the previous check_val guard; with mag derived from abs(value) the plain loop is sufficient.)
+
+Why this fix works
+- By using abs(value) you avoid floor-division artifacts for negatives. % and // behave in the usual decimal-digit sense on non-negative integers, so trimming trailing zeros and reconstructing exponent/mantissa works correctly, and you can reapply the sign cleanly at the end.

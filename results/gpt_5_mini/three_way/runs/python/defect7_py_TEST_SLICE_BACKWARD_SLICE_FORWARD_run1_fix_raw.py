@@ -1,0 +1,20 @@
+@classmethod
+def to_class(cls, array: Optional[List[Any]]) -> Optional[List[Type]]:
+    if array is None:
+        return None
+    elif len(array) == 0:
+        return ArrayUtils.EMPTY_CLASS_ARRAY.copy()
+
+    classes: List[Type] = []
+    for i in range(len(array)):
+        item = array[i]
+        if item is None:
+            classes.append(type(None))
+            continue
+        # Only call string-specific methods if it's actually a string
+        if isinstance(item, str):
+            # original code called .upper() for no clear reason; skip modifying
+            classes.append(type(item))
+        else:
+            classes.append(type(item))
+    return classes

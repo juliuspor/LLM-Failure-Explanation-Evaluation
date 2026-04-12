@@ -1,0 +1,52 @@
+What happens
+- The bug is in the branch that handles a negative hour offset (lines you showed: 402–405).
+- For negative hours the code does:
+  minutes_offset = hours_in_minutes - minutes_offset    (line 402)
+  then multiplies minutes_offset by MILLIS_PER_MINUTE (line 405).
+
+Why that is wrong (concrete example)
+- Suppose hours_offset = -2 and minutes_offset = -15 (the doc says (-2, -15) should produce -02:15, i.e. -135 minutes).
+- hours_in_minutes = hours_offset * 60 = -120.
+- The code computes minutes_offset = -120 - (-15) = -105 (wrong). It then produces an offset of -105 minutes instead of -135 minutes.
+- So the code gives the wrong total minutes whenever hours_offset is negative and minutes_offset is negative (and also mishandles the sign semantics required by the doc).
+
+Root cause
+- When hours are negative the implementation intended to combine the hour magnitude with the minutes magnitude, effectively treating the minutes as additional negative minutes regardless of the minutes parameter sign. The code tries to implement that by subtracting minutes_offset, but it fails to take the absolute value of minutes_offset. Subtracting a negative minutes_offset adds instead of subtracting.
+- Additionally, the code mutates minutes_offset for use as the total minutes which makes the intent harder to follow and increases the chance of error.
+- There is also no explicit check to reject the invalid case (hours positive with minutes negative) that the doc requires.
+
+Exactly where to change and how (step-by-step)
+1. Stop reusing minutes_offset as the total-minute variable. Introduce a new variable name like total_minutes.
+2. For the negative-hour case, subtract the absolute value of the minutes: total_minutes = hours_in_minutes - abs(minutes_offset).
+3. For the non-negative-hour case, add minutes normally: total_minutes = hours_in_minutes + minutes_offset.
+4. Add the validation required by the doc: if hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes must be non-negative when hours are positive").
+5. Then compute offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE).
+
+Concrete replacement (pseudo-code showing exact lines to change)
+- Replace the block
+
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+with
+
+    hours_in_minutes = hours_offset * 60
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours are positive")
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - abs(minutes_offset)   # combine magnitudes for negative hours
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- Using abs(minutes_offset) when hours are negative implements the intended semantics from the doc: negative hours always produce a negative offset whose minutes magnitude is added to the hour magnitude.
+- Using a separate total_minutes variable avoids confusing reuse of minutes_offset.
+- Adding the explicit validation enforces the forbidden combination described in the doc (positive hour with negative minutes).
+
+Where the failure occurred in your trace
+- The incorrect computation happens at line 402 (minutes_offset = hours_in_minutes - minutes_offset) and propagates through line 405 (multiplication), producing an incorrect offset returned at line 408.

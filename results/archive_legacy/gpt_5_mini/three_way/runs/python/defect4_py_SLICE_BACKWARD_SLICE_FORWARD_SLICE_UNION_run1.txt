@@ -1,0 +1,40 @@
+What happened (root cause)
+- At lines 341–346 the code only defines min_start when min_start_period is a SimpleTimePeriod (line 342–345). If min_start_period is not a SimpleTimePeriod, min_start is never assigned.
+- Immediately after that (line 346) the code does if start < min_start: which uses min_start even though it may not exist. That raises an UnboundLocalError / NameError at runtime. The error occurs exactly at the comparison on line 346 when min_start was not set.
+- Separately, line 349 unconditionally sets self._min_start_index = index, which defeats the purpose of the conditional update performed at lines 346–347 (it always overwrites the index regardless of the comparison). This is a logic bug that would mask the intended behavior even if the NameError were fixed.
+
+Where it occurs
+- NameError happens between lines 341 and 346 when min_start_period is not a SimpleTimePeriod and the code reaches line 346.
+- The logic bug (always overwrite) occurs at line 349.
+
+Why it happened
+- The code assumes min_start will always be available after the isinstance(min_start_period, SimpleTimePeriod) check, but there is no fallback or default min_start for other period types.
+- The unconditional assignment at line 349 looks like a mistaken unindented line or leftover from editing; it overrides the conditional update.
+
+Concrete fixes (step-by-step)
+1. Ensure min_start is always defined before it is used:
+   - Option A (preferred): compute a comparable start for every period type (same way you compute start for the incoming period). For example, if other period types have get_start() -> datetime, use the same int(period.get_start().timestamp() * 1000) approach. Place that computation so min_start is always set.
+   - Option B: if you only want to compare when the stored period is a SimpleTimePeriod, move the comparison inside that block:
+     - Indent lines 346–347 under the isinstance(min_start_period, SimpleTimePeriod) block so min_start is only referenced when it was set.
+   - Option C: initialize min_start to a safe default (e.g., +infinity or a very large int) before the if, but only use this if that default semantics is correct for your logic.
+
+   Example (fix by moving comparison inside block):
+   - Lines 341–346 become:
+     if isinstance(min_start_period, SimpleTimePeriod):
+         min_start = min_start_period.get_start_millis()
+         min_start = int(min_start_period.get_start().timestamp() * 1000)
+         if start < min_start:
+             self._min_start_index = index
+
+2. Remove the unconditional overwrite at line 349 unless it was intended:
+   - Delete line 349, or ensure it is inside an else that reflects the intended logic. If you intended to set _min_start_index when there was no previous min (i.e., when _min_start_index < 0), do that explicitly:
+     if self._min_start_index >= 0:
+         ...compare and maybe update...
+     else:
+         self._min_start_index = index
+
+Summary of exact edits to make
+- Ensure min_start is defined before use (either by computing it for all period types or moving the comparison inside the block that sets it). Reference: lines 341–346.
+- Remove or re-indent line 349 so you do not always overwrite self._min_start_index. Reference: line 349.
+
+Those two changes will stop the NameError at line 346 and restore the intended conditional update of self._min_start_index.

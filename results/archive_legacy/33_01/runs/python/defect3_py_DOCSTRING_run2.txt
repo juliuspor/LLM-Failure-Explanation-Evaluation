@@ -1,0 +1,59 @@
+I can’t point to an exact line number because you didn’t paste the implementation, but here are the concrete, non‑jargony reasons this routine typically fails and exactly how to find and fix each one. I’ll reference the variable and method names you gave (input_seq, out) plus the obvious helper the implementation almost certainly uses (an append call and the class’s abstract translator method).
+
+1) Most likely root cause — out is None and the code calls out.append
+- What happens: the function’s docstring says “Raises: ValueError: if out is None”, but the implementation usually forgets to check out and immediately uses it. The first time the code tries to write to the output list it will call out.append(some_code_unit). If out is None that throws:
+  AttributeError: 'NoneType' object has no attribute 'append'
+- Where it occurs: at the line that appends to out. Look for a line like:
+  out.append(code_unit)
+  — that is the exact line that will raise when out is None.
+- Why it happened: the function promised to raise ValueError when out is None but didn’t enforce that precondition, so None propagates and causes the AttributeError later.
+- How to confirm: add a quick assertion at the top of the method and run the failing case:
+  if out is None:
+      raise ValueError("out must be a list, got None")
+  Or just reproduce the error by calling the method with out=None and a simple input_seq and note the AttributeError trace pointing to out.append(...).
+
+Fix (step-by-step)
+1. Open the method and find the first use of out (search for “out.append”).
+2. Immediately before that (or at the top of the method) add:
+   if out is None:
+       raise ValueError("out must be provided and must be a list")
+3. Optionally validate type:
+   if not isinstance(out, list):
+       raise TypeError("out must be a list, got %r" % type(out).__name__)
+4. Re-run tests. The error should change from AttributeError to the intended ValueError, or disappear if callers pass a proper list.
+
+2) Alternative plausible cause — the method calls an abstract helper which isn’t implemented in the subclass
+- What happens: the docstring says the algorithm is tightly coupled with “the abstract method of this class.” Typical pattern is the final method delegates per-code-unit work to an abstract method such as _translate_code_unit or translate_unit. If the subclass didn’t override that abstract method, you will see either:
+  - At instantiation: TypeError: Can't instantiate abstract class X with abstract methods _translate_code_unit (if using abc.ABC and @abstractmethod), or
+  - At runtime: NotImplementedError or another exception thrown when the base implementation runs (if the abstract method raises NotImplementedError).
+- Where it occurs: look for a line that calls the abstract helper, e.g.:
+  code_unit = self._translate_code_unit(ch, state)
+  or
+  self.translate_unit(ch, out)
+  The exception trace will point exactly to that call.
+- Why it happened: the concrete subclass didn’t implement the abstract helper the final method expects, so there’s no valid implementation to perform the translation.
+- How to confirm: check the class definition for abstract methods (look for @abstractmethod or methods that just raise NotImplementedError). Search for calls to self.<method name> inside this translator. Try instantiating the subclass and see whether Python raises a TypeError at instantiation.
+
+Fix (step-by-step)
+1. Find the abstract helper name by searching the final method for self.something(...) — common names: _translate_unit, translate_code_unit, translate_char.
+2. In the subclass that should provide behavior, implement that method with the expected signature. Example:
+   def _translate_code_unit(self, ch, state):
+       # concrete behavior here — return code unit or append to out as contract requires
+3. If the intent was to allow no subclass override, change the base class to provide a concrete implementation or remove @abstractmethod.
+4. Run tests and validate the translator now completes without hitting NotImplementedError or TypeError.
+
+3) Less likely but possible — input_seq is not a str or is mutated while iterating
+- What happens: if input_seq is None or an object that doesn’t support indexing/iteration as the implementation expects, you will see TypeError or AttributeError at the first attempt to index or call len(input_seq). The failing line will look like:
+  for ch in input_seq:
+  or
+  ch = input_seq[i]
+- Fix: validate input_seq at the top:
+  if not isinstance(input_seq, str):
+      raise TypeError("input_seq must be a str, got %r" % type(input_seq).__name__)
+
+Summary of exact places to check in your code
+- The first line that uses out (search for out.append(...)). Add the ValueError check just before it.
+- Any call to an abstract helper via self.<method>(...) inside this translate method — ensure the subclass implements that method or provide a base implementation.
+- The first line that iterates over or indexes input_seq (for ch in input_seq or input_seq[i]) — validate input_seq type if needed.
+
+If you paste the method body (or the short traceback showing the failing line and exception), I’ll point to the precise line number and show the exact minimal change to fix it.

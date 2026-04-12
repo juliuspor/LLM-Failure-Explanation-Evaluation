@@ -1,0 +1,52 @@
+What happens
+- The algorithm that builds the total offset in minutes reuses and mutates minutes_offset and uses the wrong sign when hours are negative.
+- As written, at line 406 the code does:
+  minutes_offset = hours_in_minutes - minutes_offset
+  and at line 408:
+  minutes_offset = hours_in_minutes + minutes_offset
+  That turns a negative minutes parameter into an addition (because subtracting a negative adds) and so produces the wrong magnitude/sign for some combinations. The wrong total_minutes is then multiplied by MILLIS_PER_MINUTE (line 409) and used to produce the zone, so the produced zone is incorrect.
+
+Where it fails (concrete example)
+- For inputs (-2, -15) the doc says the result should be -02:15 (i.e. -135 minutes).
+- With the existing code:
+  hours_in_minutes = -2 * 60 = -120
+  then line 406 executes: minutes_offset = hours_in_minutes - minutes_offset = -120 - (-15) = -105
+  The code ends up with -105 minutes (i.e. -01:45) instead of -135 minutes. So the zone is wrong.
+
+Why this is the root cause
+- The code treats the sign of minutes incorrectly when hours are negative: subtracting a negative minutes_offset produces the wrong total. The author appears to have intended to combine hours and minutes according to the sign rules, but mixing the two variables and using subtraction on a possibly-negative minutes_offset flips the sign and reduces the magnitude when both are negative.
+
+Exactly where to change (lines from the snippet)
+- Replace the logic at/around lines 406–409. Do not overwrite minutes_offset with intermediate results using +/- on a possibly-negative minutes_offset. Compute a clear total_minutes value using explicit sign handling.
+
+Suggested fix (clear, step-by-step)
+1. Validate inputs (keep any existing range checks and the rule "positive hours + negative minutes -> ValueError").
+2. Compute total_minutes explicitly depending on the sign of hours_offset:
+   - If hours_offset > 0:
+       total_minutes = hours_offset * 60 + minutes_offset
+     (minutes_offset must be >= 0 by validation)
+   - Else if hours_offset < 0:
+       total_minutes = hours_offset * 60 - abs(minutes_offset)
+     (this ensures both (-2, 15) and (-2, -15) become -120 - 15 = -135)
+   - Else (hours_offset == 0):
+       total_minutes = minutes_offset
+     (zero hour uses the sign of minutes, per doc)
+3. Multiply total_minutes by DateTimeConstants.MILLIS_PER_MINUTE:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Proceed with any overflow check and return cls.for_offset_millis(offset).
+
+Minimal example replacement code (pseudo-Python to insert around lines 406–409)
+  if hours_offset > 0:
+      total_minutes = hours_offset * 60 + minutes_offset
+  elif hours_offset < 0:
+      total_minutes = hours_offset * 60 - abs(minutes_offset)
+  else:  # hours_offset == 0
+      total_minutes = minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The fix uses explicit sign handling and absolute value where appropriate, so minutes always shift the total in the correct direction. It prevents subtracting a negative minutes_offset (the source of the flipped sign and wrong magnitude). It matches the sign rules described in your docstring and will produce -02:15 for (-2, -15).
+
+Other notes
+- Keep the existing checks that reject combinations the doc says are invalid (e.g., positive hours with negative minutes).
+- After making this change, add unit tests for boundary cases: (2,15), (2,0), (0,15), (0,-15), (-2,15), (-2,0), (-2,-15) and for invalid inputs to ensure behavior matches the docstring.

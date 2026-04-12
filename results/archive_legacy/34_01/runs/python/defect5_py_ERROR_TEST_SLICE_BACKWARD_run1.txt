@@ -1,0 +1,44 @@
+What happened (root cause)
+- In ArrayUtils.add(None, None, expected_type=str) both the existing array and the new element are None, so the code falls into the branch that sets inferred_type = object on line 340.
+- Later, at lines 346–347 the code checks:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  Because inferred_type is object and expected_type is str, that check fires and a TypeError is raised.
+- The underlying low-level failure reported (ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;) is caused by attempting to treat an Object[] as a String[] when the routine tries to create or cast arrays. The method decided it had only object-typed elements (because everything was None) but the caller asked for str, so the code refuses rather than create a String[] containing None.
+
+Where it happened (exact lines / variables)
+- Line 340: inferred_type = object — this is set when the code cannot derive a concrete element type from the inputs (both are None here).
+- Lines 346–347: the guard that raises TypeError when the code thinks it has only object elements but the caller requested another expected_type.
+- The failing call: ArrayUtils.add(None, None, expected_type=str) — result is expected to be [None] but fails because inferred_type==object while expected_type==str.
+
+Why the logic is wrong for this input
+- When both array and element are None there is no real element to inspect. The code treats that as "object" and then refuses to produce an array of the requested expected_type, instead raising an error (and later attempting an unsafe cast which gives the ClassCastException).
+- In plain terms: the routine treats a lack of type information as a conflicting type (object vs str) and refuses to build a str[] with values that are only None.
+
+Concrete fixes (step-by-step)
+1. Prefer expected_type when there is no concrete element type:
+   - Change line 340 from:
+       inferred_type = object
+     to:
+       inferred_type = expected_type if expected_type is not None else object
+   - This uses the caller's requested type when nothing else is known.
+
+2. Allow None-only arrays to be created for the requested expected_type:
+   - Replace the strict check at lines 346–347 with logic that permits inferred_type == object when all known elements are None:
+       if inferred_type == object and expected_type not in (object, None):
+           # only allow if we have at least one concrete element that conflicts
+           if any(element is not None for element in source_elements):
+               raise TypeError(...)
+   - If source_elements (the existing array plus the new element) contain only None, proceed to create an array of expected_type and insert None(s).
+
+3. Ensure array creation uses expected_type when safe:
+   - When building the new array, explicitly create an array of expected_type (e.g., new_array = Array.new_instance(expected_type, new_length)) rather than creating an Object[] and casting.
+
+Minimal patch summary
+- Line 340: inferred_type = expected_type or object
+- Lines 346–347: only raise TypeError if there is a real type conflict (i.e., at least one non-None element whose type != expected_type)
+
+Why these fixes work
+- They stop treating missing type information (all-None inputs) as a type conflict. If a caller requests str and all elements are None, it is valid to return a str[] containing None. Creating an array of the requested expected_type avoids the Object[] -> String[] cast error that produced the ClassCastException.
+
+If you want, I can produce a concrete code diff for the exact lines shown.

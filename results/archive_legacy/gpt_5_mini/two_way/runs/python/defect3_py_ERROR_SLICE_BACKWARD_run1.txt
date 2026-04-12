@@ -1,0 +1,43 @@
+What happened (exact place and symptom)
+- The failure comes from the bounds check at lines 35–36:
+  - Line 35: if index < 0 or index >= len(code_units):
+  - Line 36:     raise IndexError(f"String index out of range: {index}")
+- The code raised IndexError for index == 2 because the check decided that 2 is not a valid index into code_units.
+
+Why it happened (root cause)
+- The variable index is being validated against len(code_units) (the number of UTF‑16 code units produced by to_utf16_code_units), but index was produced/meant as a different kind of index (most likely a character index in the original Python string s, or an index intended to be allowed as a slice end).
+- That mismatch causes legitimate indexes (from the caller's point of view) to fail the check against the wrong length:
+  - If index is a character index (0..len(s)-1) but code_units has a different length because some characters expand into two UTF‑16 code units (surrogate pairs), comparing index to len(code_units) will be incorrect.
+  - If index is intended to be an allowable slice end (equal to length), the strict >= test rejects index == len(code_units) even though that is usually valid for slice endpoints.
+
+Concrete example to make this visible
+- Suppose s = "a😊" where "😊" is a non‑BMP character. len(s) == 2 (two Python characters), but to_utf16_code_units(s) will produce three UTF‑16 code units [0x0061, 0xD83D, 0xDE0A] so len(code_units) == 3.
+- If the caller computed index as a character count or as an endpoint and passed index == 2, the code may either accept or reject depending on which length is used. The current check is using code_units length incorrectly for the caller's index type; that mismatch produced the IndexError you saw.
+
+What to change (clear, actionable fixes)
+1. Decide whether index is:
+   - a character index into the original Python string s, or
+   - an index into the UTF‑16 code_units list, or
+   - an inclusive/exclusive slice endpoint.
+2. Fix the validation accordingly:
+   - If index is a character index (counts Python characters): validate against len(s):
+     - change line 35 to: if index < 0 or index >= len(s):
+   - If index is supposed to index UTF‑16 code units: leave the len(code_units) check, but ensure the caller provides a UTF‑16 code unit index (convert caller’s character index to UTF‑16 index first).
+     - To convert, iterate s and count 1 or 2 code units per character (surrogate pair). Example conversion code:
+       - utf16_index = 0
+       - for i, ch in enumerate(s):
+           if i == char_index: break
+           utf16_index += 1 if code point <= 0xFFFF else 2
+   - If index is allowed to be the string length as an endpoint (exclusive end): use > instead of >=:
+     - change line 35 to: if index < 0 or index > len(code_units):
+3. Add a comment and a unit test:
+   - Comment at or above the check describing what kind of index is expected (character index vs UTF‑16 unit index vs endpoint).
+   - Add tests for strings containing BMP and non‑BMP characters (e.g., "a", "😊", "a😊b") and test index values 0, len(s)-1, len(s), and corresponding UTF‑16 unit indices.
+
+Where to apply the fix (specific lines)
+- Edit the check at line 35. Replace the condition with one of the three concrete alternatives above depending on the intended index meaning.
+- If you choose to accept character indexes, also make sure any code that later accesses code_units converts that character index into a code_unit index before indexing code_units.
+
+Summary
+- Root cause: index and len(code_units) measure different things; the code checks index against the wrong length (line 35), so valid caller indexes were rejected.
+- Fix by making index type and validation consistent: either validate against len(s), convert index to a UTF‑16 code‑unit index before checking, or allow index == len(...) if it’s meant to be an endpoint. Add tests to cover surrogate pairs.

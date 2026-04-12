@@ -1,0 +1,54 @@
+What happened (root cause)
+- At line 177 the code does value = int(x). For x == -0.0, int(-0.0) yields 0 and the negative sign is lost.
+- Later the code uses value (and calls str(value) at line 192 in some branches) to build the output. Because value is 0 (no sign), the consumer prints "0" instead of preserving the negative-zero sign "-0.0".
+- Concretely: the sign is discarded by the int() conversion before the code ever checks for negative zero, so the output becomes "0" (matching the failing test).
+
+Where it happens (lines)
+- Line 177: value = int(x) — this is the point where -0.0 becomes 0.
+- Line 182–192: logic that formats integers and large numbers uses value and mantissa (which are already unsigned 0), and at line 192/194 the code adds string forms derived from value or x; because value lost the sign earlier, branches that use value produce "0".
+- The test failure shows exactly that: expected "-0.0" but got "0".
+
+Why this is wrong
+- Negative zero is a distinct IEEE floating point value that can be significant for code generators. Converting to int() removes the sign bit and so you can no longer tell the caller requested negative zero.
+- The code assumes int(x) is a safe way to detect integral floats, but for -0.0 it is not safe for preserving sign.
+
+Concrete fixes (ordered, pick one)
+
+1) Fast, local fix — check negative zero first
+- Immediately after getting x (before line 177), check for negative zero and handle it explicitly:
+
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+- This preserves the sign and avoids performing int(x) at all for this special case.
+
+2) Use sign-aware detection later
+- If you prefer to keep the current structure, detect negative zero right before you would use value/str(value), and branch to output "-0.0" there.
+
+3) Use formatting that preserves sign without int conversion
+- Avoid converting to int for the purpose of printing when you need to preserve sign. Use a format that keeps the sign for -0.0, for example:
+
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+    elif float(x).is_integer():
+        # safe to call int(x) now for integer magnitude
+        self.add(str(int(x)))
+    else:
+        self.add(str(x))
+
+Implementation notes
+- Use the provided utility CodeConsumer.is_negative_zero(x) (the tests use it) so you do not reimplement sign tests.
+- Do not rely on int(x) to preserve sign for zero; int(-0.0) == 0 and loses sign.
+- Place the negative-zero check before any int() conversion or any logic that derives formatting from integer value/ mantissa.
+
+Minimal patch example (pseudo-edit around line 176–178)
+- Insert before line 177:
+
+    # Preserve negative-zero sign before any integer conversion
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+Result
+- With this check in place, add_number(-0.0) will produce "-0.0" and the failing test will pass.

@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The ValueError is raised at the minutes check on lines 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means the method received a minutes_offset value outside 0..59 and immediately threw the error.
+
+Why it fails (root cause)
+- The method requires minutes_offset to be in the range 0..59 regardless of whether hours_offset is positive or negative, but many callers supply a negative minutes value when the overall offset is negative (for example hours_offset = -1 and minutes_offset = -30 to mean -1:30). When callers pass a negative minutes_offset the check at lines 400–401 rejects it and you get the ValueError.
+- The code’s later logic assumes minutes_offset is non-negative and applies the sign only via hours_offset (it computes hours_in_minutes and then subtracts minutes for negative hours). This mismatch between the API’s expected sign convention and what some callers provide is the immediate cause.
+- A secondary issue that makes this error easy to miss: the method reassigns minutes_offset later (minutes_offset = hours_in_minutes - minutes_offset or + minutes_offset). Reusing the parameter name for the combined minutes value is confusing and makes it easy to miss the requirement that the input minutes must be non-negative.
+
+Concrete evidence in your code
+- Validation that fails: lines 400–401 (the check and raise).
+- The sign-handling code later (after the try:) assumes the input minutes_offset is the magnitude 0..59 and applies sign using hours_offset:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+
+How to fix it (clear actionable steps)
+Pick one of these fixes depending on the intended API behavior:
+
+Option A — Keep API: minutes_offset must be 0..59 (preferred if that’s the design)
+1. Document clearly in the method docstring that minutes_offset is always non-negative (0..59) and its sign comes only from hours_offset.
+2. Make the code less confusing by introducing a new variable for the total minutes instead of reusing minutes_offset:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Keep the existing validation at lines 400–401.
+
+Option B — Accept signed minutes (if you want callers to be able to pass negative minutes)
+1. Change the validation to allow minutes in the range -59..59:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(...)
+2. Compute total_minutes by combining hours and minutes with a clear rule (e.g., total_minutes = hours_offset * 60 + minutes_offset), and check consistency (for example ensure sign of minutes_offset matches hours_offset or else normalize).
+3. Use a new variable for the total, not reuse minutes_offset:
+    total_minutes = hours_offset * 60 + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Additional small cleanups (recommended)
+- Don’t overwrite the input parameter minutes_offset; assign the combined value to total_minutes to avoid confusion.
+- Add examples in the docstring showing correct inputs: for_offset_hours_minutes(-1, 30) means -1:30 (if using Option A), or for_offset_hours_minutes(-1, -30) if you adopt Option B.
+
+Summary
+The method fails because callers are passing a negative minutes_offset but the code explicitly rejects negative minutes (line 400–401). Fix by either documenting/ enforcing that minutes must be 0..59 and keeping sign in hours_offset, or change validation and computation to accept signed minutes and compute total_minutes explicitly. Also stop reusing the parameter name minutes_offset for the combined value to avoid confusion.

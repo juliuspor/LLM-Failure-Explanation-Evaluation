@@ -1,0 +1,57 @@
+What happened (where it failed)
+- The test fed the string "fr__POSIX" into to_locale(locale_str).
+- At line 237 the code does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+- For "fr__POSIX" those are ch3 == '_' and ch4 == 'P'.
+- The check at lines 239–240 is:
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+- Because ch3 is '_' (not an uppercase letter), the condition is true and the method raises ValueError("Invalid locale format: fr__POSIX").
+
+Why that is the root cause (clear, concrete)
+- The code assumes the pattern after the initial two-letter language is always "_CC" where CC is two uppercase letters (country). That is what lines 237–243 check.
+- "fr__POSIX" uses the pattern language + underscore + empty country + underscore + variant (language__variant). This is a valid locale form in many systems (the country is omitted but a variant is present).
+- The parser does not allow an empty country field. It treats the '_' at index 3 as an invalid country letter and immediately raises the ValueError at line 240.
+
+Where to change it and how to fix it (step-by-step)
+1. Replace the fragile fixed-index checks (lines 237–247) with parsing that understands three forms:
+   - "ll" (language only)
+   - "ll_CC" (language + country)
+   - "ll__VARIANT" (language + empty country + variant)
+   - "ll_CC_VARIANT" (language + country + variant)
+2. Use split with a maximum of 2 splits so you correctly distinguish empty country from missing country:
+   - parts = locale_str.split('_', 2)
+3. Validate parts[0] (language) is length 2 and alphabetic; validate country (if present and non-empty) is length 2 and alphabetic; accept variant as any non-empty string.
+4. Construct and return the Locale accordingly.
+
+Minimal example replacement for lines 237–247 (conceptual)
+- parts = locale_str.split('_', 2)
+- if len(parts[0]) != 2 or not parts[0].isalpha():
+    raise ValueError(...)
+- if len(parts) == 1:
+    return Locale(parts[0])
+- if len(parts) == 2:
+    # could be "ll_CC" or "ll__VAR" where parts[1] may start with '_' only if split called with limit 2,
+    # but using split('_',2) the empty country case becomes parts = ['fr', '', 'POSIX'] (len == 3).
+    if parts[1] == '':
+        raise ValueError(...)   # if you get here unexpectedly
+    if len(parts[1]) == 2 and parts[1].isalpha():
+        return Locale(parts[0], parts[1])
+    else:
+        # treat parts[1] as variant if that's the intended format
+        return Locale(parts[0], variant=parts[1])
+- if len(parts) == 3:
+    # parts == ['ll', 'CC_or_empty', 'VAR']
+    if parts[1] == '':
+        return Locale(parts[0], variant=parts[2])        # handles "fr__POSIX"
+    if len(parts[1]) == 2 and parts[1].isalpha():
+        return Locale(parts[0], parts[1], parts[2])     # handles "fr_FR_POSIX"
+    raise ValueError(...)
+
+Why this fix works
+- It explicitly recognizes the empty country case (parts[1] == '') and builds a Locale(language, variant).
+- It avoids unsafe fixed-index indexing (locale_str[3], locale_str[4]) that assumes the country is always present and two uppercase letters.
+- It makes the parser robust to "fr__POSIX" and other common locale patterns.
+
+If you want, I can provide the exact code replacement for to_locale with line numbers adjusted to drop the ValueError for "fr__POSIX".

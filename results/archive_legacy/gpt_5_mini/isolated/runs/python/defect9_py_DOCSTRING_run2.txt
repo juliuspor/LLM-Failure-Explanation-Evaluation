@@ -1,0 +1,54 @@
+I can’t see your exact source file, but the behavior you describe (crash when replacement_list contains None/null even though that pair should be ignored) is a single clear root cause and is easy to reproduce and fix.
+
+What happened (root cause)
+- The method that performs the replacements (commonly named replaceEach or replaceAll in StringUtils-style code) loops over the search_list and replacement_list in parallel. Typical local names in that routine are text, searchList, replacementList, i, search, replacement.
+- The code already checks whether searchList[i] is null and skips that entry, but it does NOT check whether replacementList[i] is null.
+- Later in the same iteration the code calls a String method on replacementList[i] (for example replacementList[i].length(), replacementList[i].equals(...), replacementList[i].startsWith(...), or uses it in a StringBuilder.append(replacementList[i])).
+- If replacementList[i] is null, that method call throws a NullPointerException (or a Python TypeError if this is Python and code does e.g. replacement_list[i].replace(...)). That is why the routine crashes even though the intended behavior was to ignore that pair.
+
+Where it occurs (typical location)
+- Inside replaceEach(text, searchList, replacementList, ...) at the loop that iterates i from 0 to searchList.length-1 (or the equivalent for/while). The crash happens on the line that dereferences replacementList[i]. Example problematic lines you will find in the loop:
+  - replacement = replacementList[i];
+  - if (replacement.length() == 0) ...   // NPE if replacement == null
+  - buf.append(replacement);             // NPE if replacement == null
+
+Why the code behaves this way (why the check is missing)
+- The programmer only added a defensive null-check for searchList[i] (so a null search term is skipped) but forgot to add the same defensive check for replacementList[i]. The logic therefore still assumes replacementList contains non-null strings for every non-null search string.
+
+How to reproduce quickly
+- Call replaceEach("hello", new String[] {"x"}, new String[] {null}) (Java example). The method will iterate i=0, see that searchList[0] != null and proceed, then try to use replacementList[0] and raise NPE.
+- Add an entry where searchList[i] is non-null but replacementList[i] is null; the routine will crash.
+
+Exactly what to change (concrete fix steps)
+1. In the replaceEach method, find the loop that iterates i over searchList (example around:
+   for (int i = 0; i < searchList.length; i++) { ... }).
+2. Where the code currently retrieves replacementList[i], add a null check and treat null as “ignore this pair” (skip this i) or explicitly treat null as a desired replacement (empty string) depending on intended semantics. Concretely:
+   - Option A (skip null replacements): if (replacementList == null || replacementList.length <= i || replacementList[i] == null) { continue; }
+   - Option B (treat null as empty string): String replacement = replacementList[i] == null ? "" : replacementList[i];
+3. Ensure you guard every usage of replacement (length(), append(), equals(), etc.) with the new check/normalization so you never dereference null.
+4. Add/update unit tests:
+   - testReplaceEach_skipsNullReplacement: assert replaceEach("a", new String[] {"a"}, new String[] {null}) returns "a" (if skipping) or ""/expected (if null->empty).
+   - testReplaceEach_handlesNullSearchAndNullReplacement: asserts mixed nulls are handled without exception.
+
+Example patch sketch (Java-style) — insert near the top of the loop:
+   String search = searchList[i];
+   // skip null search terms
+   if (search == null) {
+       continue;
+   }
+   String replacement = (replacementList == null || replacementList.length <= i) ? null : replacementList[i];
+   // skip pairs where replacement is null (if that is intended)
+   if (replacement == null) {
+       continue;
+   }
+   // existing logic that uses 'replacement' safely from here on
+
+Notes on which choice to make
+- If the documented behavior says “replacements that are null should be ignored,” use Option A (skip).
+- If the documented behavior says “a null replacement means delete the search string,” then treat null as "" and use Option B.
+- Make the chosen behavior explicit in the method Javadoc and add tests so future changes do not regress.
+
+Why this explanation is definitive
+- The crash only occurs when replacement_list entries are null and only when the code dereferences replacementList[i]. The fix is a single targeted null-check/normalization at the point of retrieval, not a large refactor. Adding that check eliminates the NPE and aligns behavior with the intended “ignore null replacements” contract.
+
+If you paste the exact replaceEach implementation (file and lines), I can point to the exact line number to change and provide a ready-to-apply patch.

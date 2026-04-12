@@ -1,0 +1,48 @@
+What went wrong (root cause)
+- translate_codepoint(...) returns a count that represents UTF-16 code units consumed for the handled input (i.e. 1 for a BMP char, 2 for a surrogate pair). The caller code in translate(...) treats that return value inconsistently and ends up advancing pos too far.
+- Specifically, after consumed > 0 the code does:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+  (this is in translate, just after the call to translate_codepoint)
+
+  That loop multiplies the advancement. If consumed == 2 (a surrogate pair), the loop runs twice. Each iteration calls code_point_at(code_units, pos). When pos points at the high surrogate, code_point_at returns the combined supplementary codepoint and char_count(...) returns 2, so each iteration adds 2 to pos -> total pos += 4. That overruns the code_units buffer and later calls to code_point_at raise IndexError("String index out of range") (see the guard at line 35 in your slice). In short: you double-count surrogate code units and advance pos past the end.
+
+Where it happens (lines referenced from your slices)
+- In translate(): the for-loop that updates pos after a nonzero consumed (the lines shown directly above your slice union).
+- In code_point_at() (slice_forward lines 38–44), code_point_at combines a high+low surrogate into a single codepoint. The IndexError check is at line 35 (slice_union) and the return of the combined code point is at line 43. The IndexError you see is caused by pos being advanced too far by the loop in translate().
+
+Why it fails (concise)
+- translate_codepoint reports units consumed (1 or 2).
+- The loop treats that number as a number of codepoints to iterate and inside each iteration advances pos by char_count(code_point_at(...)), which itself returns 2 for a surrogate pair.
+- For a surrogate pair, consumed==2 -> loop runs twice -> each iteration adds 2 -> pos increases by 4 instead of the intended 2 -> out-of-range access / IndexError.
+
+Two concrete fixes (pick one):
+
+Fix A — treat consumed as UTF-16 code units (simplest)
+- Replace the whole for-loop by a single increment:
+    pos += consumed
+- Rationale: translate_codepoint already told you how many UTF-16 code units it consumed; just advance pos by that many units.
+
+Fix B — change translate_codepoint to return number of codepoints (if you prefer working in codepoints)
+- Make translate_codepoint return how many codepoints it consumed (1 for a BMP char or 1 for a surrogate pair, not 2).
+- Then keep the loop but run it consumed times and advance pos by char_count(code_point_at(code_units, pos)) once per codepoint. That will increment pos by 1 or 2 properly.
+- Or simpler in this variant: run the loop for consumed codepoints but in each iteration read the codepoint once and add char_count for that codepoint.
+
+Example change for Fix A (direct)
+- Replace these lines:
+
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+  with:
+
+    pos += consumed
+
+Why I prefer Fix A
+- It matches the current translate_codepoint behavior (it already handled surrogate pairs and told you how many UTF-16 units it consumed). It's minimal and removes the double-counting bug.
+
+What to check after fixing
+- Verify the semantic contract of translate_codepoint: does it indeed return count of UTF-16 code units? If you change that contract, update all callers.
+- Run tests containing supplementary Unicode characters (codepoints > U+FFFF) to ensure pos moves correctly and no IndexError occurs.

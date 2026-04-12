@@ -1,0 +1,62 @@
+What happened
+- The code that combines hours and minutes uses the same variable name minutes_offset for two different roles and applies the wrong sign when hours are negative.
+- As a result, when you call DateTimeZone.for_offset_hours_minutes(0, -15) or (-2, -15) the math produces an out-of-range minute total and triggers the ValueError.
+
+Where it occurs
+- The problematic lines are in the slice you provided:
+  - Line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404: minutes_offset = hours_in_minutes + minutes_offset
+  - Line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because minutes_offset is reused, the code mixes up the original minutes argument and the computed hours_in_minutes. That yields the wrong total minutes before converting to milliseconds.
+
+Example showing the bug
+- Suppose hours = -2 and minutes = -15.
+  - hours_in_minutes = hours * 60 = -120
+  - If minutes_offset initially holds -15, then line 402 computes minutes_offset = hours_in_minutes - minutes_offset = -120 - (-15) = -105
+  - -105 is outside the expected per-component range handling and later validation raises ValueError (message shows the original minute value or is constructed from the bad state), hence "Minutes out of range: -15".
+- The intent was to compute a total offset of -(2 hours + 15 minutes) = -135 minutes (-> -8,100,000 ms), but the subtraction/in-place reuse produced -105 instead of -135 (and then the code’s further checks treat that as invalid).
+
+Why this is wrong
+- minutes_offset is used both as the input minutes and as the accumulator for total minutes; that conflation causes incorrect sign handling.
+- The code does not explicitly handle sign combination (hours negative with minutes negative) in a clear, predictable way before combining into total minutes.
+- The correct behavior should:
+  - validate that minutes is between -59 and +59,
+  - choose whether to add or subtract minutes from hours based on the intended sign rules (e.g., if hours < 0, minutes should increase the magnitude of the negative offset),
+  - compute total_minutes in a dedicated variable and then multiply by millis per minute.
+
+Precise fix (step-by-step)
+1. Do an early validation: ensure minutes is within -59..59. If not, raise ValueError with the minutes value.
+2. Don’t reuse minutes_offset. Use separate variables:
+   - hours_in_minutes = hours * 60
+   - minutes_abs = abs(minutes)
+3. Apply the correct sign logic explicitly. For example, if the intended rule is that a negative hour makes the whole offset negative (so (-2, 15) and (-2, -15) both mean -02:15):
+   - if hours < 0:
+       total_minutes = hours_in_minutes - minutes_abs
+     else:
+       total_minutes = hours_in_minutes + minutes_abs
+   (This uses minutes_abs so you are adding the magnitude of minutes; adjust if you prefer a different sign rule.)
+4. Convert to milliseconds:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+5. Pass offset to cls.for_offset_millis(offset)
+
+Concrete replacement for the three lines you showed (replace lines 402–405):
+
+    # validate minutes first: must be in -59..59
+    if minutes < -59 or minutes > 59:
+        raise ValueError("Minutes out of range: %d" % (minutes,))
+
+    hours_in_minutes = hours * 60
+    minutes_abs = abs(minutes)
+    if hours < 0:
+        total_minutes = hours_in_minutes - minutes_abs
+    else:
+        total_minutes = hours_in_minutes + minutes_abs
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this will fix it
+- It avoids reusing minutes_offset for two different things.
+- It makes the sign handling explicit and reproducible.
+- It validates minutes before combining, so messages like "Minutes out of range: -15" will only appear if the input truly is out of the allowed -59..59 range.
+
+If you want, tell me the exact lines around where hours_in_minutes and minutes_offset are defined and I can compose a precise diff/patch for you.

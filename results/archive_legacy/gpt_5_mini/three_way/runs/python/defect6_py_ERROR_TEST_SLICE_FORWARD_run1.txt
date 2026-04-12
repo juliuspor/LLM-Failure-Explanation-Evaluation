@@ -1,0 +1,47 @@
+What happened (root cause)
+- At line 177 you do value = int(x). For x == -0.0 this produces value == 0 and loses the sign bit.
+- Later the code chooses the integer branch and calls self.add(str(value)) (line 192). str(0) -> "0", so the negative sign on -0.0 is lost and the output becomes "0".
+- The branch that would have preserved the literal text (self.add(str(x)) at line 194) is not taken because the code treats -0.0 as an integer value and goes into the integer branch first.
+- In short: converting to int and emitting str(value) discards the negative zero sign before you check or preserve it.
+
+Where it occurs (specific names/lines)
+- value is assigned at line 177: value = int(x)
+- the integer output path emits the integer form at line 192: self.add(str(value))
+- the fallback that would have emitted "-0.0" (if you used str(x)) is at line 194: self.add(str(x))
+- There is an is_negative_zero utility in CodeConsumer (tested in TestNegativeZeroUtility) but the integer branch never uses it.
+
+Why this matters
+- IEEE-754 negative zero is distinct from positive zero for some uses (and your tests explicitly require preserving "-0.0").
+- Converting to int before emitting loses that distinction, so tests expecting "-0.0" fail with "0".
+
+Concrete, actionable fixes (step-by-step)
+1. Detect negative zero before you convert to an int:
+   - Add a check immediately after you get x (before line 177): if CodeConsumer.is_negative_zero(x): self.add("-0.0"); return
+   - This ensures -0.0 is emitted exactly as required and you exit before losing the sign.
+
+2. Or, adjust the integer-branch emission to preserve sign for zero:
+   - Replace the emission at line 192 with:
+     if value == 0 and CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+     else:
+         self.add(str(value))
+   - This keeps the rest of the integer logic intact but handles the zero-with-sign case.
+
+3. (Optional) If you prefer fewer early returns: compute a helper boolean at the top:
+     neg_zero = CodeConsumer.is_negative_zero(x)
+   then use neg_zero in whatever branch emits a zero.
+
+Minimal example patch for option 2 (referencing your lines)
+- Change around line 192 from:
+     self.add(str(value))
+  to:
+     if value == 0 and CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+     else:
+         self.add(str(value))
+
+Why these fixes work
+- They avoid converting -0.0 into a signless int before you decide what to print, or they specially handle the value==0 case using the is_negative_zero test so the sign is preserved in output.
+
+Extra note
+- Do not rely on str(x) alone for all cases, because your other branches (scientific notation, mantissa adjustments) intentionally use ints and stringified ints for compact output. The targeted checks above preserve the negative-zero semantics without changing those other behaviors.

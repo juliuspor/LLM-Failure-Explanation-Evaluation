@@ -1,0 +1,58 @@
+What happened (where it fails)
+- The method validates minutes_offset at the start with this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That raises the ValueError you see ("Minutes out of range: -15") because the test passed minutes_offset == -15.
+- The code that intends to combine hours and minutes into a single minute count runs later (lines shown in the slice):
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  But this combination code never runs because the earlier validation already rejected a negative minutes_offset.
+
+Why this is the root cause (why the check and the combination conflict)
+- The initial validation forces minutes_offset to be non-negative (0..59).
+- The later logic expects it to be allowed to be negative or at least expects to apply a sign when hours_offset is negative (it tries to subtract minutes for negative hour offsets).
+- The test that failed passed minutes_offset = -15, so the early validation contradicts the later usage and the test's expectations. In short: the method rejects negative minutes before it gets a chance to combine them with hours, so you get the immediate ValueError.
+
+How to fix it (clear, specific code changes)
+Option A — minutes_offset is allowed to be signed (recommended if callers may pass negative minutes):
+1. Change the validation to allow signed minutes in range -59..59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute combined minutes explicitly into a new variable (don't overwrite minutes_offset) to make the intent clear:
+   hours_in_minutes = hours_offset * 60
+   if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+   else:
+       total_minutes = hours_in_minutes + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Return cls.for_offset_millis(offset)
+
+Option B — minutes_offset must be non-negative (enforce callers pass positive minutes):
+1. Keep the existing validation (0..59).
+2. Fix the combination logic so negative hour offsets consume positive minutes correctly, but do not accept negative minutes from callers:
+   hours_in_minutes = hours_offset * 60
+   if hours_offset < 0:
+       total_minutes = hours_in_minutes - minutes_offset   # subtract caller-supplied positive minutes
+   else:
+       total_minutes = hours_in_minutes + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Document that minutes_offset must be 0..59 and callers must pass positive minutes for negative offsets.
+
+Minimal patch example for Option A (apply at the top of the method and use total_minutes variable):
+- Replace the minutes check with:
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Replace the combination block with:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      total_minutes = hours_in_minutes - minutes_offset
+  else:
+      total_minutes = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary
+- The ValueError occurs because minutes_offset is validated as non-negative before the code that would accept or combine a negative minutes offset runs. Fix by deciding whether minutes_offset should be signed or unsigned, then update the validation and the combination logic accordingly (and use a separate total_minutes variable to avoid confusion).

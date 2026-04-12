@@ -1,0 +1,67 @@
+What happened (root cause)
+- translate_codepoint(...) returned a positive integer in variable consumed.
+- The code then runs this loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- That loop calls code_point_at(code_units, pos). code_point_at immediately does high = code_units[index] (see slice lines 38–39).
+- If pos is already equal to len(code_units), code_units[pos] raises IndexError: "String index out of range".
+- In other words, pos can be advanced past the end (or the loop runs more iterations than there are code units left), and the next call to code_point_at attempts to read code_units[pos] when pos == len(code_units), causing the exception.
+
+Why this happened (mismatch in units/counting)
+- The code is mixing two different counts:
+  - translate_codepoint returned consumed, but it is ambiguous whether consumed means "UTF-16 code units" or "code points".
+  - The for loop treats consumed as a number of code points to iterate over, and inside it uses char_count(code_point_at(...)) to compute how many code units to advance for each code point.
+- If consumed is already the number of code units consumed (1 or 2 for a surrogate pair), doing the loop and additionally advancing by char_count(...) double-counts and overshoots pos.
+- If consumed is the number of code points consumed, the loop can still run into an index error if the translator claimed more code points than are actually available in code_units (and there's no bounds check before calling code_point_at).
+
+Exactly where it failed (lines/variables)
+- The failure occurs in code_point_at at the line that executes high = code_units[index] (slice lines 38–39). The index passed in there is pos from the outer code.
+- The outer code where the bad access originates is the for pt in range(consumed) loop inside translate(...) (the loop that does pos += char_count(code_point_at(code_units, pos))).
+
+Concrete fixes (pick one, with exact steps)
+
+Fix A — If translate_codepoint returns number of UTF-16 code units consumed:
+1. Change the for-loop to a single advance by consumed code units:
+   Replace
+     for pt in range(consumed):
+         pos += char_count(code_point_at(code_units, pos))
+   with
+     pos += consumed
+2. This avoids calling code_point_at and prevents double-counting/overshoot.
+
+Fix B — If translate_codepoint returns number of code points consumed (N):
+1. Verify (or enforce) that N never claims more code points than remain:
+   if pos >= length:
+       break   # or raise an error
+2. Accumulate actual code units consumed for N code points with bounds checks:
+     advanced = 0
+     for pt in range(consumed):
+         if pos + advanced >= length:
+             raise ValueError("translate_codepoint claimed too many code points")
+         cp = code_point_at(code_units, pos + advanced)
+         advanced += char_count(cp)
+     pos += advanced
+3. This ensures code_point_at is never called with index >= len(code_units).
+
+Fix C — Make the contract explicit and assert it
+1. Decide and document what translate_codepoint must return:
+   - "number of UTF-16 code units consumed" OR
+   - "number of code points consumed"
+2. Add an assert or check immediately after consumed is returned:
+     if consumed < 0:
+         raise ValueError("translate_codepoint returned negative")
+     if consumed == 0:
+         ... (existing handling)
+     if pos + consumed > length and <expected interpretation>:
+         raise ValueError("translate_codepoint claims more units than available")
+3. Then implement advancement consistent with that contract (either pos += consumed for units, or the loop from Fix B for code points).
+
+Shortest recommended change
+- If you control translate_codepoint, make it return the number of UTF-16 code units consumed and replace the inner loop with pos += consumed. That is the simplest, safest fix.
+
+Why this explanation pinpoints the problem
+- The IndexError occurs because code_point_at reads code_units[index] when index == pos.
+- pos is advanced incorrectly because consumed and the loop semantics disagree.
+- The slice you showed (lines 38–44) shows code_point_at assumes index < len(code_units) before reading code_units[index] — the outer loop violated that assumption.
+
+If you want, paste the implementation of translate_codepoint and I will give the exact one-line change to make (or the adjusted loop) to fix it.

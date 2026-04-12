@@ -1,0 +1,43 @@
+What happened (what fails)
+- The code throws IndexError from code_point_at(...) (see the helper's check that raises "String index out of range") while advancing pos inside the for pt in range(consumed) loop.
+- That happens when the loop calls code_point_at(code_units, pos) with pos equal to or past length; code_point_at checks index >= len(code_units) and raises.
+
+Why it fails (root cause)
+- The code assumes translate_codepoint returned a count of "codepoints consumed", then tries to advance pos by repeatedly recomputing the size (in UTF-16 code units) of each consumed codepoint:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- But translate_codepoint has already consumed whatever code units it handled (including surrogate pairs). The loop then calls code_point_at(code_units, pos) on the same pos that the translator already handled; that call can point to a low surrogate alone or be out-of-bounds, causing code_point_at to fail.
+- In short: pos is advanced incorrectly and/or at the wrong time. The code double-counts or re-reads code units that translate_codepoint has already taken responsibility for, and then calls code_point_at on an index that may be invalid -> IndexError.
+
+Where it occurs (exact places)
+- The problem is in the while loop after translate_codepoint returns, specifically these lines:
+    consumed = self.translate_codepoint(code_units, pos, out)
+    ...
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The IndexError will be raised by code_point_at(code_units, pos) when pos is outside [0, len(code_units)-1] (the helper's check at lines 35–36 in your slice).
+
+How to fix it (concrete steps)
+1. Decide what translate_codepoint(consumed) is supposed to return:
+   - If translate_codepoint returns the number of UTF-16 code units it consumed (1 or 2), then update pos by that amount directly:
+       pos += consumed
+     Replace the whole for loop with pos += consumed.
+2. If translate_codepoint returns the number of codepoints consumed (rare), compute the number of code units consumed safely without re-reading already-consumed data. For example, if it returns N codepoints starting at pos, you must scan the code_units beginning at pos (before calling translate_codepoint) or have translate_codepoint also return the number of code units consumed. But the simplest and correct approach is to have translate_codepoint return code units consumed.
+3. Implement the fix. Example replacement (assuming translate_codepoint returns code units consumed):
+    consumed = self.translate_codepoint(code_units, pos, out)
+    if consumed == 0:
+        ...
+    else:
+        pos += consumed
+
+4. Add unit tests with:
+   - BMP characters (single code unit)
+   - Non-BMP characters (surrogate pairs)
+   - Sequences where translate_codepoint consumes a surrogate pair
+   Confirm no IndexError and pos advances correctly through the whole input.
+
+Why the suggested change is safe
+- If translate_codepoint already handled surrogate pairs and returns the number of code units it consumed, advancing pos by exactly that number does not re-read those code units and cannot call code_point_at on an index beyond the current input length.
+
+Summary
+- The bug is the loop that advances pos using code_point_at after translate_codepoint already processed those code units; this can re-read or go past the end and cause an IndexError. Fix by advancing pos by the number of code units translate_codepoint returned (pos += consumed), or change translate_codepoint to also return code units consumed if it currently doesn't.

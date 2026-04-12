@@ -1,0 +1,52 @@
+What happened (what failed)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- The code gets past the initial checks and reaches the branch that expects a region at positions 3–4.
+- For 'fr__POSIX' those two characters are "_" and "P" (indices: 0='f',1='r',2='_',3='_',4='P' ...). The code assigns ch3 = locale_str[3] and ch4 = locale_str[4] and then requires both to be uppercase A–Z.
+- Because ch3 is '_' (not an uppercase letter) the method raises ValueError. That is why the assertion fails.
+
+Why it failed (root cause)
+- The method assumes that when the string contains an initial underscore (locale_str[2] == '_') there must always be a two-letter region at indices 3–4. It does not handle the valid locale form where the region is empty and the string contains two underscores in a row (language + "_" + "" + "_" + variant), as in 'fr__POSIX'.
+- Concretely, the check
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+  incorrectly rejects the '_' that appears when the region is empty. The code fails at that point.
+
+Where it occurred (which lines)
+- After the branch else: following the check locale_str[2] != '_' the code sets
+  ch3 = locale_str[3]; ch4 = locale_str[4];
+  and immediately enforces uppercase A–Z on both ch3 and ch4. That is the faulty check.
+
+How to fix it (clear, specific steps)
+1. Accept an empty region (two underscores in sequence). After checking locale_str[2] == '_', test whether locale_str[3] == '_':
+   - If locale_str[3] == '_', then region = "" and the variant starts at index 4 (i.e. variant = locale_str[4:] but only if there is a second underscore at index 3 and a variant follows).
+   - Otherwise, treat locale_str[3:5] as the region; validate both chars are uppercase A–Z as currently done.
+2. Adjust the indexing when extracting the variant:
+   - If region is empty, verify locale_str[3] == '_' and set variant = locale_str[4:].
+   - If region is present and there is a variant, the code should require locale_str[5] == '_' and set variant = locale_str[6:].
+3. Keep the existing language validation and initial length checks, or simplify them after adding the empty-region support.
+
+Minimal corrected logic (pseudo-Python)
+    if locale_str[2] != '_':
+        raise ValueError(...)
+    # handle empty region
+    if locale_str[3] == '_':
+        # format is language + "__" + variant
+        region = ""
+        variant = locale_str[4:]
+        if variant == "":
+            raise ValueError(...)  # if you require a non-empty variant
+        return Locale(locale_str[0:2], region, variant)
+    else:
+        # region must be two uppercase letters
+        ch3 = locale_str[3]; ch4 = locale_str[4]
+        if not ('A' <= ch3 <= 'Z' and 'A' <= ch4 <= 'Z'):
+            raise ValueError(...)
+        region = locale_str[3:5]
+        if length == 5:
+            return Locale(locale_str[0:2], region)
+        if locale_str[5] != '_':
+            raise ValueError(...)
+        variant = locale_str[6:]
+        return Locale(locale_str[0:2], region, variant)
+
+Effect of this fix on the failing test
+- With the change above, to_locale('fr__POSIX') will parse as language='fr', region='' and variant='POSIX', so the result equals Locale('fr', '', 'POSIX') and the test passes.

@@ -1,0 +1,32 @@
+What happened (where):
+- In get_paint (def at line 56) you compute a clamped value v:
+  - lines just after 56: v = max(value, self._lower_bound); v = min(v, self._upper_bound)
+- But on line 73 you ignore that clamped v and use the original value when computing g:
+  - g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Because you used value instead of v, a value outside the bounds can produce g < 0 or g > 255 and trigger the ValueError at line 76.
+
+Why it fails (root cause):
+- The intent was to clamp the input and then map the clamped value into 0–255. The code clamps into v but then uses the un-clamped value for the mapping. That mismatch lets out-of-range inputs produce out-of-range g, causing the exception at line 76.
+- There's also a potential division-by-zero when self._upper_bound == self._lower_bound (same denominator used on line 73), which would raise ZeroDivisionError; the code does not check for that.
+
+Concrete example that reproduces the failure:
+- Suppose lower_bound = 0.0, upper_bound = 1.0 and value = 2.0.
+  - v becomes 1.0 (clamped), but the formula uses value=2.0, producing g = int((2.0 - 0.0) / 1.0 * 255.0) = 510 -> triggers the ValueError at line 76.
+
+Exact fixes (step-by-step):
+1. Use the clamped variable v in the mapping formula (change line 73):
+   - Replace
+     g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+     with
+     g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+2. Add a guard for zero range to avoid division by zero (also in get_paint, before computing g):
+   - If self._upper_bound == self._lower_bound, either:
+     - return a fixed color (e.g., (0,0,0) or (255,255,255)), or
+     - raise a clear ValueError with a message that upper and lower bounds are equal.
+   - Example:
+     if self._upper_bound == self._lower_bound:
+         raise ValueError("upper_bound equals lower_bound in get_paint; cannot scale value")
+3. (Optional) Improve the error message at line 76 to include the offending g and the bounds, so failures are easier to diagnose:
+   - raise ValueError(f"Color parameter outside expected range: g={g} (expected 0..255)")
+
+Applying steps 1 and 2 fixes the immediate bug and prevents the division-by-zero edge case.

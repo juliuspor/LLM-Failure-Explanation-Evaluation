@@ -1,0 +1,53 @@
+What happened (root cause)
+- At line 176 you treat any number that compares equal to int(x) as an integer: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- For x = -0.0, int(-0.0) is 0, and -0.0 == 0 is True, so the code enters the "integer" branch (lines 176–192).
+- value = int(x) becomes 0 (line 177) and later you do self.add(str(value)) (line 192). str(0) is "0", so the negative sign and the fractional ".0" are lost — producing "0" instead of "-0.0".
+- The earlier check that tries to handle spacing after a minus sign (prev = self.get_last_char(); if x < 0 ...) never runs for -0.0 because x < 0 is False for -0.0 (it compares equal to 0). So nothing fixes printing for negative zero before the integer branch.
+- The net effect: negative zero is misclassified as an integer at line 176 and printed as "0", causing the failing test expecting "-0.0".
+
+Where this occurs
+- The misclassification occurs at line 176 (the if that detects integer-valued floats).
+- The loss of sign occurs later at line 192 where you call self.add(str(value)).
+- The spacing/negative-following-minus handling at the top (prev = self.get_last_char(); if x < 0 ...) is insufficient because it relies on x < 0, which is False for -0.0.
+
+How to fix it (concrete steps)
+1. Detect negative zero before the integer branch. Use an explicit negative-zero check such as:
+   - a utility method CodeConsumer.is_negative_zero(x) (you already have tests referring to it), or
+   - math.copysign(1.0, x) < 0 and x == 0.0, or
+   - struct.unpack to look at the sign bit.
+2. If x is negative zero, print "-0.0" and return immediately (so you don't fall through into the integer logic).
+
+Concrete patch (exact places to change)
+- Right before line 176 add:
+
+    # Preserve negative zero sign: treat -0.0 specially
+    if CodeConsumer.is_negative_zero(x):
+        # ensure the space-insertion rule still applies when necessary:
+        prev = self.get_last_char()
+        if prev == '-':
+            self.add(" ")
+        self.add("-0.0")
+        return
+
+- Or, if you prefer not to use the utility method, use:
+
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        prev = self.get_last_char()
+        if prev == '-':
+            self.add(" ")
+        self.add("-0.0")
+        return
+
+3. Alternatively (less preferred), change the integer-branch condition so it does not treat negative zero as integer:
+
+    if x == int(x) and not math.isinf(x) and not math.isnan(x) and not CodeConsumer.is_negative_zero(x):
+
+   but you still need to add an explicit branch to print "-0.0" elsewhere.
+
+Why this fix works
+- It stops -0.0 from being classified as an integer at line 176 and ensures you explicitly print the signed fractional representation "-0.0" (the expected output).
+- It also preserves the existing spacing logic when a negative number follows a minus sign by explicitly applying the same prev == '-' check before adding "-0.0".
+
+Notes
+- Do not rely on x < 0 to detect negative zero: that returns False for -0.0.
+- Be careful to return after printing "-0.0" so the rest of the integer/float formatting code does not run.

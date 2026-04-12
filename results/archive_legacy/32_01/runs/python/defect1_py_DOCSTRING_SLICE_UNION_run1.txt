@@ -1,0 +1,44 @@
+What happened
+- The code rejects any negative minutes at line 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That unconditional check causes the method to raise ValueError for valid inputs described in the docstring, e.g. (hours=-2, minutes=-15) or (hours=0, minutes=-15). Those combinations are explicitly allowed by the docstring (see the rows "zero -15 -> -00:15" and "-ve -15 -> -02:15"), but the check at lines 400–401 treats negative minutes as invalid and fails immediately.
+
+Why it fails (root cause)
+- The validation at lines 400–401 enforces minutes_offset >= 0 unconditionally. The method later (lines 406–409) expects to adjust minutes depending on the hours sign (it has logic to combine minutes with the hour-based minutes). Because the early validation blocks negative minutes, valid negative-minute cases never reach the conversion logic; instead a ValueError is raised at lines 400–401. In short: the validation is too strict and out of sync with the allowed combinations in the docstring.
+
+Where it happens
+- The immediate failure occurs at lines 400–401 (the unconditional minutes check). The conversion/combination logic lives later (lines 406–409 and the offset computation at line 409), so valid negative-minute cases never get to that code.
+
+Concrete examples that fail incorrectly
+- Input (hours_offset=-2, minutes_offset=-15) — should produce -02:15 per the docstring, but will raise ValueError at line 400.
+- Input (hours_offset=0, minutes_offset=-15) — should produce -00:15, but will raise ValueError at line 400.
+- Input (hours_offset=2, minutes_offset=-15) — correctly should be rejected; this case is legitimately invalid and should raise a ValueError.
+
+How to fix it (step-by-step)
+1. Change the minutes validation so it only rejects minutes outside [-59, 59], not only negative minutes:
+   - Replace the strict check at lines 400–401 with a bounds check that allows negative minutes:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Enforce the sign rules from the docstring:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (examples like (2, -15) are invalid).
+   - If hours_offset < 0 and minutes_offset > 0: treat the result as negative total minutes (the sign of hours dominates, e.g. (-2, 15) -> -02:15). If you prefer explicit handling, convert minutes to negative when hours < 0:
+       if hours_offset < 0 and minutes_offset > 0:
+           minutes_offset = -minutes_offset
+   - If hours_offset == 0: allow minutes to be positive or negative and use minutes sign as the final sign.
+3. After fixing validation and sign handling, compute total offset in minutes and then convert to milliseconds at the existing line 409:
+   offset_minutes = hours_offset * 60 + minutes_offset
+   offset = FieldUtils.safe_multiply(offset_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   (Then let the existing range check/raise at line 411 remain if needed.)
+4. Add unit tests for the combinations in the docstring:
+   - (2, 15) -> +02:15
+   - (2, 0)  -> +02:00
+   - (2, -15) -> should raise ValueError
+   - (0, 15) -> +00:15
+   - (0, 0)  -> +00:00
+   - (0, -15) -> -00:15
+   - (-2, 15) -> -02:15
+   - (-2, 0)  -> -02:00
+   - (-2, -15) -> -02:15
+
+This gives exact lines where the failure originates (400–401), why it contradicts the docstring, and a precise set of changes and tests to fix the bug.

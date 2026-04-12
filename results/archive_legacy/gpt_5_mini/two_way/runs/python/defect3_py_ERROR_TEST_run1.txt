@@ -1,0 +1,82 @@
+What happened
+- The translator code is reading UTF-16 code units and mishandling surrogate pairs so that the loop tries to read past the end of the string. That causes the Python IndexError: "String index out of range: 2" when the code attempts to access an index that does not exist.
+
+Where it fails (exact places in your code)
+- The failure occurs in the translation path that deals with surrogate pairs:
+  - CsvEscaper.translate_string calls CharSequenceTranslator.translate (the code that iterates the UTF-16 code units).
+  - The helper functions involved are to_utf16_code_units and code_point_at (they produce/consume UTF-16 units and combine a high+low surrogate into a code point).
+- The bug is in the loop that advances the index variable (commonly named i, index, or pos) after detecting a high surrogate. That code both:
+  1) reads the low surrogate without checking that index+1 is within bounds, and
+  2) advances the index incorrectly so the loop later tries to read again past the end.
+
+Why exactly it crashes
+- Example input from the failing test: "\U0001F630A"
+  - In UTF-16 this is three code units: [high_surrogate, low_surrogate, 'A'].
+  - The translator sees the high surrogate at position 0 and must consume the high+low pair as a single code point and then continue at position 2 (the 'A').
+- The broken behavior looks like one of these two mistakes (either or both are present):
+  - The code does something like:
+      low = units[i+1]           # no bounds check here
+      codepoint = code_point_at(...)
+      i += 1                     # only increments by 1 after consuming pair
+    Later the loop's normal increment or another access uses i+1 again and ends up accessing units[2] or units[3] incorrectly.
+  - Or the code does:
+      if is_high_surrogate(units[i]):
+          ...combine using units[i+1]...
+          i += 2
+      i += 1                     # unconditional extra increment at end of loop
+    That extra unconditional increment advances past the last index, then the next loop iteration tries to read units[i] and blows up.
+- The immediate cause of the IndexError is an attempt to read units[i+1] (or units[i]) when i is already at the last index (or beyond). In the test the error message includes "2" — that matches trying to index units[2] when units length is 2 (or trying to index units[2] where valid indices stop at 1).
+
+How to reproduce it reliably
+- Call translate_string("\U0001F630A"). The code will hit a surrogate pair followed by a character, exercise the surrogate-handling branch, and trigger the out-of-range access.
+
+Precise fixes (step-by-step, exact changes to make)
+1. Bounds-check before reading the low surrogate
+   - Wherever you do units[i+1] to get the low surrogate, first ensure i+1 < len(units). If it's not, treat the high surrogate as an unmatched surrogate (handle according to your policy — usually treat it as a literal or replace with U+FFFD).
+   - Example:
+       if i + 1 >= len(units):
+           # handle unmatched high surrogate (don't read units[i+1])
+           handle_unmatched_high_surrogate(units[i])
+       else:
+           low = units[i+1]
+2. Advance the index exactly once for the units you consumed
+   - If you consume a surrogate pair (high+low), increment the index by 2 and do not perform any further increment in that iteration.
+   - If you consume a single code unit, increment by 1.
+   - Implement this by controlling the loop index explicitly (while loop) or by continuing after a surrogate-pair branch so a second increment doesn't happen.
+   - Example structure (pseudocode):
+       i = 0
+       while i < len(units):
+           cu = units[i]
+           if is_high_surrogate(cu) and i+1 < len(units) and is_low_surrogate(units[i+1]):
+               cp = to_code_point(cu, units[i+1])
+               process(cp)
+               i += 2
+               continue
+           else:
+               process_single_unit(cu)
+               i += 1
+3. Ensure code_point_at and to_utf16_code_units behave consistently
+   - code_point_at should not assume the caller has already checked bounds. Either make code_point_at return a safe value or require callers to check i+1 < len(units) before calling it.
+   - to_utf16_code_units should return the exact sequence the translator expects (no surprise length differences).
+
+What to change in these exact places (names from your code)
+- In CharSequenceTranslator.translate (or CsvEscaper.translate_string if that's where iteration happens):
+  - Before reading code_point_at(units, i) or reading units[i+1], add:
+      if i + 1 >= len(units):
+          # handle unmatched high surrogate here, do not access units[i+1]
+  - When you consume both high and low surrogate, do: i += 2 and continue the loop (do not let any extra increment run).
+- If you have helper function code_point_at(index) that reads units[index] and units[index+1], add a guard at its start to raise a controlled exception or return a fallback if index+1 is out of range.
+
+Why this fix solves the error
+- Bounds checking prevents accessing units[i+1] when there is no next code unit.
+- Correct index advancement prevents skipping or double-consuming units and thus prevents the loop from trying to access an index beyond the string length on the next iteration.
+
+Short checklist to verify after the fix
+- Run the full test suite including:
+  - "\U0001F630A" (emoji + 'A') — must return the original string, no IndexError.
+  - A single emoji string — must return the original.
+  - Surrogate at end of string — must not crash.
+  - Mixed ASCII and emoji — must preserve order and characters.
+- Add a unit test where the string ends with a single unmatched high surrogate to confirm the code handles that edge case robustly.
+
+If you want, paste the translate loop here and I will mark the exact lines to change and give the minimal patch.

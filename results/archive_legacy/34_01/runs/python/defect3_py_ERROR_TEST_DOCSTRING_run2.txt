@@ -1,0 +1,55 @@
+What happened (what you saw)
+- The call escaper.translate_string('\U0001F630') raised IndexError: String index out of range: 2.
+- The input string '\U0001F630' is a single Unicode character (GRIMACING FACE). On builds that use UTF-16-style code units for Python strings this character is represented as two code units (a high surrogate at index 0 and a low surrogate at index 1). The string length is therefore 2 and valid indices are 0 and 1. The exception shows code tried to read index 2, which is past the end of the string.
+
+Why it failed (root cause)
+- In translate_string you use an integer index variable named i to walk input_seq and, when you detect a high surrogate at input_seq[i], you attempt to read the low surrogate with input_seq[i+1]. That read itself is correct when i points to the high surrogate.
+- The bug is that after you handle the surrogate pair you still run the normal loop increment (or otherwise advance i incorrectly). The code therefore advances i past the pair and later attempts to access input_seq[i] where i == 2 (the string length), causing the IndexError.
+- Concretely: input_seq length is 2. You read input_seq[0] (high surrogate) and input_seq[1] (low). You then increment i one more time than you should, so the next check uses input_seq[2] → IndexError: String index out of range: 2.
+
+Where it happens (typical lines)
+- In translate_string:
+  - the line that reads input_seq[i+1] for the low surrogate is a risky read if you don’t first check bounds (missing a guard like if i+1 >= len(input_seq): ...).
+  - the loop increment/advance for i after handling the surrogate pair is incorrect (you consume two code units but only incremented once, or you increment again in the loop header/foot).
+- The exception occurs at the next access to input_seq after the surrogate-handling branch — specifically when the code uses input_seq[i] or input_seq[i+1] and i == len(input_seq).
+
+How to fix it (concrete steps)
+1. Bounds-check before reading the low-surrogate:
+   - Before doing low = input_seq[i+1], add:
+     if i + 1 >= len(input_seq):
+         raise ValueError("Unpaired high surrogate at end of input_seq")
+   - This prevents reading past the string end and gives a clear error when the input is malformed.
+
+2. Advance the index correctly when you consume a pair:
+   - If you detect and handle a surrogate pair then set i += 2 and continue the loop without doing the usual single-step increment again.
+   - If your loop is a while loop incrementing i manually, ensure you do either:
+       - In the surrogate branch: i += 2; continue
+       - Otherwise: i += 1
+   - If your loop is a for i in range(...) style, switch to a while loop so you can move i by 1 or 2 depending on what you consumed.
+
+3. (Optional) Clear behavior on unpaired surrogates:
+   - Decide whether to raise ValueError for unpaired surrogates or replace/escape them. If you choose to raise, use the ValueError message consistent with your docstring and code style.
+
+Minimal example patch (conceptual)
+- Replace risky access and increment logic like this pseudocode:
+
+i = 0
+while i < len(input_seq):
+    ch = input_seq[i]
+    if is_high_surrogate(ch):
+        if i + 1 >= len(input_seq):
+            raise ValueError("Unpaired high surrogate at end of input_seq")
+        low = input_seq[i + 1]
+        if not is_low_surrogate(low):
+            raise ValueError("Expected low surrogate after high surrogate")
+        # handle pair using ch and low
+        i += 2
+        continue
+    # handle non-surrogate ch
+    i += 1
+
+Why this fixes it
+- The bounds check prevents reading input_seq[i+1] when it doesn't exist.
+- Advancing i by 2 when you consume two code units prevents the loop from later trying to index beyond the string end.
+
+If you want, paste the actual translate_string implementation (lines around the surrogate handling and the loop that increments i) and I’ll write a precise patch you can drop in.

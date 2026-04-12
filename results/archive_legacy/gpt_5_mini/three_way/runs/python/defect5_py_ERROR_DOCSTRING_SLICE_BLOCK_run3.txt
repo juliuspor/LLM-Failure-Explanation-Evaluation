@@ -1,0 +1,62 @@
+What happened (root cause)
+- At lines 346–351 your code checks inferred_type and expected_type:
+  - inferred_type is the element type the function inferred from the input array.
+  - expected_type is the caller-supplied type hint (e.g. str).
+- The code raises a TypeError when inferred_type == object but expected_type != object:
+  - That means the function concluded the existing list's component type is object (unknown), but the caller asked for a more specific type (for example, expected_type == str).
+- The error message you see,
+  "Cannot cast object list to str list (ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.str;)",
+  is produced exactly at lines 346–351 when that condition holds.
+
+Why that happens in practice
+- inferred_type becomes object in cases like:
+  - the input array is None and the function has no non-None element to infer a component type from, or
+  - the input array exists but all its elements are None, or
+  - the code that infers element types defaulted to object for mixed or unknown contents.
+- If the caller passed expected_type=str (or any non-object) while the function only knows "object", the check treats this as an attempted unsafe cast and raises the TypeError.
+
+Where to look in the code
+- The failure is triggered by the if at line 346:
+  if inferred_type == object and expected_type != object:
+  and the subsequent raise at lines 347–351.
+
+Concrete examples that will trigger this
+- Call with array=None, element=None, expected_type=str → inferred_type == object → exception.
+- Call with array=[None, None], element="x", expected_type=str → depending on inference logic the existing array may be seen as object → exception.
+- Call with array=["a"], element=None, expected_type=str should be fine (inferred_type == str), but the problematic cases above are the common ones.
+
+How to fix it (specific steps you can follow)
+1. Decide desired behavior when existing component type is unknown (object) but expected_type is provided:
+   - Option A: treat expected_type as authoritative and use it when no concrete inference is available.
+   - Option B: keep raising but only when there is actual conflicting, non-None data.
+
+2. Implement one of these concrete fixes (example patches):
+
+   - If you want to accept expected_type when array is None or contains only None:
+     Replace the block at 346–351 with:
+       if inferred_type == object and expected_type != object:
+           # If there is no concrete type information in the array and the new element
+           # doesn't provide a concrete type (element is None), accept expected_type.
+           if array is None or all(x is None for x in array):
+               inferred_type = expected_type
+           else:
+               raise TypeError(
+                   f"Cannot cast object list to {expected_type.__name__} list "
+                   f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+                   f"[Ljava.lang.{expected_type.__name__};)"
+               )
+
+   - If you want to accept expected_type whenever element is None but array contains values:
+     Adjust logic to use expected_type only when element is None and array elements are None/absent.
+
+3. Add unit tests for the boundary cases:
+   - array=None, element=None, expected_type=str
+   - array=[None, None], element=None, expected_type=str
+   - array=[None], element="s", expected_type=str
+   - array=["s"], element=None, expected_type=str
+
+Why those fixes work
+- They avoid treating "unknown component type" (object) as a hard conflict when the caller provided an expected_type and there is no concrete conflicting data in the array.
+- They still raise when there is real conflicting data (e.g. array contains integers but expected_type is str), preserving type-safety.
+
+If you want, tell me which behavior you prefer (accept expected_type when array is unknown, or strictly raise) and I’ll produce a ready-to-drop patch for the code.

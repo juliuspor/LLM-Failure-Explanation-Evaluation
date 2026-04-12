@@ -1,0 +1,53 @@
+What went wrong (root cause)
+- On line 337 you set inferred_type = type(array). That gets the Python type of the list object itself (i.e. <class 'list'>), not the element type that you intend to represent. The rest of the code treats inferred_type as the component/element type (it is passed to _copy_list_grow1 and compared to object on line 346), so inferred_type being <class 'list'> breaks the logic and leads to wrong behavior or a runtime cast/assignment error later.
+
+Where it happens in your code
+- Line 337: if array is not None: inferred_type = type(array) — this is the incorrect assignment.
+- Line 340: elif element is not None: inferred_type = type(element) — this one is correct for inferring an element type when array is None.
+- Line 346: if inferred_type == object and expected_type != object: ... — this check never behaves as intended when you inferred the list class instead of the element class, so the erroneous branch may not be taken when it should be (or the wrong type is used when constructing new_list).
+
+Why that causes the failure
+- _copy_list_grow1(array, inferred_type) expects a component/element type to create a new list/array with the correct element type. Passing <class 'list'> instead of the element type produces an array/list whose element type metadata is wrong, which later causes the assignment new_list[len(new_list) - 1] = element or your expected_type check to fail (the code eventually raises a TypeError/ClassCastException-like error).
+- The check on line 346 intends to detect the special case where you only know object as the inferred type and you were asked to produce a more specific expected_type. But because you set inferred_type to the wrong class earlier, that detection does not work correctly.
+
+How to fix it (concrete steps)
+1. When array is not None, infer the element type from the array contents, not from the list object:
+   - If the array has at least one element, use the first element's type:
+     inferred_type = type(array[0])  # or more robust scan if elements may differ
+   - If the array is empty, fall back to expected_type if provided, otherwise to object:
+     if len(array) > 0:
+         inferred_type = type(array[0])
+     elif expected_type is not None:
+         inferred_type = expected_type
+     else:
+         inferred_type = object
+
+2. Keep the element-based branch the same:
+   - elif element is not None:
+         inferred_type = type(element)
+
+3. Keep your existing expected_type check (line 346) — it will now behave correctly when inferred_type == object.
+
+4. Consider validating that all existing elements in array are instances of inferred_type if you need strict homogeneity.
+
+Example corrected fragment (showing exact line replacements)
+- Replace lines around 337–341 with:
+
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+        elif expected_type is not None:
+            inferred_type = expected_type
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Why this is safe and correct
+- This uses an actual element to determine the component type (or falls back to expected_type/object when no elements exist), so _copy_list_grow1 receives the intended element type and the type check on line 346 works as written.
+
+If you want, I can also:
+- Show a minimal unit-test demonstrating the original failure and the corrected behavior, or
+- Inspect _copy_list_grow1 for additional assumptions about inferred_type to make sure no other mismatch remains.

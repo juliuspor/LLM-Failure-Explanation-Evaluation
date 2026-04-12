@@ -1,0 +1,48 @@
+What failed
+- The function to_utf16_code_units builds code_units as a list of Python code points (ord(c) for each character in the Python string). That happens earlier (line ~12), so each element of code_units is a Unicode scalar value (0..0x10FFFF).
+- Later the code at lines 38–44 treats entries of code_units as UTF‑16 code units (16‑bit values that may be UTF‑16 surrogates):
+  - Line 38: high = code_units[index]
+  - Line 39: it checks whether high is a high surrogate (0xD800..0xDBFF)
+  - Line 40–43: if a high surrogate is followed by a low surrogate, it composes a single supplementary code point
+- If the original string contained a character above U+FFFF (a supplementary character), Python's str gives a single code point value > 0xFFFF (for example, 0x1F600). That means high will be > 0xFFFF, so the surrogate test on line 39 fails, and the function returns a value that is not a UTF‑16 code unit. The algorithm is therefore using the wrong representations and will produce incorrect results (or later logic that expects true UTF‑16 code units will break).
+
+Where it happens (specific lines and variables)
+- The mismatch happens between how code_units is constructed (around line 12) and how it is consumed at lines 38–44.
+- Specific variables: code_units (the list), high (line 38), low (line 40), and index (lines 35 and 39).
+- The check at line 39 assumes entries are 16‑bit units (possibly surrogate values), but they are full Unicode code points.
+
+Why that causes failure (root cause)
+- The function's algorithm is "tightly coupled" to receiving UTF‑16 code units, per the docstring, but the implementation builds a list of Unicode scalar values instead. This breaks surrogate detection and composition logic. In short: wrong input representation → wrong branching and wrong returned values.
+
+Concrete fixes (step‑by‑step)
+1. Decide whether this function should work with:
+   - A) UTF‑16 code units (16‑bit values / surrogate pairs), or
+   - B) Unicode code points (Python str/ord values).
+2. If you want UTF‑16 code units (fix the consumer of lines 38–44):
+   - Build code_units as UTF‑16 code units. Two practical ways:
+     a) Use bytes from UTF‑16 encoding and convert to 16‑bit units:
+        - units = list(int.from_bytes(b[i:i+2], 'little') for i in range(0, len(b), 2))
+        - Example: b = s.encode('utf-16-le'); units = [...]
+     b) Manually expand code points > 0xFFFF into surrogate pairs:
+        - For each cp = ord(ch):
+            if cp <= 0xFFFF:
+                append(cp)
+            else:
+                cp -= 0x10000
+                high = 0xD800 + (cp >> 10)
+                low  = 0xDC00 + (cp & 0x3FF)
+                append(high); append(low)
+   - After this, the check at line 39 will work as intended.
+3. If you want to operate on Unicode code points instead (simpler):
+   - Remove the surrogate logic at lines 38–44 and work directly with ord(ch) values. If combining surrogate pairs is required only because upstream data was UTF‑16, then you don't need that here.
+4. Also fix the docstring mismatch:
+   - The docstring mentions input_seq/out and ValueError for out is None, but the function signature is to_utf16_code_units(s: str) -> List[int]. Make the docstring reflect the actual parameters and behavior.
+5. Add tests:
+   - Verify behavior on BMP characters (e.g., 'A', U+0061).
+   - Verify behavior on supplementary characters (e.g., U+1F600 😀).
+   - Verify indices near surrogate boundaries.
+
+Minimal recommended change (if you want UTF‑16 code units):
+- Replace the code that fills code_units with the manual surrogate expansion (step 2b). That directly makes lines 38–44 correct without further changes.
+
+This is the root cause: code_units holds Unicode code points, but the code at lines 38–44 expects UTF‑16 16‑bit code units (including surrogate values). Fix one side (make inputs match expectations) or remove the surrogate handling if you meant to work with code points.

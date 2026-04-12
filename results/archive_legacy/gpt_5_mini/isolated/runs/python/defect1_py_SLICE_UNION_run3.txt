@@ -1,0 +1,45 @@
+What happened (where it fails)
+- At line 396 the code enforces minutes_offset is between 0 and 59:
+  if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later, at lines 402–404, the code reuses the same variable minutes_offset and performs arithmetic with hours_in_minutes:
+  402: minutes_offset = hours_in_minutes - minutes_offset
+  404: minutes_offset = hours_in_minutes + minutes_offset
+- After that the code multiplies minutes_offset by MILLIS_PER_MINUTE and may hit the "Offset is too large" check at line 407.
+
+Why it fails (root cause)
+- minutes_offset is being used for two different meanings:
+  - initially it is the minute component (0..59),
+  - later it is overwritten by an attempted "total minutes" calculation that mixes hours_in_minutes and minutes_offset.
+- When hours_in_minutes is negative (for a negative hour offset), the code at line 402 does hours_in_minutes - minutes_offset. That produces a large negative number (for example, hours_in_minutes = -60, minutes_offset = 30 gives -90), but because the code never made a clear signed combination step, the arithmetic is wrong for many sign combinations and can exceed allowed range.
+- Reusing minutes_offset hides the intent and causes incorrect total_minutes to be computed, which then either produces an incorrect offset value or triggers the "Offset is too large" ValueError at line 407.
+- In short: the function validates the minute component, then mutates that same variable incorrectly when combining with hours, so the final offset calculation is wrong.
+
+Concrete examples that will fail
+- hours = -1, minutes = 30:
+  hours_in_minutes = -60
+  code does minutes_offset = -60 - 30 => -90 (wrong; expected -90 only if you intended sign = -, but the logic that chooses +/− is unclear and error-prone)
+  final offset becomes -90 * MILLIS_PER_MINUTE — may violate subsequent checks or be interpreted incorrectly.
+- hours = 1, minutes = 30:
+  hours_in_minutes = 60
+  code may do minutes_offset = 60 + 30 => 90 (works), but because code branches are inconsistent the behavior differs by sign.
+
+How to fix it (step-by-step, exact changes)
+1. Don’t reuse minutes_offset for the total. Create a new variable total_minutes that explicitly combines hours and minutes with the intended sign.
+2. Compute sign once and apply it to minutes_offset when combining. Validate minutes_offset stays 0..59 before combining.
+3. Replace the lines that overwrite minutes_offset with a clear calculation and use total_minutes for multiplication.
+
+Suggested code change (replace lines 402–405 with this):
+- Determine sign from hours (or from the parsed sign token you already have). Example:
+  sign = -1 if hours_in_minutes < 0 else 1
+  total_minutes = hours_in_minutes + sign * minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. After computing total_minutes, keep the existing "Offset is too large" check if needed, but base it on total_minutes or offset, not on the mutated minutes_offset.
+5. Add a unit test for negative-hour offsets, e.g. hours=-1, minutes=30, and for positive-hour offsets, e.g. hours=1, minutes=30, to confirm correct behavior.
+
+Why this fix works
+- It preserves the original validation of minutes (0..59).
+- It makes the sign and combination explicit (no hidden behavior from overwriting minutes_offset).
+- It prevents accidental large or wrong totals that then cause the "Offset is too large" error.
+
+If you want, paste the surrounding function and I will produce a ready-to-drop-in corrected version showing exact line replacements.

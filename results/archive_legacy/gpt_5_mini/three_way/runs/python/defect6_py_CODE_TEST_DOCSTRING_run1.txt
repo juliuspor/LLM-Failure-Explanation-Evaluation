@@ -1,0 +1,66 @@
+What happened (root cause)
+- The code treats −0.0 as an ordinary integer/zero because of two checks:
+  1. Line: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+     - For x == -0.0 this is True because -0.0 == 0.
+  2. Line: value = int(x)
+     - int(-0.0) yields 0 and loses the negative sign.
+- Also the earlier check that tries to detect a "negative number after minus" uses x < 0:
+  - x < 0 is False for -0.0 (Python compares -0.0 == 0.0 and not less), so the code does not treat -0.0 as negative there either.
+- Result: the code emits "0" (from str(value)) for -0.0 instead of emitting "-0.0", so the test expecting "-0.0" fails.
+
+Where it occurs (specific lines/variables)
+- The problematic lines are:
+  - if x == int(x) and not math.isinf(x) and not math.isnan(x):  # treats -0.0 as integer
+  - value = int(x)  # loses the negative sign for -0.0
+  - if x < 0 and prev == '-':  # fails to detect signed zero because x < 0 is False for -0.0
+- Variable names: x (the input float), value (int(x)), prev (self.get_last_char()).
+
+How to fix it (concrete steps)
+1. Add an is_negative_zero(x) utility that checks the sign bit of a zero value. Two safe options:
+   - Using math.copysign:
+     def is_negative_zero(x: float) -> bool:
+         return x == 0.0 and math.copysign(1.0, x) < 0.0
+   - Or using struct to inspect IEEE-754 sign bit (if you prefer bit-level guarantee).
+
+2. Use is_negative_zero early in add_number to special-case negative zero before converting to int or other branches. Example change at the top of add_number:
+   prev = self.get_last_char()
+   # preserve sign of negative zero
+   if CodeConsumer.is_negative_zero(x):
+       if prev == '-':
+           self.add(" ")   # keep existing space-insertion behavior if needed
+       self.add("-0.0")
+       return
+
+3. Adjust the "after minus" space-insertion test to treat negative zero as negative when deciding to add a space:
+   Replace:
+       if x < 0 and prev == '-':
+   With:
+       if (x < 0 or CodeConsumer.is_negative_zero(x)) and prev == '-':
+
+4. Ensure the integer-branch check excludes negative zero (but the early special-case return above already prevents '-0.0' from reaching that branch).
+
+Concrete minimal patch
+- Add utility:
+    @staticmethod
+    def is_negative_zero(x: float) -> bool:
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+- At start of add_number (immediately after prev = self.get_last_char()):
+    if CodeConsumer.is_negative_zero(x):
+        # keep space insertion behavior if previous char is '-'
+        if prev == '-':
+            self.add(" ")
+        self.add("-0.0")
+        return
+
+- Replace the earlier check:
+    if x < 0 and prev == '-':
+  with:
+    if (x < 0 or CodeConsumer.is_negative_zero(x)) and prev == '-':
+
+Why this fixes the tests
+- is_negative_zero correctly detects the signed-zero case without relying on numeric equality or int conversion.
+- Special-casing and returning before converting to int preserves the "-0.0" textual form.
+- The modified space-insertion check prevents accidental "--0.0" parsing while still adding the space when needed.
+
+No other behavior needs to change: normal integers, floats, NaN and infinities continue to follow the existing branches.

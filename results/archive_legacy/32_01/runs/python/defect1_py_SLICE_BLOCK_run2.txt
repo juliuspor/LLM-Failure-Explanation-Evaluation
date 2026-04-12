@@ -1,0 +1,50 @@
+What happened (where it failed)
+- The ValueError is raised at lines 400–401:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check runs when the code has already parsed a minutes component into minutes_offset, and it rejects the value. The code fails because a minutes_offset that is negative (e.g. -30) triggers the exception even though negative minute values can be valid depending on how the sign of the overall offset is represented.
+
+Why it failed (root cause)
+- The check assumes minutes_offset must always be in the inclusive range 0..59. But in some input representations the minute component carries the sign (for example an overall offset of -1 hour 30 minutes may produce hours_offset = -1 and minutes_offset = -30). In that case minutes_offset == -30 is a valid minute portion of a negative offset, but the current check treats it as out of range and raises ValueError.
+- In short: the code treats sign incorrectly. It validates the minute value in isolation without accounting for the sign convention used by the rest of the parsing code.
+
+Exact location to change
+- Lines 400–401 (the minutes validation).
+
+Concrete fixes (pick one depending on how your parser represents sign)
+
+1) Normalize minutes to a non-negative value and apply sign from the hours component
+- Steps:
+  - Determine the sign (e.g. sign = 1 if hours_offset >= 0 else -1).
+  - Take minutes_abs = abs(minutes_offset).
+  - Validate minutes_abs is in 0..59.
+  - Store minutes_offset = sign * minutes_abs (or use sign only when building total offset).
+- Replace lines 400–401 with:
+  if not (0 <= abs(minutes_offset) <= 59):
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Then when you form the total offset, apply the hours sign to minutes instead of relying on minutes_offset sign.
+
+2) Validate minute magnitude instead of raw signed value
+- If you want to allow minutes_offset to be negative only insofar as its absolute value is a valid minute portion, change the check to use abs():
+  if abs(minutes_offset) > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+3) Normalize by computing total offset (recommended for correctness)
+- Compute the total offset in minutes first, then validate ranges on the combined value:
+  total_minutes = hours_offset * 60 + minutes_offset
+  # validate overall allowed range, e.g. between -1439 and +1439 minutes (±23:59)
+  if not (-23*60 - 59 <= total_minutes <= 23*60 + 59):
+      raise ValueError(f"Total offset out of range: {total_minutes}")
+- This avoids ambiguity about where the sign lives (hours vs minutes) and is robust for inputs like "-01:30" or "+01:30".
+
+Which to choose
+- If elsewhere you treat hours_offset as carrying the sign and minutes_offset may be negative, use option 1 or 2 (use abs for minute-range checks and apply the sign from hours when assembling the final offset).
+- If you want a single canonical representation and to avoid sign bugs, use option 3 (compute and validate total offset).
+
+Example minimal code change (apply sign from hours; replace lines 400–401):
+  sign = 1 if hours_offset >= 0 else -1
+  if not (0 <= abs(minutes_offset) <= 59):
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  minutes_offset = sign * abs(minutes_offset)
+
+This fixes the root cause: the code will no longer reject valid negative-minute inputs produced when the overall offset is negative.

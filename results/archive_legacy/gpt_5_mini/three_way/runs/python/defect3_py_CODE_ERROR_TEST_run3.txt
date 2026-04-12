@@ -1,0 +1,48 @@
+What happens (short): the IndexError comes from calling code_point_at(code_units, pos) after pos has been advanced to the end of the code_units array. That happens in the for-loop that advances pos when translate_codepoint(...) returns a positive consumed value.
+
+Where it goes wrong (exact place in your snippet)
+- The bug is in this block:
+
+      # ...
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+- You call code_point_at(code_units, pos) inside the loop and then immediately increment pos. On the next iteration you call code_point_at again with the new pos. If that new pos equals length (or otherwise points past the last available code unit), code_point_at will try to read beyond the array and raises IndexError.
+
+Why that happens (root cause)
+- translate_codepoint(...) returns consumed as a count of codepoints handled (not code units). You are trying to advance pos by the number of UTF-16 code units those codepoints occupy.
+- But the loop advances pos repeatedly and calls code_point_at at each iteration. On the last iteration the previous increment can move pos to length (pointing past the last code unit). The next call to code_point_at(code_units, pos) then attempts to access code_units[pos] (or pos+1 for a low surrogate) and fails with "String index out of range".
+- In plain terms: you read and advance pos in the same loop, then read again using the already-advanced pos — and that last read can be out of bounds.
+
+Concrete example that triggers it
+- input code units length = 2 (a surrogate pair).
+- A translator consumes that surrogate pair and returns consumed = 1 (one codepoint).
+- Loop runs range(1) once: first iteration calls code_point_at(code_units, pos) with pos == 0 (OK), computes char_count = 2, sets pos = 2.
+- If consumed were > 1 (or if control reaches the loop again for some reason) a subsequent call would do code_point_at(code_units, 2) and crash. The same pattern causes crashes when translators claim to consume codepoints that span the boundary followed by other characters — the loop is brittle because it calls code_point_at after incrementing pos.
+
+How to fix it (specific steps)
+1. Do not call code_point_at at a position that may already be incremented past the original start. Read the codepoints from the original start positions (or compute the total code units to skip) before moving pos.
+2. Example safe change (one of these):
+
+Option A — read and advance from a temporary offset:
+    offset = 0
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos + offset)
+        offset += char_count(cp)
+    pos += offset
+
+Option B — read and advance in-place but call code_point_at before changing pos each iteration (this is equivalent but clearer):
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+Either option avoids calling code_point_at with pos == length. The key is to call code_point_at only on valid indices (pos or pos+offset where pos+offset < length), and only advance pos after you have used that value.
+
+What to check after the change
+- Ensure code_point_at never receives an index equal to length.
+- Ensure char_count(code_point_at(...)) is computed for the codepoint at the original positions the translator claimed to consume.
+- Run your tests (the provided unit tests) to confirm surrogate pairs followed by other characters no longer produce IndexError.
+
+Summary
+- Root cause: pos is incremented inside the loop and then code_point_at is called again with the already-advanced pos, which can be out of range.
+- Fix: compute how many UTF-16 code units to skip for the consumed codepoints before moving pos (or always call code_point_at before incrementing pos in that iteration).

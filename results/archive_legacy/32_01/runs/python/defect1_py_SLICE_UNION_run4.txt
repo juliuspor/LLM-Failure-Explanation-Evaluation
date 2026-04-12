@@ -1,0 +1,41 @@
+What happened (where it fails)
+- The failure happens while building an offset in milliseconds, just before the final return at line 412 (return cls.for_offset_millis(offset)). The code multiplies a minutes value by DateTimeConstants.MILLIS_PER_MINUTE at line 409 via FieldUtils.safe_multiply. That multiplication receives the wrong value and can trigger the "Offset is too large" ValueError raised at line 411.
+- The root cause is in the handling of minutes at lines 406 and 408. The code validates minutes at lines 400–401 (minutes_offset must be 0–59) but then overwrites minutes_offset twice with two different formulas:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  Because minutes_offset is reused, the original sign/meaning of the minutes component is lost and the arithmetic is incorrect, producing an incorrect (often much larger) minutes total that makes offset too large.
+
+Why this is wrong (clear and concrete)
+- The code validated the minute component as a 0–59 value. After that, it must combine hours and minutes into a single signed total of minutes. But the code overwrites minutes_offset in two inconsistent ways instead of computing one correct total using the original minute value and the sign of the hours.
+- Example of the incorrect outcome: if hours_in_minutes is negative (for a negative hour offset) you need total_minutes = hours_in_minutes - minutes_component (e.g. -2 hours 30 minutes -> -150 minutes). The existing code first sets minutes_offset = hours_in_minutes - minutes_offset (line 406) then immediately sets minutes_offset = hours_in_minutes + minutes_offset (line 408), which uses the already mutated minutes_offset and produces the wrong number. That wrong number is then multiplied at line 409 to get offset, and can exceed allowed range -> "Offset is too large" at line 411.
+
+Exactly where to change it and how (step-by-step fix)
+1. Preserve the original minute component. Do not overwrite it before computing the combined minutes. Example variable names:
+   - keep minutes_component = minutes_offset (from input validation)
+   - keep hours_minutes = hours_in_minutes (existing)
+2. Use the sign of the hour offset to decide whether to add or subtract the minutes:
+   - if hours_minutes >= 0: total_minutes = hours_minutes + minutes_component
+   - else: total_minutes = hours_minutes - minutes_component
+   This produces the correct signed total minutes (e.g. -2h30m = -120 - 30 = -150).
+3. Assign offset using the safe multiply with total_minutes, not a mutated minutes variable:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing overflow check that raises ValueError("Offset is too large") if safe_multiply indicates overflow.
+
+Concrete replacement lines (apply in the same method):
+- Replace the lines 406 and 408 and the multiplication at 409 with:
+  - minutes_component = minutes_offset   # preserve validated minute value (line 400–401)
+  - if hours_in_minutes >= 0:
+  -     total_minutes = hours_in_minutes + minutes_component
+  - else:
+  -     total_minutes = hours_in_minutes - minutes_component
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Tests to add
+- Positive offset with minutes: e.g. +02:30 -> compute +150 minutes -> check offset milliseconds.
+- Negative offset with minutes: e.g. -02:30 -> compute -150 minutes -> check offset milliseconds.
+- Zero minutes: +02:00 and -02:00
+- Edge minutes: 0 and 59 with positive and negative hours
+- Large hour near boundary to exercise "Offset is too large" only when legitimate overflow occurs, not due to wrong minute arithmetic.
+
+Summary
+- The bug is an accidental reuse and double reassignment of minutes_offset at lines 406 and 408 which destroys the original minute value and yields a wrong total minutes used at line 409, causing the "Offset is too large" error at line 411. Fix by preserving the minute component and computing total_minutes using the sign of hours_in_minutes before multiplying.

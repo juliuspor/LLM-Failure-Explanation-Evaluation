@@ -1,0 +1,71 @@
+What happened
+- The test failure comes from GrayPaintScale.get_paint returning color components that the color constructor/library rejects. The ValueError text ("Color parameter outside of expected range: Red Green Blue") is what you get when you pass values outside 0–255 (or pass 0.0–1.0 floats where 0–255 ints are required) to whatever color constructor your code uses.
+- In other words: get_paint is producing numbers that are not integers in the 0..255 range (either floats like 0.5, or ints outside 0..255), and the color code that consumes those values throws the ValueError.
+
+Why it happened (root cause)
+- The method get_paint does one of these wrong things:
+  - It fails to clamp the incoming input before scaling, so negative inputs or inputs > upper bound end up producing negative or >255 RGB values, or
+  - It computes normalized gray as a float in 0.0–1.0 and then returns or passes those floats directly to a color constructor that expects 0–255 ints.
+- Typical variable names involved: value (the requested value), lower_bound and upper_bound (the scale ends), fraction (computed interpolation), and gray (the channel value used for R/G/B). The bug is in the code that computes fraction and/or gray and in the return/constructor call in get_paint.
+
+Where it occurs
+- It occurs inside GrayPaintScale.get_paint at the point where you compute the component values and return or construct the color. Concretely:
+  - If you do fraction = (value - lower_bound) / (upper_bound - lower_bound) without clamping value first, a value < lower_bound produces fraction < 0 and then gray < 0.
+  - If you return or pass fraction directly (0.5) instead of a scaled 0..255 integer (127), the color constructor will raise the ValueError.
+
+Exact steps to reproduce the problem in your code
+- Call gps.get_paint(-0.5) when lower_bound == 0.0 and upper_bound == 1.0:
+  - If you don't clamp value, fraction becomes -0.5, and gray becomes negative → invalid color component.
+  - Or if your code returns (0.5, 0.5, 0.5) (normalized floats) instead of (127,127,127), the color constructor raises the ValueError.
+
+Concrete fixes (step‑by‑step)
+1. Clamp the input value to the [lower_bound, upper_bound] range as the very first step:
+   - if value < lower_bound -> use lower_bound
+   - if value > upper_bound -> use upper_bound
+
+2. Compute the normalized fraction using the clamped value:
+   - fraction = (value - lower_bound) / (upper_bound - lower_bound)
+   - (If lower_bound == upper_bound guard against divide-by-zero; treat as fraction = 0.)
+
+3. Convert the fraction to an integer 0..255, and clamp again to be safe:
+   - gray = int(fraction * 255)
+   - if gray < 0: gray = 0
+   - if gray > 255: gray = 255
+
+4. Return or construct the color using integers:
+   - return (gray, gray, gray)
+
+Minimal corrected implementation (replace the body of get_paint with this logic)
+- This is the exact logic to implement inside GrayPaintScale.get_paint:
+
+def get_paint(self, value):
+    # step 1: clamp input
+    if value < self.lower_bound:
+        value = self.lower_bound
+    elif value > self.upper_bound:
+        value = self.upper_bound
+
+    # step 2: handle degenerate range
+    span = self.upper_bound - self.lower_bound
+    if span == 0:
+        fraction = 0.0
+    else:
+        fraction = (value - self.lower_bound) / span
+
+    # step 3: scale to 0..255 and convert to int
+    gray = int(fraction * 255.0)
+    if gray < 0:
+        gray = 0
+    elif gray > 255:
+        gray = 255
+
+    # step 4: return integer RGB triple
+    return (gray, gray, gray)
+
+Why this will fix the tests
+- Negative inputs (e.g. -0.5) are clamped to lower_bound -> fraction = 0 -> gray = 0 -> returns (0,0,0).
+- Inputs > upper_bound are clamped -> fraction = 1 -> gray = 255 -> returns (255,255,255).
+- Midpoint 0.5 (with lower=0, upper=1) gives fraction 0.5 -> int(0.5*255)=127 -> returns (127,127,127).
+- All returned components are ints in [0,255], so the color constructor will no longer raise the ValueError.
+
+If you paste your current get_paint implementation I can point to the exact lines to change; with the code above you should be able to fix the failing tests immediately.

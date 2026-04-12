@@ -1,0 +1,51 @@
+What happened (root cause)
+- The variable consumed returned by translate_codepoint(...) is being interpreted differently by translate(...).
+- translate(...) treats consumed as a count of codepoints (it runs a loop "for pt in range(consumed)" and inside that loop calls code_point_at(code_units, pos)). But translate_codepoint actually returned a count of UTF-16 code units (or otherwise returned a value that can be >1 for a surrogate pair).
+- That mismatch lets pos be advanced too many times. Concretely, for a surrogate pair at the start:
+  - code_units length = 2 (high and low surrogate). translate_codepoint(...) returns 2 (meaning it consumed the 2 UTF-16 code units).
+  - translate(...) then runs the for pt in range(2) loop:
+    - first iteration: code_point_at(code_units, 0) is fine; pos increases by 2 -> pos == 2
+    - second iteration: code_point_at(code_units, 2) is called, but index 2 == len(code_units) so code_point_at raises IndexError("String index out of range: 2")
+- So the IndexError arises because translate(...) assumed consumed counted codepoints and iterated that many times while calling code_point_at(pos) each iteration. That leads to a second call with pos already advanced to the end of the array.
+
+Where it occurs in your code
+- In translate(...):
+  - The loop "for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))" is the offending code.
+  - The call to code_point_at(code_units, pos) inside that loop triggers the IndexError when pos has been advanced beyond the last index.
+- The check that raises the IndexError happens inside to_utf16_code_units / code_point_at (the slice shows the exception raised when index >= len(code_units)).
+
+How to fix it (clear, actionable steps — pick one)
+Option A — fix translate_codepoint contract (recommended)
+- Decide that translate_codepoint should return "number of codepoints consumed" (1 for a surrogate pair, not 2).
+- Update translate_codepoint implementations so they return codepoint counts (1 when it handled a single Unicode codepoint, even if that codepoint is a surrogate pair in UTF-16).
+- No change required to translate(...) loop if that contract is kept. This matches the comment in your code: "Contract with translators is that they have to understand codepoints and they just took care of a surrogate pair."
+
+Option B — change translate(...) to treat consumed as UTF-16 code units
+- If translate_codepoint returns "number of UTF-16 code units consumed", replace the for-loop with a direct advance:
+  - Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  - With
+    pos += consumed
+- This avoids repeatedly calling code_point_at after pos has already advanced; it's correct when consumed counts the actual UTF-16 code units consumed.
+
+Option C — make loop bounds safe (less preferred)
+- If you cannot change translate_codepoint immediately, add a bounds-safe loop:
+  - while pt < consumed and pos < length:
+        pos += char_count(code_point_at(code_units, pos))
+        pt += 1
+- This avoids the IndexError but masks the underlying contract mismatch and is less clean.
+
+Which to choose
+- If your design comment ("Contract with translators is that they have to understand codepoints...") is intended, choose Option A: make translate_codepoint return codepoint counts (1 or 0), not code unit counts.
+- If existing translators already return code units and you cannot change them, choose Option B and document the contract change.
+
+Minimal concrete fix (Option B) to patch immediately
+- Replace the for-loop with a single advance:
+    # instead of looping over pseudo-codepoints, just advance by the number of UTF-16 units consumed
+    pos += consumed
+- That prevents the second code_point_at call at pos == len(code_units) and removes the IndexError.
+
+Summary
+- Root cause: a contract mismatch between translate_codepoint's return value and translate(...)'s expectation, causing pos to be advanced incorrectly and then code_point_at to be called with pos == len(code_units).
+- Fix by aligning the contract: either make translate_codepoint return codepoint counts, or change translate(...) to advance pos by the number of UTF-16 code units (pos += consumed).

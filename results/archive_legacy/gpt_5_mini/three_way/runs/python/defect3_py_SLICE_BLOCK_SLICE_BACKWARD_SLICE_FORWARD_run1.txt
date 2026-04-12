@@ -1,0 +1,39 @@
+What happens (where, in plain terms)
+- At line 38 you read one UTF‑16 code unit into variable high: high = code_units[index].
+- Lines 39–43 correctly detect a valid surrogate pair (high in 0xD800..0xDBFF and a following low in 0xDC00..0xDFFF) and return the combined code point.
+- If the code unit at index is a high surrogate but there is no valid low surrogate following it, the code falls through to line 44 and returns high (the raw 0xD800..0xDBFF value).
+- Returning a raw high‑surrogate value is the root cause of the failure: 0xD800..0xDFFF are not valid Unicode scalar values. Code that expects a proper Unicode code point (or a replacement character) later fails when it receives this invalid value.
+
+Concrete examples of where it breaks
+- If code_units[index] == 0xD83D (a high surrogate) and either index+1 is out of range or code_units[index+1] is not a low surrogate, the function returns 0xD83D instead of a valid code point or a replacement (lines 38–44).
+- If code_units[index] happens to be a low surrogate (0xDC00..0xDFFF) and there is no preceding high surrogate, the function also returns that invalid low surrogate value (same lines), which is likewise incorrect.
+
+Why that causes downstream failures
+- Many Unicode APIs and logic expect returned values to be valid scalar code points (<= 0x10FFFF and not in 0xD800..0xDFFF). Passing a surrogate code unit through as if it were a code point produces undefined behavior, errors, or incorrect characters later.
+
+Exact fixes (step‑by‑step, with lines referenced)
+1. Handle an unmatched high surrogate: replace the final fallback (line 44) so you do not return the raw high surrogate.
+   - Option A (preferred for robustness): return the Unicode replacement character U+FFFD (0xFFFD).
+   - Option B (stricter): raise an exception (ValueError) to signal malformed UTF‑16 input.
+
+2. Handle an initial low surrogate: add an explicit check so if high is in 0xDC00..0xDFFF you do not return it as a valid code point; instead return 0xFFFD or raise.
+
+3. Minimal concrete change (replace lines 38–44 with this logic):
+   - Read high = code_units[index] (line 38 unchanged).
+   - If 0xD800 <= high <= 0xDBFF and index+1 < len(code_units):
+       - low = code_units[index+1]
+       - if 0xDC00 <= low <= 0xDFFF: return combined code point (same as lines 39–43)
+   - If 0xD800 <= high <= 0xDBFF: return 0xFFFD  # unmatched high surrogate
+   - If 0xDC00 <= high <= 0xDFFF: return 0xFFFD  # unexpected low surrogate
+   - Otherwise: return high
+
+4. Tests to add:
+   - Single isolated high surrogate at end of input -> expect U+FFFD (or exception if you choose).
+   - High surrogate followed by a non‑low code unit -> expect U+FFFD.
+   - Isolated low surrogate -> expect U+FFFD.
+   - Correct surrogate pair -> expect combined code point.
+
+Why this is safe
+- Returning U+FFFD or raising makes the function guarantee it never hands out values in 0xD800..0xDFFF as if they were real Unicode scalars. That matches common Unicode handling and prevents the downstream crashes you're seeing.
+
+If you want, tell me which behavior you prefer on malformed input (return U+FFFD or raise ValueError) and I’ll give the exact patched lines to drop into your function.

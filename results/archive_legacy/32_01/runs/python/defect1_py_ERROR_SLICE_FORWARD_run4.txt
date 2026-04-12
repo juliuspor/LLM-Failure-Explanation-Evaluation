@@ -1,0 +1,46 @@
+What happened (where it failed)
+- The exception was raised by a minutes validation check when code tried to use -15 as a minute value: "ValueError: Minutes out of range: -15".
+- The stack slice you gave shows the problem occurs while building a minute-based offset and then converting to milliseconds. Relevant lines:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - line 411: raise ValueError("Offset is too large")
+- The code is producing a negative minute value (-15) and then passing that negative minute into a validation/multiplication routine that expects a 0..59 minute component, so the validator raises the "Minutes out of range: -15" error.
+
+Why it happened (root cause)
+- The code mixes the minute component (0..59) and the total minutes (hours*60 + minutes) in the wrong order/sign, and performs validation at the wrong time.
+- Specifically, the branch at line 406 uses subtraction: minutes_offset = hours_in_minutes - minutes_offset. That makes the local variable minutes_offset contain a combined value that can be negative (for example, hours_in_minutes = 0, minutes_offset = 15 -> result = -15). Later logic that expects a minute-of-hour value (0..59) sees -15 and throws.
+- In short: the code treats the minute field both as “minute-of-hour” and as “total minutes offset” without (a) validating the minute-of-hour first, and (b) computing a signed total in a single consistent step. This produces -15 where a minute-of-hour validator is applied.
+
+Exactly where to look in the code
+- Inspect the method that computes time-zone offsets / offset millis (the function containing lines 406–411, probably a parseOffset or for_offset_millis helper).
+- Look at these three steps:
+  1. building hours_in_minutes,
+  2. mutating minutes_offset with subtraction (line 406) or addition (line 408),
+  3. calling FieldUtils.safe_multiply(...) (line 409).
+- The incorrect subtraction at line 406 is the immediate cause of the negative minute value.
+
+Concrete fixes (step-by-step)
+1. Validate the minute component before combining
+   - Check that the raw minute field is in 0..59 before you change it into a signed total. Example check: if minutes < 0 or minutes > 59: raise ValueError("Minutes out of range: %d" % minutes)
+2. Compute a single signed total_minutes value (don’t reuse a variable named minutes_offset for both roles)
+   - Use an explicit sign variable (sign = +1 or -1) based on the parsed '+' or '-'.
+   - Then compute total_minutes = sign * (hours * 60 + minutes)
+3. Convert total_minutes to milliseconds only after the value is correct
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Remove/replace the lines that mixed minute-of-hour and total-minute semantics:
+   - Replace lines 406–409 with something like:
+     - (pseudo)
+       sign = 1 if positive else -1
+       if minutes < 0 or minutes > 59:
+           raise ValueError("Minutes out of range: %d" % minutes)
+       total_minutes = sign * (hours * 60 + minutes)
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+5. Add a unit test covering negative offsets with zero hours and non-zero minutes (e.g. "-00:15") to prevent regressions.
+
+Why these steps fix it
+- Validating minutes before combining prevents the validator from seeing a signed combined value like -15.
+- Building total_minutes with a clear sign avoids accidental subtraction that turns a minute-of-hour into a negative minute-of-hour.
+- Converting to milliseconds only after constructing the correctly signed total ensures downstream code receives the value it expects.
+
+If you want, paste the full small function around lines 400–412 and I will give an exact line-by-line patch you can apply.

@@ -1,0 +1,54 @@
+What happened (where)
+- The bug is in this factory method (the block shown at lines 400–412). The code rejects any negative minutes at line 400:
+  - 400: if minutes_offset < 0 or minutes_offset > 59:
+  - 401:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why that's wrong (root cause)
+- The method's docstring explicitly allows negative minute values in some valid combinations (for example (0, -15) → +00:-15? actually -00:15, and (-2, -15) → -02:15). The unconditional check on line 400 forbids all negative minute values, so valid inputs like (0, -15) and (-2, -15) are rejected immediately.
+- Because the negative values are rejected up front, the later logic that tries to combine hours and minutes (lines 406 and 408) and compute milliseconds (line 409) never gets a chance to handle the allowed negative-minute cases.
+- In short: the invalid early check (line 400) prevents legitimate combinations from being processed and is the direct cause of the failure.
+
+Where it shows up
+- The failure happens at the minutes validation branch (lines 400–401). Correct combination/adjustment code at 406/408 and the final bounds check (lines 409–412) become irrelevant because they are never reached for negative minutes.
+
+How to fix it (concrete steps)
+1. Broaden the minutes range check:
+   - Replace the unconditional check at line 400 with a range check that allows -59..+59:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the disallowed sign combination (positive hours with negative minutes):
+   - Add a specific check after the broadened range validation:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes may not be negative when hours is positive")
+
+3. Compute total minutes correctly for all sign combinations:
+   - Use different arithmetic depending on the sign of hours:
+     if hours_offset < 0:
+         total_minutes = hours_offset * 60 - abs(minutes_offset)
+     else:
+         total_minutes = hours_offset * 60 + minutes_offset
+   - This produces:
+     - hours positive, minutes positive -> hours*60 + minutes
+     - hours positive, minutes zero -> hours*60
+     - hours positive, minutes negative -> already rejected by step 2
+     - hours zero, minutes positive/negative -> minutes
+     - hours negative, minutes positive -> hours*60 - minutes (e.g. -2,15 → -135)
+     - hours negative, minutes negative -> hours*60 - abs(minutes) (same as -2,-15 → -135)
+
+4. Keep the existing millis conversion and bounds check, but operate on total_minutes:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - then perform the existing overflow/bounds check (line 411) and return cls.for_offset_millis(offset) (line 412).
+
+Why these steps fix the problem
+- Step 1 removes the overly strict ban on negative minutes so allowed inputs like (0,-15) and (-2,-15) reach the combination logic.
+- Step 2 preserves the documented prohibition of minutes negative when hours are positive (e.g. (2, -15) must raise).
+- Step 3 ensures the arithmetic yields the intended signed total offset minutes for every documented combination.
+- Steps 4 reuses the existing millis conversion and overflow detection once total minutes are correct.
+
+References to the code lines
+- Problem location: minutes validation at 400–401.
+- Combination logic that is currently unreachable for negatives: 406 and 408.
+- Milliseconds conversion and bounds: 409 and 411–412.
+
+If you want, I can produce the exact replacement code block (with the corrected checks and arithmetic) to drop into the method.

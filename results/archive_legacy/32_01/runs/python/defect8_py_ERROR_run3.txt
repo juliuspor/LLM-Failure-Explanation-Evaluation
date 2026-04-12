@@ -1,0 +1,80 @@
+I can’t point to the exact file/line in your repository without the stack trace or code, so first: please paste the full traceback and the small snippet that calls the locale-parsing function (the file names and line numbers in the traceback are what I need). Meanwhile, here’s a precise, actionable explanation of the root cause, where it typically happens, and concrete step-by-step fixes you can try immediately.
+
+What happened (root cause)
+- The program tried to parse the string "fr__POSIX" as a locale identifier and a library raised ValueError: Invalid locale format: fr__POSIX.
+- That string is not a valid locale format for the locale-parsing routine you’re calling. Valid common formats are "fr", "fr_FR", or "fr_FR.UTF-8". "fr__POSIX" contains a double underscore and the token "POSIX" in a position that the parser does not accept.
+- This problem usually occurs in one of two places:
+  1. Code that reads an OS environment variable (LANG, LC_ALL, LC_MESSAGES) and passes it directly to a parsing function.
+  2. A call to a locale/parsing library function such as babel.core.Locale.parse(...), babel.Locale.parse, or similar, which enforces a strict format and raises ValueError when the string does not match.
+
+Where to look (exact places in code)
+- Search for calls to:
+  - babel.core.Locale.parse(…), babel.Locale.parse(…)
+  - locale.setlocale(…), locale.normalize(…), or code that uses locale.getlocale()
+  - any custom function named parse_locale, normalize_locale, or similar
+- Inspect the traceback: find the first line in your code (not inside the library) where the invalid string is passed in. That file and line number is the place to fix.
+
+Why "fr__POSIX" is invalid (simple)
+- The parser expects up to a language + separator + territory + optional encoding (e.g. "fr", "fr_FR", "fr_FR.UTF-8").
+- "fr__POSIX" contains an empty territory (the two underscores mean language + empty territory) and then "POSIX" where the parser expects territory or encoding; the parser treats the format as malformed and throws ValueError.
+
+Concrete steps to reproduce the problem locally
+1. In a Python REPL:
+   - Set a variable to the bad value and call the parsing routine you use, e.g.:
+     - If you use Babel:
+       from babel import Locale
+       Locale.parse("fr__POSIX")   # raises ValueError
+     - If you use the standard locale module it may behave differently:
+       import locale
+       locale.normalize("fr__POSIX")  # may return weird value or fail
+2. Run your code path that reads environment variables:
+   - echo $LANG  (on Unix) — if this prints "fr__POSIX", that is the source.
+
+Exact fixes (pick one, applied step-by-step)
+A. Fix the environment (recommended if the OS string is wrong)
+1. On the machine/container, inspect locale env vars:
+   - echo $LANG
+   - echo $LC_ALL
+2. If one is "fr__POSIX", set it to a proper value:
+   - export LANG=fr_FR.UTF-8
+   - or export LANG=fr
+3. Restart the process and retest.
+
+B. Sanitize the value before parsing (if you must handle malformed inputs)
+1. Locate the exact call that passes the string to the parser (the file/line from the traceback).
+2. Replace direct pass with a sanitizer function. Example sanitizer logic:
+   - Strip duplicate separators: s = s.replace('__', '_')
+   - Remove trailing "_POSIX" if your parser rejects it: if s.endswith('_POSIX'): s = s.replace('_POSIX','')
+   - If s contains only language code, pass only the language: if '_' in s and s.split('_')[1] == '': s = s.split('_')[0]
+3. Example (put this on the line indicated by the traceback):
+   bad = os.environ.get('LANG', '')
+   # sanitize:
+   fixed = bad.replace('__', '_')
+   if fixed.endswith('_POSIX'):
+       fixed = fixed.replace('_POSIX', '')
+   # call the parser with fixed:
+   Locale.parse(fixed)
+
+C. Use a tolerant parsing helper (if available)
+1. Babel has some helpers. If using Babel and you want to accept "fr__POSIX", convert to a known safe form first:
+   - try:
+         loc = Locale.parse(user_locale_string)
+     except ValueError:
+         # fallback rules:
+         cleaned = user_locale_string.split('.')[0].replace('__','_')
+         if cleaned.endswith('_POSIX'):
+             cleaned = cleaned.replace('_POSIX','')
+         loc = Locale.parse(cleaned)
+
+D. Fail early with a helpful error message
+1. If the input must be strict, add a check at the caller site:
+   - if not re.match(r'^[a-z]{2}(_[A-Z]{2}(\.[\w-]+)?)?$', user_locale_string):
+         raise ValueError(f"Invalid locale format at {__file__}:{lineno}: {user_locale_string}")
+   - This makes the failing location and reason explicit.
+
+What to change now (priority list)
+1. Paste the traceback and the small call-site code here (file and line numbers). I will point to the exact line and show the exact change.
+2. If this is in production containers, correct LANG/LC_* environment variables to valid values.
+3. Add a sanitizer or fallback around the locale-parse call so malformed values don’t crash the process.
+
+If you paste the traceback and the 5–10 lines around the line referenced in the traceback, I will give the exact one-line change and a minimal patch that fixes it.

@@ -1,0 +1,38 @@
+What happened (where)
+- The bug is in hit01_timezone.py inside DateTimeZone.for_offset_hours_minutes around the lines you showed: 402–405.
+- Those lines reuse minutes_offset and hours_in_minutes incorrectly and execute both assignments in sequence:
+  - Line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404: minutes_offset = hours_in_minutes + minutes_offset
+  - Then minutes_offset is multiplied by MILLIS_PER_MINUTE on line 405 to produce offset.
+
+Why it fails (root cause with concrete example)
+- hours_in_minutes already equals hours * 60 (including sign). minutes_offset initially holds the minutes argument (including sign).
+- The code accidentally combines hours_in_minutes and minutes_offset twice instead of once, which produces a wrong total_minutes value (often much larger in magnitude) and can trigger the "Offset is too large" error.
+- Example with the failing test case (-2, -15):
+  - hours_in_minutes = -2 * 60 = -120
+  - minutes_offset (initial) = -15
+  - After line 402: minutes_offset = hours_in_minutes - minutes_offset = -120 - (-15) = -105
+  - After line 404: minutes_offset = hours_in_minutes + minutes_offset = -120 + (-105) = -225
+  - Total minutes becomes -225 -> -225 * 60000 = -13,500,000 ms (i.e. -37.5 hours). That exceeds valid range and causes the ValueError at line 407.
+- So the method is combining the hour part twice and effectively computing the wrong total offset.
+
+Exactly where to change it and how (concrete fix)
+- Replace the two incorrect lines (402 and 404) with a single, correct computation of total minutes:
+  - If hours_in_minutes already contains hours * 60, total_minutes should be:
+    total_minutes = hours_in_minutes + minutes
+  - In terms of your existing variable names, change the block to compute minutes_offset once:
+
+    # replace lines 402–404 with:
+    minutes_offset = hours_in_minutes + minutes_offset
+
+- That yields for (-2, -15): -120 + (-15) = -135 minutes -> -135 * 60000 = -8,100,000 ms -> correct -02:15.
+
+Additional required checks (explicit)
+- Keep the existing validation that minutes are in [-59, 59] and hours in [-23, +23].
+- If you intend to reject mixed signs (e.g., (2, -15) or (-2, 15)) follow the project docstring and add an explicit check before computing total:
+  - if (hours > 0 and minutes < 0) or (hours < 0 and minutes > 0): raise ValueError("Mixed sign hours and minutes")
+  - Or, if the intended behavior is that minutes sign extends the magnitude of negative hours (as your tests expect), make sure that check matches that specification. But regardless, compute total as hours_in_minutes + minutes_offset, not the current double-application.
+
+Summary
+- The code applies hour and minute parts twice due to two sequential reassignment lines (402 and 404). That causes wrong total minutes (too large magnitude) and the tests fail (ValueError).
+- Fix by computing minutes_offset = hours_in_minutes + minutes_offset once (and ensure explicit mixed-sign validation if required).

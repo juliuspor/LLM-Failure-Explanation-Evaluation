@@ -1,0 +1,32 @@
+def translate(self, input_seq: Optional[str], out: List[int]) -> None:
+    if out is None:
+        raise ValueError("The Writer must not be null")
+    if input_seq is None:
+        return
+
+    code_units = to_utf16_code_units(input_seq)
+
+    pos = 0
+    length = len(code_units)
+
+    while pos < length:
+        consumed = self.translate_codepoint(code_units, pos, out)
+        if consumed == 0:
+            codepoint = code_point_at(code_units, pos)
+            c = to_chars(codepoint)
+            out.extend(c)
+            pos += len(c)
+            continue
+
+        # Advance pos by the number of UTF-16 code units corresponding to
+        # the number of codepoints consumed. Be careful not to call
+        # code_point_at when pos is already at or past length.
+        remaining = consumed
+        while remaining > 0 and pos < length:
+            cp = code_point_at(code_units, pos)
+            pos += char_count(cp)
+            remaining -= 1
+        # If translators claimed to consume more codepoints than remain,
+        # we simply exit the loop; any extra consumption is ignored.
+        
+    

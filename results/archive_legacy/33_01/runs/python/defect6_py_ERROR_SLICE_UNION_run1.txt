@@ -1,0 +1,51 @@
+What happened (where)
+- The failure originates in SliceUnion.add (line 126) calling self.append(newcode) (line 138).
+- The test expected a negative zero float (-0.0) but the code produced an integer 0 (the error shows "Expected -0.0, got 0").
+
+Why it happened (root cause)
+- Somewhere in append (the method called at line 138) the value newcode is being normalized or converted to a plain zero in a way that loses both the float type and the negative sign bit.
+- Common ways this happens:
+  - Converting with int(newcode) or using an integer literal 0 (e.g. newcode = 0) when newcode compared equal to zero.
+  - Using "if not newcode:" or "if newcode == 0: newcode = 0" which treats -0.0 as falsy/equal to zero and then replaces it with integer 0.
+- In Python a float -0.0 == 0.0 is True, and int(-0.0) yields 0 (an int). The test wants the negative-zero float specifically, so converting to int or assigning 0 destroys the sign and type.
+
+How to verify quickly
+- Add a short reproduction in the append function or a REPL:
+  - >>> x = -0.0
+  - >>> int(x)    # -> 0
+  - >>> x == 0    # -> True
+  - >>> x is 0    # -> False
+  - >>> repr(x)   # -> '-0.0'
+- If append contains code like "if not newcode: newcode = 0" it will replace -0.0 with 0.
+
+Concrete fixes (step-by-step)
+1. Inspect append implementation (around line 138) and find where newcode is replaced or coerced when it is zero. Typical lines to look for:
+   - any "if not newcode:" checks
+   - any "if newcode == 0:" branches that assign 0 or int(0)
+   - any int(...) coercions on newcode
+2. Decide whether you must preserve negative zero or just float type:
+   - If you must preserve the negative-zero float, replace normalization that sets 0 with code that preserves sign:
+     - import math
+     - where you currently do "newcode = 0" or "newcode = 0.0", change to:
+       newcode = math.copysign(0.0, newcode)
+     - This preserves the sign bit: math.copysign(0.0, -0.0) -> -0.0
+   - If you must preserve float type but sign doesn't matter, ensure you convert to float instead of int:
+     newcode = float(newcode)
+3. Run tests that previously asserted -0.0 to ensure the result now matches expected -0.0 (repr or exact float comparison depending on test). If your test compares with equality and expects a negative zero specifically, consider comparing signbit explicitly:
+   - import math
+   - sign_is_negative = math.copysign(1.0, value) < 0
+   - Or in tests use repr(value) to differentiate -0.0 from 0.0/0.
+
+Minimal patch example
+- Before (problematic):
+  if not newcode:
+      newcode = 0
+- After (preserve -0.0):
+  import math
+  if newcode == 0:
+      newcode = math.copysign(0.0, newcode)
+
+Why that fixes it
+- Using math.copysign(0.0, newcode) keeps newcode as a float and preserves the sign bit for negative zero; avoiding int(...) or assigning integer 0 prevents losing both the sign and float type.
+
+If you paste the append implementation lines around 138, I can point to the exact statement to change and provide the exact one-line replacement.

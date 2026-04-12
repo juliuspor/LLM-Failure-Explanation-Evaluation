@@ -1,0 +1,96 @@
+I can’t point to the exact failing line until I see the code, but based on the docstring you pasted the failure is almost always caused by a sign/validation bug in the offset‑validation block that builds the resulting offset. Below I explain the concrete places to inspect, the exact root causes that produce the behaviors described in your docstring, how to reproduce the failure, and step‑by‑step fixes to apply.
+
+What typically fails (exact symptoms)
+- Valid inputs such as (0, -15) or (-2, -15) are rejected or produce the wrong sign on the final offset.
+- Combinations like (2, -15) aren’t rejected properly (or are incorrectly accepted).
+- Offsets end up being off by an hour/minute or overflow beyond ±23:59:59.
+
+Where to look in your function
+- The validation block near the start of the factory function that checks:
+  - hours range (-23..+23)
+  - minutes range (-59..+59)
+  - the sign relationship (minutes negative when hours positive is invalid)
+  - the combined range (resulting total seconds within ±(23*3600+59*60+59) or ±23:59:59)
+- The arithmetic that converts hours and minutes into a total offset (usually total_seconds = hours*3600 + minutes*60).
+- Any normalization that flips signs or applies abs() to minutes/hours.
+
+Three common root causes (be precise)
+1) Incorrect sign check for zero hours
+   - Bug: code requires minutes >= 0 when hours >= 0.
+   - Effect: (0, -15) is rejected despite docstring saying zero hours with negative minutes is allowed (that should produce -00:15).
+   - Cause: the condition uses hours >= 0 instead of hours > 0 when deciding whether negative minutes are allowed.
+
+2) Applying a sign twice or discarding minutes sign
+   - Bug: code computes total_seconds = abs(hours)*3600 + minutes*60 and then applies sign = sign(hours) — which loses the minutes sign when hours is zero or contrarily flips the sign of minutes when hours is negative.
+   - Effect: (-2, -15) may become -02:+15 or +02:15 depending on how signs are applied; (0, -15) may become +00:15 or be rejected.
+   - Cause: building the offset by combining abs(hours) with minutes without normalizing a single sign for the whole offset.
+
+3) Overflow check uses wrong unit or wrong boundary
+   - Bug: check compares hours + minutes to 23.999 or only checks hours, or uses minutes as absolute minutes incorrectly.
+   - Effect: valid boundary offsets like (+23, +59) or (-23, -59) get rejected or accepted incorrectly.
+   - Cause: wrong conversion of hours/minutes to total seconds for comparison.
+
+How to reproduce quickly
+- Unit tests that often fail:
+  - expect accepted: (0, -15) -> -00:15
+  - expect accepted: (-2, -15) -> -02:15
+  - expect rejected: (2, -15) -> ValueError
+  - boundary tests: (23, 59) accepted, (23, 60) rejected
+- Run these inputs through the function and log:
+  - the raw hours, minutes
+  - intermediate values (abs values, sign variables)
+  - computed total_seconds
+  - the boolean results of each validation clause
+
+Exact things to inspect in your code (lines to check)
+- The first validation if‑block (range checks for hours and minutes).
+- The clause that rejects “minutes negative when hours positive.” Ensure it uses hours > 0, not hours >= 0.
+- The computation that forms the offset (hours * 3600 + minutes * 60). Confirm you handle sign consistently:
+  - If hours < 0 OR minutes < 0 and hours == 0 => offset should be negative.
+  - If hours > 0 => minutes must be >= 0 (per doc); treat offset positive = hours*3600 + minutes*60.
+- The final boundary check that converts the combined offset to seconds and compares to ±(23*3600 + 59*60 + 59).
+
+Exact fixes (step‑by‑step)
+1) Normalize sign rules
+   - Replace an incorrect condition like:
+       if minutes < 0 and hours >= 0: raise ValueError
+     with:
+       if minutes < 0 and hours > 0: raise ValueError
+     Reason: doc says (0, -15) is allowed; only positive hours with negative minutes should be rejected.
+
+2) Compute total offset with a single sign
+   - Option A (explicit sign logic):
+       if hours > 0:
+           total_seconds = hours*3600 + minutes*60   # minutes must be >= 0 here
+       elif hours < 0:
+           total_seconds = hours*3600 - abs(minutes)*60
+       else:  # hours == 0
+           total_seconds = -abs(minutes)*60 if minutes < 0 else minutes*60
+   - Option B (convert to signed components then sum):
+       sign_h = 1 if hours >= 0 else -1
+       sign_m = 1 if minutes >= 0 else -1
+       if hours == 0:
+           total_seconds = sign_m * abs(minutes) * 60
+       else:
+           # minutes must have same sign as hours (except when hours==0)
+           total_seconds = hours*3600 + (minutes if hours > 0 else -abs(minutes))*60
+   - Choose one and make sure only one sign remains in total_seconds.
+
+3) Use total seconds for the final boundary check
+   - Compute limit = 23*3600 + 59*60 + 59 (or 23*3600 + 59*60 if you only support minute precision)
+   - if abs(total_seconds) > limit: raise ValueError
+
+4) Add unit tests for the nine sign combinations in your docstring and boundary cases:
+   - (2, 15), (2, 0), (2, -15)
+   - (0, 15), (0, 0), (0, -15)
+   - (-2, 15), (-2, 0), (-2, -15)
+   - (23, 59), (-23, -59), (23, 60)
+
+Example failing line patterns to correct
+- Wrong: if minutes < 0 and hours >= 0: raise ValueError
+  Fix: if minutes < 0 and hours > 0: raise ValueError
+
+- Wrong: total_seconds = abs(hours)*3600 + minutes*60; total_seconds *= -1 if hours < 0
+  Fix: compute signed minutes consistently (see step 2).
+
+If you paste the function (or the lines around the validation and offset arithmetic) I will point exactly to the failing line numbers and provide a one‑line patch and tests that demonstrate the fix.

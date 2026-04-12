@@ -1,0 +1,46 @@
+What happened (where it fails)
+- At get_paint (starts at line 54) you compute g on line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after, on lines 74–75 you check:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- When the test calls gps.get_paint(-0.5) with the default bounds (lower_bound = 0.0, upper_bound = 1.0):
+  - The numerator (value - self._lower_bound) is -0.5, so the computed g is negative.
+  - That triggers the if-condition and raises the ValueError reported by the test.
+
+Why it fails (root cause)
+- The class currently raises an exception if the computed channel g is outside 0..255 instead of clamping values to the allowed range.
+- The tests expect out-of-range inputs to be clamped to the nearest bound (below lower → black (0,0,0); above upper → white (255,255,255)), not to raise an error.
+- So the bug is at the logic after computing g: raising on out-of-range rather than clamping.
+
+Concrete fixes (step-by-step, with exact changes to make)
+1. Clamp the input value to the configured bounds before computing g:
+   - Replace or precede the computation on line 71 with:
+     value_clamped = max(self._lower_bound, min(value, self._upper_bound))
+     ratio = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+     g = int(ratio * 255.0)
+2. Alternatively, compute g as you do and clamp g instead of raising:
+     g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+     g = max(0, min(255, g))
+3. Handle the degenerate case when upper_bound == lower_bound (avoid division by zero):
+     if self._upper_bound == self._lower_bound:
+         g = 0  # or 255, or decide a sensible default; tests don't cover this but avoid crash
+4. Return the RGB triple (g, g, g) rather than raising.
+
+Minimal replacement for the failing lines (use in get_paint):
+- Check equal bounds, then clamp value and compute g:
+    if self._upper_bound == self._lower_bound:
+        g = 0
+    else:
+        value_clamped = max(self._lower_bound, min(value, self._upper_bound))
+        ratio = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+        g = int(ratio * 255.0)
+    g = max(0, min(255, g))
+    return (g, g, g)
+
+Why this satisfies the tests
+- For value = -0.5 with default bounds, value_clamped becomes 0.0 → ratio 0.0 → g = 0 → returns (0,0,0).
+- For value = 1.5, value_clamped becomes 1.0 → ratio 1.0 → g = 255 → returns (255,255,255).
+- For value = 0.5, ratio 0.5 → int(0.5*255.0) = 127 → returns (127,127,127) as expected.
+
+In short: the code raises when g is outside 0..255 (lines 71 and 74–75). Change it to clamp the input or clamp g and return (g, g, g) instead of raising to match the test expectations.

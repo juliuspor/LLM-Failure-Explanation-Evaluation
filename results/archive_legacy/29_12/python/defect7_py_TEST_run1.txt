@@ -1,0 +1,83 @@
+Short answer (root cause)
+- ClassUtils.to_class is treating the items as "already class names" instead of returning the actual classes of the values. In your input list ['Test', None, 99.0] it either returns the string 'Test' unchanged (or tries to resolve a class named "Test" and fails) and it returns None for the second element instead of type(None). The method is not using type(value) for normal Python values; it only tries name-based resolution for strings and special-cases None incorrectly.
+
+Why that causes the assert to fail
+- Your expected output is [str, type(None), float].
+- If ClassUtils.to_class returns:
+  - 'Test' (string) or raises an import/lookup error for 'Test' instead of returning str, the first element will not equal str.
+  - None instead of type(None), the second element will not equal type(None).
+  - 99.0 might be converted to float (that one is likely fine), but one mismatch is enough to fail the assert.
+- So the failure happens because to_class does not map a runtime string value 'Test' to its type str, and it does not return the class object type(None) for None.
+
+Where to look in the code (how to find the offending lines)
+- Open the ClassUtils class and find the to_class method.
+- Look for these patterns (one of these is your bug location):
+  - A branch like `if isinstance(value, str):` that attempts to treat the string as a class name (import, lookup in globals, or return the string unchanged).
+  - A branch like `if value is None: return None` that returns None rather than returning type(None).
+  - Any logic that only converts when the input is already a class object, e.g. `if isinstance(value, type): return value` and otherwise assumes the input is a class name.
+- Note the exact line numbers next to those branches (your editor or `grep` will show them). Those lines are where the returned value differs from your expectation.
+
+Concrete reproduction and debugging steps
+1. Add a small test outside your code:
+   - print(ClassUtils.to_class(['Test', None, 99.0]))
+   - print(type('Test'), type(None), type(99.0))
+2. In to_class, add logging or temporary prints in each branch:
+   - At entry: print("to_class input:", value)
+   - In string branch: print("string branch, value=", value)
+   - In None branch: print("none branch")
+   - In default branch: print("default branch, returning:", result)
+3. Run the test and observe which branch handles 'Test' and None. That will confirm the root cause.
+
+Precise fixes (step-by-step)
+1. Decide expected behavior:
+   - For runtime values (instances) like 'Test', None, 99.0: return their types (type(value)).
+   - For strings that are intended as class names (for example fully qualified names "module.Class"): treat them differently only when the API contract says so.
+2. Implement the behavior. Example implementation you can drop into ClassUtils.to_class:
+
+   def to_class(values):
+       result = []
+       for v in values:
+           # If the caller gave an actual class object, keep it
+           if isinstance(v, type):
+               result.append(v)
+               continue
+
+           # If the caller gave None, return the class type(None)
+           if v is None:
+               result.append(type(None))
+               continue
+
+           # If the caller gave an instance (str, int, float, etc.), return its type
+           if not isinstance(v, str):
+               result.append(type(v))
+               continue
+
+           # If the caller gave a string and you mean "map builtin/basic names" -> map explicitly
+           builtin_map = {'str': str, 'int': int, 'float': float, 'NoneType': type(None)}
+           if v in builtin_map:
+               result.append(builtin_map[v])
+               continue
+
+           # If the string is a fully qualified class name, attempt import/resolve
+           try:
+               module_name, _, class_name = v.rpartition('.')
+               if module_name:
+                   mod = __import__(module_name, fromlist=[class_name])
+                   result.append(getattr(mod, class_name))
+               else:
+                   # fallback: maybe they named a builtin/class in global scope
+                   result.append(globals().get(v, v))  # or raise an informative error
+           except Exception as e:
+               raise ValueError(f"cannot resolve class name '{v}': {e}")
+       return result
+
+3. Replace the current logic at the lines you identified with the corrected handling above. Ensure you handle the None branch explicitly where you found "return None".
+
+Minimal test to confirm fix
+- After updating, run:
+  result = ClassUtils.to_class(['Test', None, 99.0])
+  assert result == [str, type(None), float]
+
+If "Test" is actually supposed to be treated as a literal instance of str (not a class name), the above code will pass. If instead "Test" was intended to be resolved to a class named Test in some module, adjust the string-resolution branch to import/lookup as appropriate.
+
+If you want, paste the current implementation of ClassUtils.to_class (the method body and the few surrounding lines). I’ll point exactly which line(s) to change and provide a patch.

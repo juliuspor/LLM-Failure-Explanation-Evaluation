@@ -1,0 +1,70 @@
+What failed
+- The test expected a stored value of -0.0 (a floating negative zero).
+- The code produced 0 (a non-negative zero), so the assertion failed: "Expected -0.0, got 0".
+
+Where it happened
+- In your SliceUnion class, the failing code path is in add (line 126) and the call to append (line 138):
+  - line 126: def add(self, newcode):
+  - line 138:     self.append(newcode)
+
+Root cause (clear, concrete)
+- The add method is passing a value that has lost its negative sign (newcode became 0 rather than -0.0) before or when you append it to self.
+- Negative zero is a distinct floating-point value (-0.0). It will be lost whenever the value is coerced to an integer or otherwise normalized to the non-negative canonical zero.
+- In short: newcode is being converted (explicitly or implicitly) from the float -0.0 to a plain zero value before being stored. The code at add(self, newcode) simply forwards that already-normalized value into self.append(newcode), so the stored value is 0 not -0.0.
+
+Why that exact behavior matters
+- -0.0 == 0 evaluates True in numeric equality, so some checks won't catch it; but your test compares the expected representation/type/bit-pattern (or uses an assertion that distinguishes -0.0 vs 0), so losing the sign changes the test result.
+- The loss happens at or before the append call; append does not change sign by itself — something coerced newcode earlier in the add() routine or in the caller.
+
+Exact places to inspect and what to change
+1. Inspect add (line 126) and any lines between 126 and 138:
+   - Look for any conversion that would coerce newcode to an integer (int(...)), to a boolean, or any arithmetic that forces a canonical zero (e.g., int(newcode), round(newcode), math.floor/newcode // 1).
+   - Example bug patterns to look for:
+     - newcode = int(newcode)
+     - newcode = some_map[newcode] where map keys are ints
+     - newcode = int(some_expression_using_newcode)
+2. If newcode intentionally should stay a float (and you need to preserve -0.0), ensure you append the same float value:
+   - Do not call int(newcode).
+   - Do not pass newcode through any normalization routine that drops the sign.
+   - If the value may be a numpy scalar or Decimal, explicitly coerce to Python float in a way that preserves sign: newcode = float(newcode) (float(-0.0) preserves negative zero).
+3. If you must normalize numbers in add but still need to distinguish negative zero:
+   - Detect negative zero explicitly and preserve it:
+     - import math
+     - if newcode == 0.0 and math.copysign(1.0, newcode) < 0: preserve as -0.0
+     - Or store a tuple (value, sign) if semantic difference matters.
+4. Add a unit test that asserts type and sign:
+   - Use math.copysign or struct.unpack to check the sign bit rather than numeric equality.
+
+Concrete minimal fix example
+- If the current code contains something like:
+    def add(self, newcode):
+        newcode = int(newcode)   # <-- this strips -0.0 to 0
+        self.append(newcode)
+  Change it to:
+    def add(self, newcode):
+        # preserve negative zero if newcode is -0.0
+        if isinstance(newcode, (int,)) and newcode == 0:
+            # if input was an int zero but caller intended float -0.0,
+            # ensure you accept a float instead of forcing int
+            newcode = float(newcode)
+        self.append(float(newcode))
+- Or, if you must detect negative zero coming in as a float:
+    import math
+    def add(self, newcode):
+        if newcode == 0.0 and math.copysign(1.0, newcode) < 0:
+            # keep -0.0 explicitly
+            stored = -0.0
+        else:
+            stored = float(newcode)
+        self.append(stored)
+
+How to verify the fix
+- After making the change, add a test:
+    import math
+    su = SliceUnion()
+    su.add(-0.0)
+    assert su[-1] == 0.0          # numeric equality holds
+    assert math.copysign(1.0, su[-1]) < 0  # ensures the sign bit is negative
+
+Summary
+- The failure is caused because newcode loses the negative-zero sign before being appended. The append itself doesn't flip the sign — the coercion or normalization in or before add() does. Inspect lines between 126 and 138 for int() or other conversions, and change the code to preserve the float sign (use float(newcode) and math.copysign checks) so -0.0 remains -0.0 when stored.

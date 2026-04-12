@@ -1,0 +1,77 @@
+What happened
+- The test called cc.add_number(-0.0) and expected the consumer to emit the string "-0.0".
+- The implementation of MockCodeConsumer.add_number is converting the float -0.0 into an integer-like or canonical "zero" string before returning it, so get_code() contains "0" instead of "-0.0".
+- The root cause is losing the negative-zero sign when you normalize/convert the numeric value (for example by calling int(number) or by formatting only the integer part). In other words, the code that decides how to represent the number treats -0.0 as an ordinary zero and discards its sign.
+
+Why that happens (concrete, actionable places to look)
+- Open MockCodeConsumer.add_number. Find the branch that handles floats or “integer-valued” floats. Typical patterns that cause this:
+  - if number == int(number): s = str(int(number))
+  - s = ("%d" % number) or s = format(number, ".0f")
+  - s = str(int(number)) after testing number.is_integer()
+  Any such conversion will turn -0.0 into 0 (string "0"), because int(-0.0) == 0 and formatting that rounds to no fractional digits drops the sign.
+- Also check any normalization step in MockCodeConsumer.get_code or a helper that collapses numeric strings into a canonical form.
+
+How to confirm the hypothesis (diagnostic steps)
+1. Add a quick debug print inside add_number (where you convert/format):
+   - print("add_number received:", repr(number))
+   - print("is_integer:", number.is_integer() if hasattr(number,"is_integer") else None)
+   - print("copysign:", math.copysign(1.0, number))
+2. Re-run the failing test. If repr(number) shows -0.0 but the emitted string is "0", you’ve found the conversion step that removed the sign.
+
+Exact fixes (pick one) with concrete code changes
+
+Fix A — Preserve the float formatting using repr()
+- Replace whatever conversion step is turning the float into an int-string with a float-preserving conversion. For example, in add_number:
+  - Before (problematic):
+    s = str(int(number))   # loses negative zero
+  - After (keeps -0.0):
+    s = repr(number)       # repr(-0.0) -> '-0.0'
+- If you need nicer formatting for other floats, use repr for negative/zero special-case and your regular formatting otherwise.
+
+Fix B — Special-case signed zero if you must canonicalize integer-valued floats
+- If you want integers to be printed without a decimal point most of the time but still preserve the negative-zero sign, handle zero specially:
+  - Before:
+    if number.is_integer():
+        s = str(int(number))
+    else:
+        s = format(number, "g")
+  - After:
+    if number == 0.0:
+        # preserve sign of zero
+        s = "-0.0" if math.copysign(1.0, number) < 0 else "0.0"   # or "-0.0"/"0" depending on desired style
+    elif number.is_integer():
+        s = str(int(number))
+    else:
+        s = format(number, "g")
+- This uses math.copysign(1.0, number) < 0 to detect negative zero reliably.
+
+Minimal patch example (drop directly into add_number)
+- Option 1 (simple, recommended if you want exact float text):
+  import math
+  def add_number(self, number):
+      # Use repr to preserve negative zero and full float fidelity
+      s = repr(number)
+      self._buffer.append(s)
+- Option 2 (if you prefer integer output except preserve -0.0):
+  import math
+  def add_number(self, number):
+      if number == 0.0 and math.copysign(1.0, number) < 0:
+          s = "-0.0"
+      elif hasattr(number, "is_integer") and number.is_integer():
+          s = str(int(number))
+      else:
+          s = format(number, "g")
+      self._buffer.append(s)
+
+Why these fixes work
+- repr(number) returns the Python textual representation that keeps the sign for negative zero.
+- math.copysign(1.0, number) returns -1.0 for -0.0, so you can detect negative zero even though number == 0.0 is true.
+
+What to change now (step-by-step)
+1. Edit MockCodeConsumer.add_number.
+2. Locate the line(s) that convert number to a string by using int(...) or formatting with zero fractional digits.
+3. Replace that conversion with either repr(number) (preferred) or the special-case handling shown above.
+4. Run the test cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0' — it should pass.
+5. Run your full test suite to ensure no other formatting assumptions break.
+
+If you want, paste the current body of MockCodeConsumer.add_number and I’ll produce the exact one-line or small-block patch to apply.

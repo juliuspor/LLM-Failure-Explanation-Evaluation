@@ -1,0 +1,53 @@
+What happened (where): At lines 346–351 your code raises a TypeError whenever inferred_type == object and expected_type != object.
+
+Why it fails (root cause, citing variables and lines):
+- inferred_type is being set earlier in the code to object when the element type could not be determined exactly (for example when the list contains mixed types, or only None values). You then reach line 346:
+  - The condition if inferred_type == object and expected_type != object is true whenever that "unknown" case appears and the caller asked for a specific expected_type.
+  - The code then raises the TypeError at lines 347–351 unconditionally, claiming a ClassCastException-style error.
+- In short: inferred_type == object is used as a signal for "unknown element type", but the code treats that signal as a hard mismatch against any concrete expected_type and always fails instead of trying a reasonable conversion or a more precise check.
+
+Why this is wrong in practice:
+- A list whose elements couldn't be inferred (inferred_type == object) might still be safely convertible to the expected_type (for example all elements are strings but inference returned object because of None or earlier logic).
+- The check is too coarse: it does not test whether elements actually require casting or whether they already are instances of expected_type; it jumps straight to error and gives a misleading ClassCastException message.
+
+Exactly what to change (step-by-step fixes):
+1. Replace the coarse equality check with a real compatibility test. Use issubclass when inferred_type is known, and when inferred_type == object try element-wise checks/casts:
+   - If inferred_type is not object, use:
+     if not issubclass(inferred_type, expected_type):
+         raise TypeError( ... )
+   - If inferred_type is object, attempt to validate or convert the list elements to expected_type:
+     - Iterate the list and check isinstance(elem, expected_type) for each element; if all pass, succeed.
+     - If some fail, attempt to cast/convert each failing element to expected_type (if conversion is defined), catching exceptions and raising a clear TypeError listing which element(s) failed.
+2. Give a clear error message that references the variable names and the failure reason. For example:
+   raise TypeError(f"Cannot cast list elements to {expected_type.__name__}: element at index {i} is {type(elem).__name__}")
+3. If you prefer to disallow implicit conversion, change the condition to only raise when you know the types are incompatible:
+   - Replace the lines 346–351 with:
+     if inferred_type is not object:
+         if not issubclass(inferred_type, expected_type):
+             raise TypeError(f"Cannot cast {inferred_type.__name__} list to {expected_type.__name__} list")
+     else:
+         # inferred_type == object: validate elements
+         for i, elem in enumerate(lst):
+             if not isinstance(elem, expected_type):
+                 raise TypeError(f"Element at index {i} (type {type(elem).__name__}) cannot be cast to {expected_type.__name__}")
+4. If inferred_type can legitimately be the builtin object for generic typing (e.g., typing.Any), make sure you treat that as "unknown" rather than "definitely incompatible". Use explicit checks for typing.Any or None if needed.
+
+Concrete minimal replacement for lines 346–351 (example):
+ 346 |             if inferred_type is not object:
+ 347 |                 if not issubclass(inferred_type, expected_type):
+ 348 |                     raise TypeError(
+ 349 |                         f"Cannot cast {inferred_type.__name__} list to {expected_type.__name__} list"
+ 350 |                     )
+ 351 |             else:
+ 352 |                 # inferred_type == object: validate elements one-by-one
+ 353 |                 for i, elem in enumerate(the_list):
+ 354 |                     if not isinstance(elem, expected_type):
+ 355 |                         raise TypeError(
+ 356 |                             f"Element at index {i} (type {type(elem).__name__}) cannot be cast to {expected_type.__name__}"
+ 357 |                         )
+
+Why this will fix it:
+- You stop treating "unknown" inferred_type as an immediate incompatibility.
+- You perform a real check or conversion on the actual list elements, so you only raise if there is a real incompatibility and the error message points to the exact element and type that caused the failure.
+
+If you want, tell me how inferred_type is computed earlier or paste the surrounding code and I will give a tailored patch you can drop into those line numbers.

@@ -1,0 +1,46 @@
+What happened (root cause)
+- The failure happens inside LocaleUtils.to_locale when parsing the string "fr__POSIX".
+- The parser first extracts the language (positions 0–1) and then expects a country code when it sees an underscore separator. The code assumes that after the first underscore there will always be two uppercase letters for the country.
+- In the "language__variant" form (double underscore), the country is intentionally empty and the variant follows the second underscore. Your input "fr__POSIX" has an empty country (""), but the current code reads the character at position 3 (the first character after the first underscore) and insists it is an uppercase letter. Because that character is '_' (the second underscore), the code raises ValueError("Invalid locale format: fr__POSIX").
+
+Where exactly it occurs
+- In LocaleUtils.to_locale, after setting language = locale_str[0:2], the code checks separators and country characters. The problematic check is the code that looks at locale_str[3] (or similar) and requires it to be an uppercase letter. That check does not allow locale_str[3] == '_' and so throws the ValueError for "fr__POSIX".
+
+Why this is incorrect
+- Java’s Locale parsing accepts the pattern language__variant (language + double underscore + variant) meaning country is empty and variant is present. The Python implementation fails to recognize the double-underscore case and treats the second underscore as an invalid country character.
+
+Exact fix (step-by-step)
+1. In LocaleUtils.to_locale, after successfully extracting language (locale_str[0:2]):
+   - Check if len(locale_str) == 2 -> return Locale(language, "").
+2. If len(locale_str) > 2, assert locale_str[2] == '_' (separator). Then:
+   - If locale_str[3] == '_' (double underscore case):
+     - Set country = "".
+     - Set variant = locale_str[4:] (may be empty or non-empty).
+     - Return Locale(language, country, variant) (or Locale(language, country) if variant empty).
+   - Else (single underscore followed by country):
+     - Validate that locale_str has at least positions 3 and 4 and that locale_str[3:5] are uppercase letters.
+     - Set country = locale_str[3:5].
+     - If length > 5 and locale_str[5] == '_' then variant = locale_str[6:]; else variant = "".
+     - Return Locale(language, country, variant).
+
+Example of the minimal conditional fix (pseudo-Python)
+- Locate the block that reads the country/variant and replace with logic like:
+  if locale_str[2] != '_':
+      raise ValueError(...)
+  # handle double underscore: empty country, variant follows
+  if len(locale_str) > 3 and locale_str[3] == '_':
+      country = ""
+      variant = locale_str[4:] if len(locale_str) > 4 else ""
+      return Locale(language, country, variant)
+  # otherwise parse country as two uppercase letters
+  country = locale_str[3:5]
+  ...
+
+Tests to confirm
+- The existing failing test: LocaleUtils.to_locale("fr__POSIX") should return Locale("fr", "", "POSIX").
+- Also ensure these still pass: "en", "en_US", "en_US_WIN", "en__UNIX".
+- Add a unit test that verifies the parser accepts double-underscore and returns empty country, as your test suite already does.
+
+Summary
+- The code treats the second underscore as an invalid country character because it never checks for the double-underscore (empty country) case.
+- Fix: explicitly detect locale_str[3] == '_' after the first underscore and treat that as the empty country + variant branch, instead of validating an uppercase country letter at position 3.

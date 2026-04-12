@@ -1,0 +1,36 @@
+What happened (where it failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) goes into DateTimeZone.for_offset_hours_minutes (the code shown), and fails to produce the expected id "-02:15".
+- The bug is in the block that builds minutes_offset; the wrong arithmetic is used at the two lines shown:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+
+Why it failed (root cause)
+- The code is trying to combine the hours and minutes parts into a single total minutes value. For negative offsets both parts should contribute negatively (so total = hours*60 + minutes, with minutes negative).
+- But the two lines are swapped relative to the tested sign of minutes. For the call (-2, -15) the code takes the branch for negative minutes and executes
+  minutes_offset = hours_in_minutes - minutes_offset
+  which computes -120 - (-15) = -105 minutes (i.e. -1:45) instead of the correct -120 + (-15) = -135 minutes (i.e. -2:15).
+- In short: the sign-handling is inverted — when minutes is negative the code subtracts minutes_offset (undoing the sign) instead of adding it; when minutes is positive it adds when it should subtract in some branches. That is why the resulting offset is wrong.
+
+Exact place to fix
+- Method: DateTimeZone.for_offset_hours_minutes
+- Lines: 406 and 408 in the slice you gave.
+
+Concrete fixes (step-by-step)
+1. Swap the arithmetic on those two lines so minutes are combined with hours using the correct sign. Replace
+   - line 406: minutes_offset = hours_in_minutes - minutes_offset
+   - line 408: minutes_offset = hours_in_minutes + minutes_offset
+   with
+   - line 406: minutes_offset = hours_in_minutes + minutes_offset
+   - line 408: minutes_offset = hours_in_minutes - minutes_offset
+   This makes a negative minutes value reduce the total, and a positive minutes value increase it, as intended.
+2. Add unit tests for these cases:
+   - DateTimeZone.for_offset_hours_minutes(-2, -15) -> id '-02:15'
+   - DateTimeZone.for_offset_hours_minutes(-2, 15)  -> id '-01:45' (or the defined expected semantics if minutes sign interpretation differs; but cover both signed-minute inputs)
+   - DateTimeZone.for_offset_hours_minutes(2, -15)  -> id '+01:45' or confirm expected behavior for mixed signs
+   (Make sure tests assert the intended interpretation of minutes sign.)
+3. Run existing overflow check (lines 411–412) to ensure no new edge-case is introduced.
+
+Why this fix works
+- Adding minutes_offset to hours_in_minutes when minutes is negative will keep the minutes contribution negative, producing the correct total minute offset. Swapping the two lines restores the intended sign logic.
+
+No other changes are required unless your API intends a different interpretation of mixed-sign inputs; then clarify the API and add explicit input validation.

@@ -1,0 +1,59 @@
+What happened (where: LocaleUtils.to_locale, using variable locale_str, lines shown):
+- You called LocaleUtils.to_locale('fr__POSIX').
+- The code at line 243 does: return Locale(locale_str[0:2], locale_str[3:5])
+- Then lines 245–247 check locale_str[5] and possibly raise a ValueError or return a Locale with a variant.
+- For 'fr__POSIX' the code hits the wrong branch and raises ValueError instead of returning Locale('fr', '', 'POSIX').
+
+Why it fails (root cause, exact indices and characters):
+- The string 'fr__POSIX' has characters at indices: 0='f', 1='r', 2='_', 3='_', 4='P', 5='O', ...
+- The code assumes the second underscore for an empty country sits at index 5 (it checks locale_str[5] in line 245). That is incorrect for the input with an empty country: the second underscore is at index 3, not 5.
+- Because of that wrong index check, the code evaluates locale_str[5] (which is 'O'), finds it != '_' and raises ValueError(f"Invalid locale format: {locale_str}") at line 246.
+- Also, line 243's slice locale_str[3:5] is wrong for an empty country: locale_str[3:5] for 'fr__POSIX' yields '_P', so even if it returned a Locale it would use an incorrect country value.
+
+Consequence:
+- The function mis-detects the format for 'll__variant' (language + empty country + variant) because it uses the wrong character positions and slices. So it raises an error instead of returning Locale('fr', '', 'POSIX').
+
+How to fix it (concrete steps, exact code you can apply):
+Option A — fix index logic for the empty-country case (minimal change)
+1. Detect the double underscore at index 2 and 3. Replace the wrong checks with explicit checks for locale_str[2] and locale_str[3].
+2. Example replacement for the relevant fragment (replace lines 243–247):
+
+  # handle empty country, format 'll__variant'
+  if locale_str[2] == '_' and locale_str[3] == '_':
+      return Locale(locale_str[0:2], '', locale_str[4:])
+  # handle language+country, format 'll_CC' or 'll_CC_variant'
+  if locale_str[2] == '_' and locale_str[5] == '_':
+      return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+  return Locale(locale_str[0:2], locale_str[3:5])
+
+(Adjust surrounding logic as needed so these branches run in the correct order.)
+
+Option B — simpler and more reliable: split on '_' (recommended)
+1. Parse using split with max splits to avoid brittle index math.
+2. Replace the parsing code with:
+
+  parts = locale_str.split('_', 2)  # at most 2 splits
+  lang = parts[0]
+  if len(parts) == 1:
+      return Locale(lang)
+  if parts[1] == '':
+      # ll__variant
+      variant = parts[2] if len(parts) > 2 else ''
+      return Locale(lang, '', variant)
+  # parts[1] is country
+  country = parts[1]
+  if len(parts) == 2:
+      return Locale(lang, country)
+  return Locale(lang, country, parts[2])
+
+3. This avoids hard-coded index positions and is easier to read and test.
+
+Tests to add (concrete):
+- assert LocaleUtils.to_locale('fr') == Locale('fr')
+- assert LocaleUtils.to_locale('fr_FR') == Locale('fr', 'FR')
+- assert LocaleUtils.to_locale('fr_FR_POSIX') == Locale('fr', 'FR', 'POSIX')
+- assert LocaleUtils.to_locale('fr__POSIX') == Locale('fr', '', 'POSIX')  <- the failing case
+- assert LocaleUtils.to_locale('fr_') handles as you expect (decide policy and test it)
+
+Summary:
+The code fails because it uses wrong fixed character indices (checks locale_str[5] and slices locale_str[3:5]) for the empty-country ('ll__variant') form. Fix by explicitly detecting the double underscore at indices 2 and 3, or better, parse with split('_', 2) as shown.

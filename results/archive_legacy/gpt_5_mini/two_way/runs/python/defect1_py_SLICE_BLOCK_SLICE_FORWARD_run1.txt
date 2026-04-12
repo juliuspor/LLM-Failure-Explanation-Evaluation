@@ -1,0 +1,50 @@
+What happened (where and what failed)
+- At lines 396–397 the code checks the parsed minutes value:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That ensures the minute component parsed from the input is 0..59.
+- Later the same variable minutes_offset is reused and reassigned at:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  Here hours_in_minutes is hours * 60, so those assignments turn minutes_offset into the combined minute count (hours*60 ± minutes).
+- At 405 the code converts that combined minute count to milliseconds:
+  - 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- At 407 a ValueError("Offset is too large") is raised when that multiplication or subsequent check detects an overflow/invalid offset.
+
+Root cause (why it failed)
+- The variable minutes_offset is used for two different things:
+  1. The parsed minute component (0..59), validated at lines 396–397.
+  2. The total offset in minutes (hours*60 ± minutes), computed at lines 402/404.
+- Because the code reuses minutes_offset, the initial range check (396–397) only validates the minute component, not the final combined offset. After the assignment at 402/404 minutes_offset can be much larger than 59 (for example hours_in_minutes + minutes), and that larger value can exceed allowed offset ranges or cause overflow when multiplied by milliseconds. That is why execution later hits the "Offset is too large" path at 407.
+
+Concrete example that reproduces the failure
+- Suppose hours = 14, minutes = 30:
+  - hours_in_minutes = 14 * 60 = 840
+  - initial minutes_offset = 30 (passes 396–397)
+  - after line 404: minutes_offset = 840 + 30 = 870
+  - 405 multiplies 870 by MILLIS_PER_MINUTE — this may exceed allowed offset range and triggers the ValueError at 407.
+- The code's minute-range check gave false confidence because it validated only the minute component, not the combined offset.
+
+How to fix it (explicit steps)
+1. Stop reusing minutes_offset for two meanings. Introduce separate variables:
+   - minute_component for the parsed minutes (0..59).
+   - total_minutes for the combined hours*60 ± minute_component.
+2. Keep the existing minute component validation (lines 396–397) using minute_component.
+3. Compute total_minutes using:
+   - if negative sign: total_minutes = hours_in_minutes - minute_component
+   - else: total_minutes = hours_in_minutes + minute_component
+4. Validate total_minutes against the allowed offset range (or rely on safe_multiply and whatever limit-check you have), then compute offset:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+5. Replace uses of minutes_offset at lines 402–405 and later with total_minutes and remove the misleading earlier check on the reused variable.
+
+Minimal code-change sketch (where to edit)
+- Replace the checks/assignments around 396–405 with:
+  - validate minute_component (existing check)
+  - compute hours_in_minutes = hours * 60
+  - if negative: total_minutes = hours_in_minutes - minute_component
+    else: total_minutes = hours_in_minutes + minute_component
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+  - continue existing overflow/limit checks as before
+
+Summary
+- The failure comes from reusing minutes_offset for both the minute component and the combined offset in minutes. The initial check (lines 396–397) only validated the minute component; after reassignment at 402/404 the variable can hold a much larger value, causing the later overflow/limit failure reported at line 407. Use separate variables and validate the combined total before converting to milliseconds.

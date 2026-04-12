@@ -1,0 +1,47 @@
+What happened (root cause)
+- The test calls cc.add_number(-0.0). Internally add_number passes that float into MockCodeConsumer.add (line 126) and then into append (called at line 138).
+- Somewhere in add() or append() the code treats zero specially using an equality check like "if newcode == 0:" or otherwise normalizes numeric zeros. Because -0.0 == 0.0 is True in Python, that branch runs for -0.0 and the code replaces/normalizes the value to a plain zero with no negative sign. That results in the string "0" (or "0.0") being produced instead of "-0.0".
+- The failing assertion shows the consumer returned 0 (no negative sign) where the test expected the negative-zero string '-0.0'. In short: the equality check/newcode-normalization erased the sign of negative zero.
+
+Where it occurs (exact references you gave)
+- add(self, newcode) at line 126 is the first place newcode is handled.
+- append(newcode) is called at line 138; the normalization/branch that drops the negative sign happens in one of these methods (the equality check likely lives in add()).
+
+Why -0.0 loses its sign
+- In Python floats, -0.0 compares equal to 0.0 (-0.0 == 0.0 is True). An equality test or code that canonicalizes "zero" will treat -0.0 the same as +0.0 and therefore remove the sign bit before converting to text. Converting the normalized value to a string yields "0" or "0.0", not "-0.0".
+
+Concrete fixes (exact steps)
+1. Find the zero-normalizing branch in add() (around line 126). It will look like one of:
+   - if newcode == 0:
+   - if newcode in (0, 0.0):
+   - if not newcode:  # also matches -0.0
+2. Replace that logic so it does not throw away the sign of a floating zero. Two precise alternatives:
+   - If you merely need to preserve the input textual form, convert using repr(newcode) or format that preserves sign when appropriate:
+     - Replace code-path that turns floats into a canonical 0 with code that uses repr(newcode) for floats:
+       - e.g. text = repr(newcode)  # repr(-0.0) -> '-0.0'
+   - If you must detect negative zero explicitly, check the sign bit before normalizing:
+     - import math
+     - is_neg_zero = isinstance(newcode, float) and newcode == 0.0 and math.copysign(1.0, newcode) < 0.0
+     - then preserve a "-0.0" text if is_neg_zero, else continue normalization.
+3. Apply the change in both add() (line 126) and append() (line 138) if both touch numeric normalization.
+4. Add a unit test for negative zero (your current test) so future changes don't regress.
+
+Minimal patch example (replace equality branch)
+- Old (example):
+  if newcode == 0:
+      newcode = 0
+      self.append(str(newcode))
+- New:
+  import math
+  if isinstance(newcode, float) and newcode == 0.0:
+      if math.copysign(1.0, newcode) < 0.0:
+          self.append('-0.0')
+      else:
+          self.append('0.0')
+  else:
+      self.append(str(newcode))
+
+Why this fix works
+- It stops treating -0.0 as indistinguishable from +0.0 when producing the textual code. math.copysign (or using repr) lets you detect/preserve the negative zero sign and produce '-0.0' as the test expects.
+
+If you want, paste the body of add() and append() (lines ~120–150) and I will give an exact one-line patch for those lines.

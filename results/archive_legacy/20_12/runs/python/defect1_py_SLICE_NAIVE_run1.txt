@@ -1,0 +1,56 @@
+What happened
+- The failure comes from DateTimeZone.for_offset_hours_minutes at lines 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15). Because you passed minutes_offset = -15, the code validates minutes before it applies the intended sign-combining logic and rejects the negative minutes immediately, raising ValueError: Minutes out of range: -15.
+
+Why this is wrong (root cause)
+- The method is intended to support negative minute values when the hours argument is negative (see the docstring and the test case: (-2, -15) => -02:15).
+- The current validation (lines 400–401) enforces minutes_offset to be between 0 and 59 unconditionally, so it disallows valid negative-minute cases such as (-2, -15).
+- The sign combination logic that makes (-2, -15) valid is performed later (lines 404–408):
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  But since the code never gets there for negative minutes, the intended transformation never runs.
+
+Where it occurred
+- Method: DateTimeZone.for_offset_hours_minutes
+- Lines: the input validation at lines 400–401 triggers the exception, before the sign-handling code at lines 404–408.
+
+What to change (concrete steps)
+1. Remove or relax the early minutes validation so negative minute values are allowed when appropriate. Replace the unconditional check with:
+   - Validate that minutes_offset is between -59 and +59 (inclusive).
+   - After combining the hours and minutes into total minutes, validate the final value range (no greater than 23*60+59 in magnitude).
+2. Implement the checks in this order:
+   a. if hours_offset < -23 or hours_offset > 23: raise ValueError(...)
+   b. if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+   c. combine hours and minutes into total_minutes according to sign rules (keep the existing lines 404–408 logic).
+   d. compute offset = FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE) and catch overflow.
+   e. make sure the resulting millis offset is within allowed range (optional — for_offset_millis already checks range).
+3. Example corrected fragment:
+
+    if hours_offset == 0 and minutes_offset == 0:
+        return cls.UTC
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError(f"Hours out of range: {hours_offset}")
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    try:
+        hours_in_minutes = hours_offset * 60
+        if hours_in_minutes < 0:
+            total_minutes = hours_in_minutes - minutes_offset
+        else:
+            total_minutes = hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+    return cls.for_offset_millis(offset)
+
+Why that fixes the test
+- With minutes allowed to be negative (within -59..59), the combination logic will convert (-2, -15) into total_minutes = -120 - (-15) = -105 minutes = -02:15, producing the expected zone id "-02:15".
+
+Extra note
+- Also ensure you test edge cases like (0, -15) which per your doc should produce -00:15; the same adjusted validation supports that.

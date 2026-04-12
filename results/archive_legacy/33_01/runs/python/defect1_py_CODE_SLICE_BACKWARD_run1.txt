@@ -1,0 +1,51 @@
+What goes wrong
+- At lines 396–397 you correctly validate that the parameter minutes_offset is in 0..59.
+- Later you reuse that same parameter name to hold the total offset in minutes:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+    else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- Reusing minutes_offset for two different things (the input minutes and then the computed total minutes) is the root cause:
+  - It makes the code hard to read and easy to reason about.
+  - It invites logic errors and accidental sign mistakes.
+  - If you ever change the validation or the calculation, you can end up subtracting or adding the wrong value because you no longer clearly distinguish the "input minutes" from the "total minutes".
+
+Concrete example showing the problem
+- Input: hours_offset = -2, minutes_offset = 30
+  - hours_in_minutes = -120
+  - code computes minutes_offset = -120 - 30 = -150 — that is correct in this case.
+- But because the same local name was reused, a later maintenance change, or a different branch, can easily break the calculation. Reusing the parameter in place like this is fragile and is likely why the call later fails in practice (wrong sign/amount gets passed into FieldUtils.safe_multiply or for_offset_millis).
+
+Why this causes the observed failure (where the code throws / produces a wrong offset)
+- The code is mutating the input variable minutes_offset into a different meaning (total minutes). That makes a future overflow check, arithmetic, or error message refer to the wrong value. In your stack trace slice the validation (lines 396–397) is shown right before the mutation; any later exception will reference or operate on the mutated value and be confusing or incorrect.
+- The immediate fix is to stop reusing the input variable for the computed value so the logic is obvious and cannot accidentally use the wrong sign/value.
+
+How to fix it (clear step-by-step)
+1. Keep the input parameters unchanged. Introduce a new variable for the total minutes:
+   - total_minutes = hours_offset * 60
+2. Add or subtract the input minutes to that new variable depending on sign of hours_offset:
+   - if hours_offset < 0:
+       total_minutes -= minutes_offset
+     else:
+       total_minutes += minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE and pass that to for_offset_millis.
+4. Optionally add explicit unit tests for negative hours with positive minutes (e.g. -2:30) and positive hours with minutes (e.g. 2:30), and boundary values (-23:59, +23:59).
+
+Fixed sketch (minimal change)
+- Replace the block
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  with
+    total_minutes = hours_offset * 60
+    if total_minutes < 0:
+        total_minutes -= minutes_offset
+    else:
+        total_minutes += minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+This keeps input parameters intact, makes the intent explicit, and prevents the kind of fragile bug that caused your failure.

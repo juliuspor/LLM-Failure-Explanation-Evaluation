@@ -1,0 +1,49 @@
+What happened (root cause)
+- At lines 335–336 you set inferred_type = type(array). But type(array) is the Python list class (list), not the element/component type stored inside that list.
+- In the failing test you call ArrayUtils.add(None, None, expected_type=str):
+  - array is None and element is None, so line 338 sets inferred_type = object.
+  - Later at lines 346–351 you check if inferred_type == object and expected_type != object and raise TypeError. Because expected_type was str, you raise the exception and the test fails with:
+    TypeError: Cannot cast object list to str list (...)
+- So the immediate failure occurs because inferred_type is object (no element to infer), and the code treats that as an irrecoverable mismatch with expected_type (line 346). The code never uses expected_type to choose the component type when both array and element are None.
+
+Where it occurs (specific variables / lines)
+- Wrong value set: inferred_type = type(array) at line 336 — that gives 'list' (the container type), not the element type.
+- Wrong branch for null/null + expected: inferred_type = object at line 338 then the TypeError raised at lines 346–351.
+
+Why that causes the error in plain terms
+- The method should decide the element/component type for the new list. With array present you must derive the element type from its contents (elements), not from the list object. With both array and element None but an expected_type provided, you should honor expected_type as the component type instead of throwing.
+- Current logic treats object as "uninferrable" and immediately rejects when expected_type is provided, causing the test that expects [None] to be returned to fail.
+
+Exact, actionable fixes (steps you can apply)
+1. When array is not None, infer the element type from its elements:
+   - If array has at least one element (len(array) > 0 and array[0] is not None), set inferred_type = type(array[0]).
+   - If array is empty, defer to expected_type (if provided) or to object.
+2. When element is not None, use inferred_type = type(element).
+3. When both array and element are None:
+   - If expected_type is provided, set inferred_type = expected_type.
+   - Otherwise set inferred_type = object.
+4. Only raise the TypeError if expected_type is provided and the inferred_type is incompatible (not simply when inferred_type == object). For the current behavior you can keep the same message but only raise if expected_type is provided and inferred_type is object and expected_type is not object — but prefer setting inferred_type to expected_type when possible (see step 3), so the exception won't be triggered for the null/null/expected case.
+
+Suggested replacement logic (pseudo-Python you can drop in)
+    if array is not None:
+        # infer from first non-None element if possible
+        for v in array:
+            if v is not None:
+                inferred_type = type(v)
+                break
+        else:
+            inferred_type = expected_type if expected_type is not None else object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = expected_type if expected_type is not None else object
+
+    # proceed to copy/grow and set element...
+    # keep the TypeError check only for real incompatibility cases
+
+Why this will fix the failing test
+- For ArrayUtils.add(None, None, expected_type=str): inferred_type will be set to str (step 3), so no TypeError will be raised and the function will return [None] as the test expects.
+- For arrays that exist, inferring from actual elements yields the correct component type instead of mistakenly using the container type list.
+
+Extra note
+- The current use of type(array) was the primary logical bug (line 336). Fixing that and honoring expected_type when both inputs are None resolves the LANG-35-like behavior your tests exercise.

@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The code that parses the locale lives at the return/if block shown in the slice (lines 243–247).
+- For the input "fr__POSIX" the code goes into the branch that slices out country with locale_str[3:5] and returns a Locale immediately (line 243).
+- That slice picks the characters at positions 3 and 4. For "fr__POSIX" those are '_' and 'P', so you end up with a country value of "_P" instead of an empty country and a variant "POSIX".
+- The parser never reaches the later branch that would treat the string as language + empty country + variant (the code that checks locale_str[5] at line 245), so it never constructs Locale('fr', '', 'POSIX').
+- Because the parsing is incorrect, the code later rejects the input and raises ValueError: "Invalid locale format: fr__POSIX".
+
+Why it fails (root cause)
+- The parser assumes a fixed pattern like "xx_YY" or "xx_YY_ZZZ" and unconditionally slices locale_str[3:5] for the country (line 243). That logic cannot handle an empty country (the pattern "xx__VARIANT"), because the country is encoded as an empty string between two underscores and the code treats the underscore at index 3 as part of the country.
+- The code also has a later check that expects an underscore at index 5 for the variant case (line 245), but that check is never reached because of the premature return.
+- Concretely:
+  - locale_str[0:2] → "fr" (correct)
+  - locale_str[3:5] → "_P" (incorrect; should be "" for empty country)
+  - locale_str[6:] would be "OSIX" if reached (also wrong indices for this pattern)
+
+Specific lines of interest
+- Line 243: return Locale(locale_str[0:2], locale_str[3:5]) — this return is too early and uses wrong indices for the empty-country case.
+- Line 245: if locale_str[5] != '_': — this check is intended for the language+country+variant shape but is never used because of the earlier return.
+- Line 246: raise ValueError(f"Invalid locale format: {locale_str}") — the error message you saw is raised because the input was not recognised after parsing went wrong.
+
+How to fix it (clear actionable steps)
+Option A — simple explicit handling for empty country
+1. Before the existing return at line 243, add a branch that detects the double-underscore empty-country pattern:
+   - if locale_str[2] == '_' and locale_str[3] == '_':
+       return Locale(locale_str[0:2], '', locale_str[4:])
+2. Keep the existing branches for the other forms.
+
+Concrete patch (replace lines 243–247 with this logic)
+- if len(locale_str) >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+    return Locale(locale_str[0:2], '', locale_str[4:])
+- if len(locale_str) == 5:
+    return Locale(locale_str[0:2], locale_str[3:5])
+- if len(locale_str) > 5:
+    if locale_str[5] != '_':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Option B — use split (robust and clearer)
+1. Split the string by '_' with a maxsplit of 2:
+   - parts = locale_str.split('_', 2)
+2. Normalize missing parts and construct Locale appropriately:
+   - language = parts[0]
+   - country = parts[1] if len(parts) > 1 else ''
+   - variant = parts[2] if len(parts) > 2 else ''
+3. Validate language length and raise ValueError for invalid forms.
+
+Why option B is preferable
+- It avoids fragile index arithmetic and makes the empty-country case ("fr__POSIX") parse naturally to ['fr', '', 'POSIX'].
+- Easier to read and less error-prone.
+
+Summary
+- Root cause: wrong index-based slicing and a premature return at line 243 that mishandles the "xx__VARIANT" form (empty country), producing wrong country value and leading to the ValueError.
+- Fix: detect the double-underscore empty country case (or use split('_', 2)) before returning, and then construct Locale('fr', '', 'POSIX') as intended.

@@ -1,0 +1,49 @@
+What happened (root cause)
+- On line 337 you set inferred_type = type(array). That returns the Python type of the container object (usually list), not the element/component type you intend to use for creating a new typed array.
+- ArrayUtils._copy_list_grow1(array, inferred_type) expects a component/element type (the type of entries), but you pass the container type. That produces/returns a list/array whose runtime component type is wrong.
+- The subsequent check at line 346 (if inferred_type == object and expected_type != object) is intended to detect the problematic case where you only know a generic object element type and must reject a cast to a more specific expected_type. Because inferred_type is list (or a subclass) instead of object or the element type, that check will often be false and you will not raise the TypeError when you should.
+- As a result the code allows creation/return of a list whose element-type metadata doesn't match expected_type, and you later hit a ClassCastException (or other type/cast failure) when that list is used as if it had elements of expected_type.
+
+Where it occurs (specific lines/variables)
+- line 337: inferred_type = type(array) — wrong value (gives container type)
+- line 340: inferred_type = object — only used when element is None and array is None
+- line 346: if inferred_type == object and expected_type != object: — this test fails to catch the wrong situation because inferred_type will be list, not object or element type
+- ArrayUtils._copy_list_grow1(array, inferred_type) receives a wrong inferred_type and therefore returns an array with incorrect component type
+- new_list[len(new_list) - 1] = element may later appear to succeed but causes the mismatch to surface elsewhere
+
+Why that exact cause leads to failure
+- The code confuses "type of the container" with "type of elements". Passing the container type into the array-copy/creation routine produces an array whose component type does not match the intended element type or expected_type. The type-check/exception logic compares against object only and therefore misses the mismatch. That lets an invalid cast go through, and the program breaks where the wrong component type is assumed.
+
+Concrete fixes (step-by-step)
+1. When array is not None and contains elements, infer the element type from an element: e.g.
+   - if len(array) > 0: inferred_type = type(array[0])
+2. When array is not None but empty:
+   - if expected_type is provided: inferred_type = expected_type
+   - else: inferred_type = object
+3. When array is None but element is not None:
+   - inferred_type = type(element) (this is already done)
+4. Update the check at line 346 to detect when inferred_type is object or otherwise not compatible with expected_type:
+   - if expected_type is not None and inferred_type is not expected_type and inferred_type is not object: decide whether to raise or cast; at minimum handle the empty-array case above.
+5. Ensure ArrayUtils._copy_list_grow1 is given the element/component type (inferred_type as fixed above).
+
+Suggested patch (concise)
+Replace the inference block with:
+
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])    # element type from existing items
+        else:
+            inferred_type = expected_type or object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Then adjust the check to:
+
+    if expected_type is not None and inferred_type == object and expected_type != object:
+        raise TypeError(...)
+
+(or perform stricter compatibility checks if you require exact matches).
+
+That change ensures inferred_type is the element type (or expected_type for empty arrays) rather than the container type and prevents the bad cast from being allowed.

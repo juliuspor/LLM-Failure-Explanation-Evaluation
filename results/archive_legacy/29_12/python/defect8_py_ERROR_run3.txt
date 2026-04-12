@@ -1,0 +1,95 @@
+Short answer
+Your code passed the string "fr__POSIX" to a locale parser, and that string is not a valid locale identifier for the library you used. The parser raised ValueError: Invalid locale format: fr__POSIX. The root cause is the extra empty territory field (the "__") or the wrong placement of the POSIX variant — the parser does not accept that format.
+
+Why this happens (plain language, no jargon)
+Locale strings follow a specific pattern (language, optionally territory, optionally variant). "fr__POSIX" has two underscores in a row: that means "language = fr, territory = (empty), variant = POSIX". Many Python functions and third‑party libraries expect no empty territory field and reject that form. So when your code called a locale-parsing function with "fr__POSIX", that function detected the invalid format and raised ValueError.
+
+Where it most likely occurred in your code (what to look for)
+Search your code for calls that parse or set locales. The exception will be raised at the line where one of these functions is called:
+
+- locale.setlocale(..., locale_string) — in the Python standard library locale module
+- babel.Locale.parse(locale_string) or babel.core.Locale.parse(...) — in Babel
+- babel.dates.get_locale(...), babel.support.Translations(...), or other Babel helpers that accept locale identifiers
+- Django or other frameworks that read LANG/LC_ALL and call into the above functions
+- Any custom function that normalizes a locale string and then passes it on
+
+You’ll see the exact ValueError thrown on the line with that call in your stack trace. If you paste the stack trace I can point to the exact file/line number.
+
+Concrete steps to find and fix it
+1) Find the failing call
+   - Inspect your traceback. Note the file and line number where ValueError is raised (e.g., mymodule.py:42).
+   - Open that file and examine the exact function call — e.g., locale.setlocale(locale.LC_ALL, locale_str) or Locale.parse(locale_str).
+
+2) Confirm the problematic input
+   - Print or log the locale string just before the call:
+     - Example: print("locale_str =", locale_str)
+   - If you see "fr__POSIX", that is the bad input.
+
+3) Decide intended locale meaning
+   - If you intended "French, no territory, variant POSIX" you should instead use a form the parser accepts. Common valid alternatives:
+     - "fr" — language only
+     - "fr_FR" — French (France)
+     - "fr_FR@POSIX" — language + territory + POSIX modifier (supported by some parsers)
+   - If you intended "French (POSIX variant)", often "fr@POSIX" or "fr_FR@POSIX" is accepted; "fr__POSIX" is not.
+
+4) Fix the code — replace the single failing line(s)
+   Option A — sanitize the string before passing it:
+   - Example (pseudo-code):
+     if "__" in locale_str:
+         # remove empty territory, put variant after '@' or drop variant
+         parts = locale_str.split("__")
+         locale_str = parts[0]  # becomes "fr"
+         # or convert to "fr@POSIX" or "fr_FR@POSIX" if you need the variant
+   - Then call the parser with the sanitized locale_str.
+
+   Option B — fall back when the parser rejects it:
+   - Example (concrete):
+     try:
+         locale.setlocale(locale.LC_ALL, locale_str)
+     except ValueError:
+         # fallback to language-only
+         fallback = locale_str.split("__")[0]
+         locale.setlocale(locale.LC_ALL, fallback)
+
+   Option C — use Babel parsing with strict=False (if using Babel):
+   - Babel has Locale.parse(..., strict=False) which is a little more forgiving:
+     from babel import Locale
+     Locale.parse(locale_str, strict=False)
+   - But inspect whether this produces the locale you expect.
+
+5) Fix the source of the bad string
+   - Search for where "fr__POSIX" comes from:
+     - environment variables: os.environ.get('LANG'), 'LC_ALL', 'LC_MESSAGES'
+     - configuration files, user input, or data from other systems
+   - Correct the config to use a valid format (e.g., change "fr__POSIX" to "fr_FR@POSIX" or "fr").
+
+6) Test the fix
+   - Rerun the code path that raised the exception and verify no ValueError.
+   - If you added fallbacks, verify the behavior is still correct for your locale needs.
+
+Example concrete change (showing the exact line to edit)
+Suppose your code is:
+
+  42: locale.setlocale(locale.LC_ALL, user_locale)
+
+Change to:
+
+  42: try:
+  43:     locale.setlocale(locale.LC_ALL, user_locale)
+  44: except ValueError:
+  45:     # sanitize "fr__POSIX" -> "fr"
+  46:     sanitized = user_locale.split("__")[0]
+  47:     locale.setlocale(locale.LC_ALL, sanitized)
+
+Or, if you use Babel and have:
+
+  17: babel.Locale.parse(locale_str)
+
+Change to:
+
+  17: try:
+  18:     babel.Locale.parse(locale_str)
+  19: except ValueError:
+  20:     babel.Locale.parse(locale_str.split("__")[0])
+
+If you share the exact stack trace and the small block of code around the failing line (the function call and the variable supplying the locale string), I will point to the precise file and line number and propose the smallest patch to fix it.

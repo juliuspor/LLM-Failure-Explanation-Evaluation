@@ -1,0 +1,42 @@
+What happened
+- You called DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method immediately checks the minutes argument against a 0..59 range at line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because you passed -15, that check raises ValueError and the call fails before the code that builds the combined negative offset (the code at lines 406–409) ever runs.
+
+Why it fails (root cause)
+- The method assumes minutes must be non‑negative (0..59). It does not accept a negative minutes value even when the hours value is negative.
+- The code that handles combining hours and minutes into a signed total (lines 406–409) expects to receive minutes as a magnitude, not already signed. But the early range check rejects signed minutes, so valid inputs like (-2, -15) are treated as invalid instead of being normalized to -2:15.
+
+Where it occurs (exact locations)
+- The rejecting check is at line 400 (minutes range validation).
+- The combination/normalization logic that would handle the negative composite offset is at lines 406–409:
+  - line 406 and 408 (adjust minutes_offset depending on hours)
+  - line 409 (compute offset milliseconds)
+- Because the failure happens at line 400, code at 406–409 never executes for negative minutes.
+
+Concrete fixes (specific steps)
+Option A — Normalize sign before validation (recommended)
+1. At the start of DateTimeZone.for_offset_hours_minutes, capture the intended sign from hours (or from hours and minutes if you want to allow either to carry the sign).
+2. Replace the current minutes range check at line 400 with a check on the absolute value:
+   - Change
+       if minutes_offset < 0 or minutes_offset > 59:
+   - To
+       if abs(minutes_offset) > 59:
+3. After that check, normalize minutes so it is a magnitude or carries the correct sign consistently. For example:
+   - sign = -1 if hours < 0 else 1
+   - minutes_offset = sign * abs(minutes_offset)
+4. Let the existing combination logic at lines 406–409 compute the final offset in milliseconds.
+
+Option B — Require minutes be non‑negative and document/validate it explicitly
+1. Keep the check at line 400, but make it explicit in the method signature/docs that minutes must be in 0..59 and that the sign must be carried in hours only.
+2. If you choose this, add a clearer error message at line 400, e.g.:
+       raise ValueError("Minutes must be between 0 and 59 and non-negative; use the sign on hours for negative offsets")
+
+Why Option A is better
+- It matches user expectation: callers naturally pass (-2, -15) to mean minus two hours and fifteen minutes.
+- It avoids surprising errors and lets the existing combination code (406–409) do the right thing.
+
+Summary
+The call fails because the minutes parameter is rejected as negative by the range check at line 400 before the method ever normalizes hours+minutes (lines 406–409). Fix by validating abs(minutes) and normalizing minutes’ sign to match hours (or else document and enforce that minutes must be non‑negative).

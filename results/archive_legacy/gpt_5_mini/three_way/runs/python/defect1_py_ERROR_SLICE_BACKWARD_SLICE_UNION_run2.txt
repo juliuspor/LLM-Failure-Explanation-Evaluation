@@ -1,0 +1,38 @@
+What happened (where it fails)
+- At line 396–397 the code checks minutes_offset and raises when minutes_offset < 0 or minutes_offset > 59:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The failing ValueError shows minutes_out_of_range: -15. That means minutes_offset is -15 at the moment of that check.
+- Later code (lines 402 and 404) adjusts minutes_offset together with hours_in_minutes to produce a final combined minutes offset:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+
+Why it fails (root cause)
+- The validation at line 396 runs too early: minutes_offset still holds a signed minutes component (negative when the time zone sign is negative), so minutes_offset can be negative (e.g. -15 for "-00:15"). The check treats any negative minutes_offset as invalid and raises, even though a negative minutes component is valid when combined with the hours and sign.
+- In short: you validate the raw signed minutes component before you compute the combined offset with hours_in_minutes and sign. That makes legitimate values like "-00:15" fail because -15 < 0 triggers the check.
+
+Where to fix (concrete steps)
+Option A — Validate the absolute minutes before sign application (recommended minimal change)
+1. Replace the current check at lines 396–397 with a check against the absolute value:
+   - Change
+     - if minutes_offset < 0 or minutes_offset > 59:
+     -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - To
+     - if abs(minutes_offset) > 59:
+     -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - This allows negative minute components (e.g. -15) but still rejects values whose magnitude is > 59.
+
+Option B — Validate after combining hours and minutes
+1. Move the existing validation (lines 396–397) to after the adjustments at lines 402/404, i.e. validate the final combined minutes value once hours_in_minutes and sign have been applied.
+2. If you do this, ensure the error message still communicates the problematic value (use the combined minutes or reconstruct the input parts).
+
+Option C — Normalize minutes before validation
+1. Normalize minutes_offset to the unsigned minutes part (e.g. minutes_value = abs(minutes_offset)), validate 0 <= minutes_value <= 59 at lines 396–397, then apply sign/combination logic at lines 402/404.
+
+What to test after the fix
+- Parsing "-00:15" (should no longer raise ValueError)
+- Parsing "+05:30" and "05:30" (should remain valid)
+- Reject invalid minute magnitudes like "00:60" or "00:75" (should raise)
+
+Summary
+The code rejects legitimate negative minute components because the range check runs before the code combines minutes with hours and sign. Fix by validating the magnitude (abs(minutes_offset)) or by moving the validation after the minutes+hours combination so negative minute components like -15 are allowed and handled correctly.

@@ -1,0 +1,59 @@
+What happened (root cause, where it occurs)
+
+- The code treats numbers that are mathematically integers with the integer branch at lines 176–193:
+  - Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - Line 177–179: value = int(x); mantissa = value; exp = 0
+  - Line 191–192: else: self.add(str(value))
+- Because Python compares -0.0 == 0, a negative zero (x == -0.0) satisfies the integer test on line 176.
+- value = int(x) on line 177 converts -0.0 to the integer 0, losing the negative sign.
+- The code then reaches line 192 (self.add(str(value))) and writes "0".
+- The alternate branch that would have preserved the string representation of -0.0 (line 194: self.add(str(x))) is not reached because the integer branch ran first.
+- Result: negative zero is printed as "0" (sign lost), which is exactly the failing test.
+
+Why this is the bug (concise)
+
+- The integer branch assumes converting to int is safe without regard to the original float’s sign bit.
+- Converting -0.0 to int(−0.0) -> 0 discards sign information, so negative-zero cases must be detected and handled before int conversion.
+
+Exactly where to change it (files/lines/variables)
+
+- In the method shown, check for negative zero before the integer branch at or above line 176.
+- Use the existing utility or a sign test. The tests reference CodeConsumer.is_negative_zero, so use that.
+
+Concrete fixes (step-by-step, copy-paste ready)
+
+1) Add an early negative-zero check immediately before the integer branch:
+
+Replace the start of the block around line 176 with:
+
+    # handle negative zero first — int(-0.0) loses the sign bit
+    if CodeConsumer.is_negative_zero(x):
+        # preserve sign explicitly
+        self.add("-0.0")
+        return
+
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        ...
+
+(Ensure CodeConsumer.is_negative_zero is defined; tests indicate it exists.)
+
+2) Alternatively, if you prefer not to use is_negative_zero, use math.copysign:
+
+    if x == 0.0 and math.copysign(1.0, x) < 0.0:
+        self.add("-0.0")
+        return
+
+3) Also ensure exp is defined before any use (the original slice had exp = 0 on line 179; keep that). If you used the unioned snippet that dropped exp earlier, restore exp = 0 before the while loop.
+
+Why this fix works
+
+- The negative-zero test runs before converting to int, so you never lose the sign bit via int(x).
+- For -0.0 the code will now call self.add("-0.0") (line shown above), matching the test expectation.
+- For normal integers, unchanged behavior remains.
+
+Optional additional note (edge cases)
+
+- Infinity/NaN are already guarded out by the not math.isinf and not math.isnan checks, so the negative-zero check should precede those guards (or be combined) so -0.0 is handled correctly.
+- When using the is_negative_zero approach, ensure that method uses an appropriate technique (e.g., math.copysign or struct.pack/signbit) to detect the sign bit rather than relying on equality.
+
+With these changes, tests that expect "-0.0" will pass because the sign is preserved explicitly before int conversion.

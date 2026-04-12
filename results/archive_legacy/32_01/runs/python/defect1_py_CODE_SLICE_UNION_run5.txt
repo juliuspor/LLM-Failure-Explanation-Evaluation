@@ -1,0 +1,36 @@
+What happens
+- At line 409 the code calls FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE).
+- That call can throw a numeric overflow exception (the safe_multiply implementation signals overflow when the product doesn't fit).
+- The try block is written to catch ArithmeticError (line 406‑411), but the actual exception thrown by safe_multiply is not ArithmeticError in this environment, so the exception is not caught and the method crashes instead of converting the overflow into the intended ValueError("Offset is too large").
+
+Why this is the root cause (where it occurs)
+- The mismatch is at the exception type boundary: the throw happens inside FieldUtils.safe_multiply (call site: line 409). The except block (lines 406–411) is supposed to handle that, but it only catches ArithmeticError. If safe_multiply raises a different numeric exception type (for example OverflowError in Python, or ArithmeticException in Java), the except clause will not run and the exception will propagate out of for_offset_hours_minutes.
+- Because the code relies on the except block to translate a numeric overflow into a ValueError, that translation never happens and the caller sees an unexpected exception instead of the documented ValueError.
+
+Secondary issue (makes diagnosis harder)
+- The code reuses the parameter minutes_offset to hold the combined total minutes (lines 406–409). That name reuse is confusing and makes stack traces and local-variable inspection less clear when debugging. It does not by itself cause the crash, but it increases the chance of misreading failures.
+
+How to fix it (concrete steps)
+1. Catch the exact exception type that safe_multiply raises.
+   - If you are running in Python and FieldUtils.safe_multiply raises OverflowError, change the except to:
+     except OverflowError:
+         raise ValueError("Offset is too large")
+   - If this is Java code (safe_multiply throws ArithmeticException), change the catch to:
+     } catch (ArithmeticException ex) {
+         throw new IllegalArgumentException("Offset is too large");
+     }
+   - Do not rely on a mismatched/incorrect exception type (ArithmeticError in Python vs ArithmeticException in Java).
+
+2. Stop reusing minutes_offset for the combined value. Use a new variable to hold total minutes to avoid confusion:
+   - int totalMinutes = hours_in_minutes < 0 ? hours_in_minutes - minutes_offset : hours_in_minutes + minutes_offset;
+   - offset = FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE);
+
+3. Keep the existing validation checks (lines 400–401) and the UTC short-circuit (line 400) as they are.
+
+Referencing lines
+- Validation of minutes: lines 400–401
+- Reassignment of minutes_offset to combined minutes: lines 406 and 408
+- Multiplication that can overflow: line 409
+- Except block that fails to catch the thrown exception: lines 406–411
+
+With those two concrete fixes (catch the right exception and use a distinct totalMinutes variable) the method will convert numeric overflows into the intended ValueError and will be much easier to read and debug.

@@ -1,0 +1,47 @@
+What fails
+- The code crashes with an IndexError (or behaves incorrectly) when the loop that advances pos calls code_point_at(code_units, pos) on a high surrogate that does not have a matching low surrogate (i.e. near the end of the input).
+- The problem happens inside the consumed > 0 branch, in these lines:
+
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+Why this happens (root cause)
+- consumed is the number of code points the translator claimed to have consumed. The code must advance pos by the corresponding number of UTF‑16 code units.
+- The current code calls code_point_at(code_units, pos) while advancing pos. code_point_at expects a valid surrogate pair when it sees a high surrogate at code_units[pos] and tries to read code_units[pos + 1].
+- If the input ends with an unpaired high surrogate (or if pos is at the last index for any other reason), code_point_at will attempt to read past the end of code_units and raise IndexError.
+- In short: the code calls code_point_at without first checking that a low surrogate exists at pos+1, so it can read out of bounds when encountering an unpaired surrogate.
+
+Where it occurs (specific names/lines)
+- Inside translate, when consumed > 0:
+    - The for-loop uses pos, code_point_at(code_units, pos), and char_count(...).
+    - code_point_at is the function that reads code_units[pos] and possibly code_units[pos + 1]; that read is not guarded by a bounds check before use.
+
+How to fix it (step-by-step, precise)
+1. Do not call code_point_at blindly when pos could be at the last index. Instead determine the number of code units to skip using safe checks on the raw code units:
+   - If code_units[pos] is a high surrogate and pos + 1 < length and code_units[pos + 1] is a low surrogate, advance pos by 2.
+   - Otherwise advance pos by 1.
+2. Repeat that per codepoint consumed. This avoids calling code_point_at on an unpaired high surrogate.
+3. Concretely, replace the current loop:
+
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+   with something like:
+
+    for pt in range(consumed):
+        cu = code_units[pos]
+        if is_high_surrogate(cu) and pos + 1 < length and is_low_surrogate(code_units[pos + 1]):
+            pos += 2
+        else:
+            pos += 1
+
+(Here is_high_surrogate and is_low_surrogate test the 16-bit values per UTF‑16 rules.)
+
+Why this fix works
+- It advances pos using only in-bounds reads and correctly handles both paired and unpaired surrogates.
+- It matches the intent (skip the right number of UTF‑16 code units for each consumed codepoint) without relying on code_point_at to access pos+1 when pos could be the last index.
+
+Optional additional improvement
+- If code_point_at is needed elsewhere and must be safe, modify code_point_at to never read pos+1 without a bounds check and to return a replacement code point or the raw surrogate value for unpaired surrogates. But even with that change, the simple bounds-aware advancement above is clearer and avoids hidden dependencies.
+
+This explains what happened (IndexError from reading pos+1), why it happened (no bounds check before calling code_point_at), where it happened (the consumed>0 for-loop), and gives an explicit, testable replacement.

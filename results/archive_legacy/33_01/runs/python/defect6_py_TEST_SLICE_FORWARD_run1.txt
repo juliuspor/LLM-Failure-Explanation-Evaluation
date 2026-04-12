@@ -1,0 +1,42 @@
+What happened
+- The test calls cc.add_number(-0.0) and then expects cc.get_code() to return the string '-0.0'.
+- The test fails because MockCodeConsumer.add_number converts the numeric value into a string in a way that loses the negative-zero sign. The value ended up serialized as '0' or '0.0' instead of '-0.0'.
+
+Why it happened (root cause)
+- Many numeric-to-string conversions normalize -0 to +0. For example, in JavaScript Number.prototype.toString or String(number) will produce '0' for -0; in other environments or formats you can get '0.0' instead of '-0.0'.
+- The problematic code is inside MockCodeConsumer.add_number where the method produces the textual token for the number. The conversion step (the call that turns the float into a string) does not detect and preserve the negative-zero sign. Because negative zero is a distinct IEEE-754 value but prints like zero with many standard conversions, the sign is lost there.
+
+Where it occurred (what to look at)
+- Inspect MockCodeConsumer.add_number. Look for the line that formats or converts the argument into text — e.g. something like:
+  - JavaScript: text = number.toString(); or text = String(number);
+  - Python: text = format(number, some_fmt) or text = f"{number}" or text = str(number);
+  - Other languages: any call that converts the numeric value to its code representation
+- This is the line that produces the wrong output (loses the negative sign for -0.0). The failing assertion compares result (returned by get_code) to '-0.0', but get_code returned the string produced by that conversion.
+
+How to fix it (concrete steps)
+1. In add_number, test for negative zero before you perform the normal conversion. Use a reliable negative-zero check for your language, then emit the desired string explicitly.
+2. Replace the direct conversion call with a small branch that preserves '-0.0'. Example fixes:
+
+- JavaScript (if MockCodeConsumer is JS):
+  - Issue line likely: text = String(n);  // or n.toString()
+  - Replace with:
+    const isNegZero = (n === 0 && 1 / n === -Infinity);
+    const text = isNegZero ? '-0.0' : String(n);
+    // then push text into the code buffer
+
+- Python:
+  - Issue line likely: text = str(n)  # or f"{n}"
+  - Replace with:
+    import math
+    is_neg_zero = (n == 0.0 and math.copysign(1.0, n) < 0.0)
+    text = '-0.0' if is_neg_zero else str(n)
+    # then append text to the code buffer
+
+3. If you want a general approach that preserves exactly what the caller passed, accept the number as a string (caller-provided representation) instead of coercing from numeric type; or add an optional parameter to add_number to give the exact textual form.
+
+Why these fixes work
+- They detect the IEEE negative-zero pattern and explicitly output '-0.0' instead of relying on a conversion method that collapses the sign. That ensures get_code() returns the expected '-0.0'.
+
+What to double-check after change
+- Run the failing test again and surrounding tests that serialize numbers to ensure no other formatting behavior changed unexpectedly.
+- Confirm whether you need '-0.0' only for negative zero or also for other formatting edge cases (NaN, Infinity, -Infinity) and add similar handling if required.

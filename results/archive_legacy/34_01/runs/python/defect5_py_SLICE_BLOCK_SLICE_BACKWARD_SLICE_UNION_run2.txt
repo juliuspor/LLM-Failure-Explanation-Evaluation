@@ -1,0 +1,58 @@
+What happens (what failed)
+- At line 340 the code sets inferred_type = object whenever element is not None. That makes inferred_type always equal object for any non-None element.
+- Immediately after, at lines 346–351 there is a guard:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  Because inferred_type was forced to object at line 340, that condition becomes true whenever expected_type is not object, and the code raises the TypeError incorrectly.
+- In short: inferred_type is being clobbered to object at line 340, so the later check at line 346 wrongly concludes the list contains plain Object and refuses to cast.
+
+Why that is the root cause (simple, concrete)
+- inferred_type is supposed to represent the element type inferred from actual list elements. But the assignment inferred_type = object (line 340) does not read the element; it overwrites whatever real inferred type was discovered. As a result the code cannot distinguish an actual element type (like str or MyClass) from the generic object sentinel, and it throws even when casting should be allowed.
+
+Where exactly it happens
+- The problematic code path is inside the branch shown by the slice:
+  - Line 337: elif element is not None:
+  - Line 340: inferred_type = object
+  - Line 346: if inferred_type == object and expected_type != object:
+  - Line 347–350: raise TypeError(...)
+- So the bug is introduced at line 340 and manifests at the check at line 346.
+
+How to fix it (concrete steps you can apply)
+1. Decide the intended meaning:
+   - If you intended to store the actual element type, change line 340 to set inferred_type based on element:
+     - inferred_type = type(element)
+2. If you intended object to be a sentinel meaning “unknown,” use None (or another sentinel) instead of object, and only treat object as a real type when it actually is:
+   - Initialize inferred_type = None
+   - When you see an element, do inferred_type = type(element) if inferred_type is None, or check compatibility with the existing inferred_type
+   - Change the check at line 346 to:
+     if inferred_type is None and expected_type != object:
+         raise TypeError(...)
+3. If you need to handle mixed-type lists (where elements may be different subclasses), implement logic to compute a common supertype instead of forcing object. For example:
+   - On first non-None element: inferred_type = type(element)
+   - On subsequent elements: if not issubclass(type(element), inferred_type) and not issubclass(inferred_type, type(element)), set inferred_type = object (meaning heterogeneous)
+   - Then the check at 346 becomes correct: raise only when inferred_type ended up as object because of true heterogeneity.
+4. Add unit tests:
+   - Test a homogeneous list of ints/strs that should pass.
+   - Test a heterogeneous list that should either be allowed (if expected_type is object) or raise (if expected_type is specific).
+   - Test lists with None values mixed in.
+
+Example minimal code fix (replace line 340)
+- If the intent is to infer element type:
+  replace
+    inferred_type = object
+  with
+    inferred_type = type(element)
+
+Or, if you use None as unknown:
+  - initialize inferred_type = None (before the loop)
+  - on seeing an element:
+      if inferred_type is None:
+          inferred_type = type(element)
+      else:
+          # update inferred_type as needed or set to object when mixed
+
+Why each fix works
+- Setting inferred_type = type(element) preserves the actual runtime type instead of overwriting it with object, so the check at line 346 only raises when the inferred type truly is object (or when you intentionally set it to object), not because of a mistaken assignment.
+- Using None as the unknown sentinel prevents confusing the real object class with the “unknown” state.
+
+If you tell me what inferred_type is meant to represent (actual element type, unknown sentinel, or “mixed” marker), I can give the exact minimal replacement lines to patch the code and a short unit test to verify the behavior.

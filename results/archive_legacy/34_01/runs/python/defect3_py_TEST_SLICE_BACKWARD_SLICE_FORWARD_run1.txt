@@ -1,0 +1,30 @@
+What happened (root cause)
+- translate_string calls to_utf16_code_units(s) and then calls a function that takes an index (called index in your slice).
+- The code on line 35 checks that index is within len(code_units): if index < 0 or index >= len(code_units): raise IndexError(...)
+- But the index being passed in is an index into the original Python string (a Python str character index), not an index into the UTF‑16 code_units list returned by to_utf16_code_units.
+- For U+1F630 (a code point > U+FFFF) the UTF‑16 representation is two code units (a surrogate pair). That means the mapping from Python string indices to code_units indices is not one-to-one. The code is mixing those two kinds of indices, so the bounds check and subsequent access (lines 38–41) run with the wrong index space. That is why the code does not behave as expected for this character.
+
+Why that produces the failure you saw
+- The test passes the single character '\U0001F630'. Python sees that as one character (len(s) == 1). to_utf16_code_units(s) produces two UTF‑16 code units for that character.
+- translate_string uses the Python-string index (0..len(s)-1) but then uses it to check/access code_units. The code either skips the surrogate pairing logic (because the indices are wrong) or accesses the wrong element, so the code ends up treating the code point incorrectly and producing an escaped/changed result instead of returning the original '\U0001F630'.
+- The exact location of the mismatch is the index check at line 35 and the subsequent access of code_units[index] at line 38: index is in the wrong index space.
+
+Concrete fixes (steps you can apply)
+Pick one consistent representation and stick to it:
+
+Option A — operate on UTF‑16 code units everywhere
+1. In translate_string, after code_units = to_utf16_code_units(s), iterate using for index in range(len(code_units)): (use code_units length instead of len(s)).
+2. Pass that index to the code that does the surrogate-pair check and combine logic (the code around lines 35–44). That makes index refer to the code_units list consistently.
+
+Option B — operate on Python code points everywhere (simpler for Python)
+1. Change the code that inspects characters (the code calling to_utf16_code_units and the check at line 35) to use ord(s[index]) on the Python string rather than converting to UTF‑16 code units at all.
+2. If you need to detect surrogate pairs, handle only when you explicitly convert to UTF‑16; otherwise treat each Python character as one code point (and if ord(c) > 0xFFFF, handle it as a single code point).
+
+Minimal code changes you can make now
+- If the caller supplies index from the Python string, change line 35 to check against len(s) (or whatever variable holds the original string length) instead of len(code_units), and change subsequent access to use the proper mapping from string index to code_units index (or better, stop using code_units here).
+- Or change the caller so the index it passes is an index into code_units (i.e., iterate over range(len(code_units))) before calling the code at lines 35–44.
+
+Why these fixes work
+- They remove the mismatch between "index into Python characters" and "index into UTF‑16 code units". Once index and code_units refer to the same sequence, the surrogate-pair detection at lines 38–43 behaves correctly and you will get the original code point preserved for '\U0001F630'.
+
+If you want, paste the surrounding code for translate_string and to_utf16_code_units and I will give the exact small edit to make.

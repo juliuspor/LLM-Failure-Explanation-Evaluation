@@ -1,0 +1,47 @@
+What happened (root cause)
+- The failing test calls add_number(-0.0). The code around lines 176–192 treats any number that compares equal to an int as an integer and prints the integer form:
+  - Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - Line 177: value = int(x)
+  - Line 192: self.add(str(value))
+- For x == -0.0:
+  - x == int(x) is True because int(-0.0) == 0 and -0.0 == 0.0 numerically.
+  - value becomes 0 (line 177).
+  - The code prints str(value) -> "0" (line 192). The negative sign is lost because the integer conversion and numeric equality erase the negative-zero sign bit.
+- The result is "0" instead of the expected "-0.0", so the test assertion fails with Expected "-0.0", got "0".
+
+Where it occurred
+- The problem is in add_number, specifically the integer-path branch starting at line 176 and ending at line 192. The integer branch is reached for -0.0 and prints the integer value (line 192), losing the negative-zero sign.
+
+Why it happens (mechanics)
+- Python floats have a sign bit even for zero (positive zero and negative zero). Numeric equality x == 0.0 does not distinguish sign. Converting to int (int(-0.0)) produces 0, so any code relying on numeric equality/ integer conversion will discard the negative sign. Only stringifying the float itself (str(-0.0)) preserves the "-0.0" representation.
+
+Precise fix (step-by-step)
+1. Detect negative zero before taking the integer branch. Insert a check immediately before line 176:
+   - If x is negative zero, add the string "-0.0" and return (or skip the integer branch).
+2. Use a reliable check for negative zero. Two safe ways:
+   - If you already have is_negative_zero(x) (tests reference CodeConsumer.is_negative_zero), call it.
+   - Or implement it with math.copysign:
+
+Example patch (apply before line 176):
+
+    # Handle negative zero explicitly so its sign is preserved.
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+If you need to implement is_negative_zero, add:
+
+    @staticmethod
+    def is_negative_zero(x):
+        # True only when x is a float equal to zero but with a negative sign bit
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+Why this fix works
+- It prevents the integer-path code from converting -0.0 to int and printing "0". The explicit negative-zero branch preserves the sign by emitting "-0.0" as a string, which matches the test expectation.
+
+Alternative notes
+- You could also avoid the integer branch for zeros by special-casing any x == 0.0 before using int(x), but that still needs a negative-zero check to decide between "0" and "-0.0".
+- Do not rely on stringifying x in the integer branch (e.g., str(x) in that branch) because you want integers like 42.0 -> "42" (not "42.0"). The explicit negative-zero case is the minimal, correct change.
+
+Summary
+- The code reaches the integer branch for -0.0 (lines 176–192), converts to int (line 177), and prints "0" (line 192), losing the negative sign. Fix by detecting negative zero before that branch (use CodeConsumer.is_negative_zero or math.copysign) and emit "-0.0" explicitly.

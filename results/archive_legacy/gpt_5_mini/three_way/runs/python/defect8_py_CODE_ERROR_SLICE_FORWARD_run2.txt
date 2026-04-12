@@ -1,0 +1,50 @@
+What happened (where it failed)
+- Input: "fr__POSIX"
+- Failure location: in to_locale, at the check of ch3/ch4 (lines around 239–245 in your snippet).
+- Why it raised ValueError: after verifying language and the '_' at index 2, the code reads
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - then requires ch3 and ch4 to be uppercase letters (A–Z).
+  For "fr__POSIX", locale_str[3] is '_' (not A–Z), so the ch3 check fails and you get ValueError("Invalid locale format: fr__POSIX").
+
+Root cause
+- The parser assumes that whenever a second '_' exists (i.e. length >= 5) there must be a two-letter country code at positions 3 and 4. It does not handle the valid locale form where the country is empty and the variant is present, e.g. "language__VARIANT" (language, empty country, variant). In "fr__POSIX" the country is empty, so index 3 is '_' and index 4 is the first variant character — the code treats index 3 as a country letter and rejects it.
+
+Concrete fixes (step-by-step)
+1. Replace the rigid index-based checks with parsing that allows an empty country field. Two simple options:
+
+   Option A — split on underscores:
+   - parts = locale_str.split('_')
+   - language = parts[0]
+   - country = parts[1] if len(parts) > 1 else ""
+   - variant = '_'.join(parts[2:]) if len(parts) > 2 else ""
+   - Validate language is two lowercase letters; if country is non-empty validate it is two uppercase letters; variant can be any non-empty string when present.
+   - Return Locale(language, country, variant) accordingly.
+
+   Option B — keep the index approach but handle empty country explicitly:
+   - After confirming locale_str[2] == '_', check if locale_str[3] == '_':
+     - If yes, set country = "" and variant = locale_str[4:]; validate variant non-empty.
+     - If no, require locale_str[3] and locale_str[4] be A–Z, set country = locale_str[3:5]; then:
+       - If length == 5, return Locale(language, country)
+       - Else require locale_str[5] == '_' and set variant = locale_str[6:].
+   - This change keeps your existing structure but fixes the ch3/ch4 assumption.
+
+2. Update the initial length validation: your current condition
+   if length != 2 and length != 5 and length < 7:
+   is confusing. Prefer explicit checks like:
+   - if length < 2: raise
+   - allow length 2 (language), 5 (language + '_' + country), or >=7 (language + '_' + country + '_' + variant) — but with an empty country the total length can also be >=4 (e.g. "fr__x"), so relying on fixed lengths is brittle. Parsing by split (Option A) is more robust.
+
+Example minimal change (Option B) mapping to your lines:
+- After line checking locale_str[2] != '_':
+  - if locale_str[3] == '_':
+      # empty country
+      variant = locale_str[4:]
+      if not variant:
+          raise ValueError(...)
+      return Locale(locale_str[0:2], "", variant)
+  - else:
+      # existing ch3/ch4 checks and further logic
+
+Why this fixes it
+- It explicitly allows an empty country component and then parses the variant correctly (variant starts after the second underscore). That handles "fr__POSIX" (language "fr", country "", variant "POSIX") instead of treating the second underscore as an invalid country letter.

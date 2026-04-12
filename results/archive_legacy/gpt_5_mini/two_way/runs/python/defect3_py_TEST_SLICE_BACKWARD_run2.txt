@@ -1,0 +1,55 @@
+What happened (what failed)
+- The tests hit an IndexError raised at to_utf16_code_units line 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- That exception occurs when translating a string containing a Unicode code point that is represented as a surrogate pair in UTF‑16 (for example the emoji \U0001F630), followed by another character. The code is trying to read past the end of the UTF‑16 code units list.
+
+Why it happened (root cause, with variables and locations)
+- The translator code converts the Python string into UTF‑16 code units (list variable code_units produced by to_utf16_code_units).
+- Somewhere later (translate_string in CsvEscaper / code_point_at), the code iterates over the string using an index variable named index that is treated as an index into code_units.
+- A Unicode code point above U+FFFF is encoded as two UTF‑16 code units (a high surrogate and a low surrogate). That means processing that code point should consume two entries from code_units.
+- The bug: the loop that walks code_units advances index by 1 after processing a surrogate pair instead of advancing by 2. As a result, the next iteration calls code_point_at (or code_units[index]) with index equal to the second code unit of the pair + 1, which can be equal to len(code_units) (i.e., one past the end) and triggers the IndexError in to_utf16_code_units / code_point_at.
+- Concrete variables/lines:
+  - code_units (returned by to_utf16_code_units) has length N (two entries for each surrogate pair).
+  - index is the position into code_units used by code_point_at.
+  - After reading a surrogate pair at index i, the code should set index := i + 2, but instead it sets index := i + 1. The next call uses index == N, and the check at lines 35–36 raises IndexError.
+
+Where it occurred
+- to_utf16_code_units produces the code_units list (slice shows lines around 10 and 35–36).
+- The failure surfaces when code_point_at / CsvEscaper.translate_string attempts to read using an index that is too large because the main loop didn’t advance index correctly after a surrogate pair. The IndexError is raised on the bounds check at lines 35–36.
+
+How to fix it (specific steps you can apply)
+1. In the translator loop (CsvEscaper.translate_string or wherever index is being updated), ensure you advance index by the correct number of UTF‑16 code units consumed:
+   - If the code point is a BMP code point (<= 0xFFFF): index += 1
+   - If it’s a supplementary code point (> 0xFFFF, a surrogate pair): index += 2
+   This makes the loop read the next code point from the correct position and avoids calling code_point_at with an out‑of‑range index.
+2. Alternatively (and more robust): change code_point_at to return both the code point and the number of code units consumed (1 or 2). Then in translate_string do:
+   - cp, consumed = code_point_at(code_units, index)
+   - index += consumed
+   This removes any guesswork about how many code units were used.
+3. Add a defensive loop condition so the loop never calls into code_point_at when index >= len(code_units):
+   - while index < len(code_units):
+         ... call code_point_at only after ensuring index < len(code_units)
+   This prevents the IndexError if an off‑by‑one slip remains.
+4. Add unit tests that check the boundary: surrogate pair at the very end of the string and surrogate pair followed by another character (your existing failing test covers this).
+
+Example concrete change (pseudo-patch)
+- Replace the update of index that currently does index += 1 unconditionally with:
+
+    cp = code_point_at(code_units, index)
+    if cp > 0xFFFF:
+        # supplementary character encoded as a surrogate pair in UTF-16
+        index += 2
+    else:
+        index += 1
+
+Or, if you modify code_point_at to return (cp, consumed):
+
+    cp, consumed = code_point_at(code_units, index)
+    index += consumed
+
+Why this fixes it
+- It ensures the index moves forward exactly the number of 16‑bit code units consumed by the current code point. That prevents the loop from stepping into a position equal to len(code_units) and calling code_point_at with an out‑of‑range index, eliminating the IndexError.
+
+Summary
+- The translator treats index as a position in UTF‑16 code units but advances it by 1 even when a surrogate pair (2 code units) was consumed. That causes an out‑of‑range access and IndexError at the bounds check inside to_utf16_code_units / code_point_at. Fix by advancing index by 2 for surrogate pairs (or have code_point_at report how many units it consumed) and keep a loop guard while index < len(code_units).

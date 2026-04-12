@@ -1,0 +1,41 @@
+What happened
+- The test calls translate_string('\U0001F630') (the emoji U+1F630), which is a Unicode code point outside the Basic Multilingual Plane (BMP). Python represents it as a single character.
+- translate_string calls to_utf16_code_units(s). That function creates code_units (line 12) but does not expand non-BMP code points into the two 16-bit UTF‑16 surrogates that the rest of the code expects.
+- Later code treats characters above 0xFFFF as if they had been split into two UTF‑16 code units and attempts to access code_units[index + 1]. Because to_utf16_code_units only produced one element for the emoji, code_units is too short and the index check at lines 35–36 triggers:
+  IndexError: String index out of range: {index}
+
+Why it failed (root cause)
+- to_utf16_code_units returns one integer per Python code point, not one 16-bit code unit per UTF‑16 code unit. For U+1F630 you must produce two 16-bit values (a high surrogate and a low surrogate).
+- The code that uses code_units assumes surrogate pairs are present and tries to read the second 16-bit unit, so accessing index + 1 goes past len(code_units) and raises the IndexError at the check on line 35–36.
+
+Where in the code
+- code_units is created/initialized at line 12.
+- The bounds check that raises the exception is at lines 35–36.
+- The failing test input is the call in [TEST]: translate_string('\U0001F630').
+
+Concrete fix (step-by-step)
+1. In to_utf16_code_units, when you encounter a code point > 0xFFFF, split it into a UTF‑16 surrogate pair instead of appending the raw code point.
+2. Use this algorithm:
+   - cp = ord(ch)
+   - if cp <= 0xFFFF: append(cp)
+   - else:
+     - cp' = cp - 0x10000
+     - high = 0xD800 + (cp' >> 10)
+     - low = 0xDC00 + (cp' & 0x3FF)
+     - append(high); append(low)
+3. After that change, code_units will contain two entries for U+1F630, so later code that reads index and index+1 will find the expected surrogate pair and not raise IndexError.
+
+Short code example for to_utf16_code_units body:
+  code_units = []
+  for ch in s:
+      cp = ord(ch)
+      if cp <= 0xFFFF:
+          code_units.append(cp)
+      else:
+          cp_minus = cp - 0x10000
+          high = 0xD800 + (cp_minus >> 10)
+          low  = 0xDC00 + (cp_minus & 0x3FF)
+          code_units.append(high)
+          code_units.append(low)
+
+This will fix the IndexError and make translate_string return the expected '\U0001F630'.

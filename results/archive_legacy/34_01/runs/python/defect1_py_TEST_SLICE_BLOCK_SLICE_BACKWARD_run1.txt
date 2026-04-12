@@ -1,0 +1,43 @@
+What happened
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) sets minutes_offset = -15.
+- At lines 396–397 the code rejects any negative minute value:
+
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Because minutes_offset < 0 is true, the function raises ValueError immediately. The code never combines hours and minutes into a single signed offset, so a negative minutes argument causes the error instead of producing the intended -02:15 zone.
+
+Why it fails (root cause)
+- The function assumes minutes_offset must be between 0 and 59 and does not accept a negative minutes argument even when hours is negative. The code enforces the minute range before normalizing the sign/total offset, so passing -15 minutes is treated as invalid rather than part of a negative total offset.
+
+Where it occurs
+- In for_offset_hours_minutes, at lines 396–397 (the minutes range check).
+
+How to fix it (concrete steps)
+1. Treat hours and minutes as parts of a single signed offset. Compute total minutes first:
+   total_minutes = hours_offset * 60 + minutes_offset
+2. Validate the combined total, not the raw minutes sign. For example ensure abs(minutes part) < 60 after normalization, and ensure total_minutes is within allowed overall range if the API has one.
+3. Derive normalized hours/minutes from total_minutes and use those values going forward.
+
+Example patch (replace the current check and normalization with this logic):
+- Compute total minutes:
+    total_minutes = hours_offset * 60 + minutes_offset
+- Normalize and split:
+    sign = -1 if total_minutes < 0 else 1
+    total_abs = abs(total_minutes)
+    normalized_hours = sign * (total_abs // 60)
+    normalized_minutes = total_abs % 60
+- Use normalized_hours and normalized_minutes for formatting/ID creation.
+- Optionally validate that normalized_minutes is in 0..59 (it will be by construction) and validate overall allowed range of total_minutes if required.
+
+Concrete minimal code sketch to replace lines 396–397 and subsequent handling:
+  total_minutes = hours_offset * 60 + minutes_offset
+  # optional overall range check here
+  sign = -1 if total_minutes < 0 else 1
+  total_abs = abs(total_minutes)
+  hours_part = sign * (total_abs // 60)
+  minutes_part = total_abs % 60
+  # now build ID like f"{hours_part:+03d}:{minutes_part:02d}" or however the code needs it
+
+Result
+- After this change DateTimeZone.for_offset_hours_minutes(-2, -15) will produce a total offset of -135 minutes and the expected id '-02:15' rather than raising ValueError.

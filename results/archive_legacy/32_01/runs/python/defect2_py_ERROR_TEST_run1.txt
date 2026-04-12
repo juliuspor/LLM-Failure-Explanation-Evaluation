@@ -1,0 +1,59 @@
+Short answer: get_paint is passing a non-numeric, out-of-range color representation (the literal string "Red Green Blue") into your Color/paint constructor, and that constructor raises ValueError when it validates the parameters. The failure happens inside GrayPaintScale.get_paint at the line that constructs or returns the color, and the ValueError is raised inside Color.__init__ / Color.validate when it finds parameters that are not numeric triples in [0..255].
+
+What happened (root cause)
+- The test calls gps.get_paint(-0.5). That negative input should map to pure black (0,0,0).
+- Instead of producing a numeric triple or a properly clamped value, get_paint builds or forwards an invalid value "Red Green Blue" (a string) or otherwise produces numbers outside the allowed range.
+- The Color constructor (or whatever code validates color parameters) checks the parameters and raises ValueError: "Color parameter outside of expected range: Red Green Blue".
+- So the error is not in the test; it is in GrayPaintScale.get_paint: it returns/constructs an invalid color representation rather than (0, 0, 0).
+
+Where exactly it fails (what lines/methods)
+- GrayPaintScale.get_paint(...) — the line that calculates and returns the RGB value (the line that calls Color(...) or returns the color tuple). This is where the invalid value is produced.
+- Color.__init__ or Color.validate (the color parsing/validation code) — the line that raises ValueError because it receives "Red Green Blue" or numeric values outside the accepted range.
+
+Why that happens (most likely coding mistakes)
+- Not clamping the input range: the code uses the input -0.5 directly in a formula that produces an invalid color.
+- Wrong return type: get_paint returns a string or a malformed value instead of a tuple of three ints (R,G,B) in the expected 0–255 range.
+- Incorrect scaling: the code might scale a 0..1 gray value to 0..100 or to a string instead of 0..255 integers.
+- A mistaken debug/placeholder string ("Red Green Blue") was left in an error branch and gets returned instead of a numeric RGB triple.
+
+Concrete steps to reproduce where it fails
+1. Call gps.get_paint(-0.5) (as your test does).
+2. Observe the call that constructs the color in get_paint, for example:
+   color = Color(some_value)  # this line in get_paint
+3. The Color constructor receives an invalid argument and raises ValueError inside Color.__init__/validate.
+
+Exact fixes (step-by-step)
+1. In GrayPaintScale.get_paint, clamp the input value to the legal domain first:
+   - value = max(0.0, min(1.0, value))
+   This guarantees negative or >1 inputs become 0 or 1 respectively.
+
+2. Convert the clamped normalized gray (0.0–1.0) to 8-bit RGB integers:
+   - gray = int(round(value * 255))
+   - rgb = (gray, gray, gray)
+
+3. Return the numeric triple or construct the Color object with numeric ints (not a string):
+   - return rgb
+   or, if you must use Color:
+   - return Color(rgb)    # ensure Color accepts (R, G, B) ints
+
+4. Remove any placeholder strings or debug text such as "Red Green Blue" from return paths or exceptions in get_paint.
+
+Example patch (pseudo-Python) — replace the problematic block in GrayPaintScale.get_paint:
+   def get_paint(self, value):
+       # clamp to [0,1]
+       value = max(0.0, min(1.0, value))
+       # convert to 0-255 ints
+       gray = int(round(value * 255))
+       # return a numeric RGB triple
+       return (gray, gray, gray)
+
+5. Add a unit test around out-of-range inputs:
+   - assert gps.get_paint(-0.5) == (0, 0, 0)
+   - assert gps.get_paint(1.2)  == (255, 255, 255)
+
+Why these fixes solve it
+- Clamping prevents negative values from producing invalid colors.
+- Converting to integer RGB ensures the Color constructor or callers always receive the expected numeric triple.
+- Removing the string avoids the ValueError that is raised when validation sees non-numeric or out-of-range parameters.
+
+If you want, paste the current implementations of GrayPaintScale.get_paint and the Color constructor (or the file/line around the ValueError) and I will point to the exact line(s) to change and provide a minimal patch you can drop into your code.

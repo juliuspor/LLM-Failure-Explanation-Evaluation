@@ -1,0 +1,38 @@
+What happened (root cause)
+- The code treats -0.0 as an integer because of the check on line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  For x == -0.0 this is True (Python treats -0.0 == 0.0). That makes the branch at lines 176–194 run.
+- In that branch the code does value = int(x) on line 177; for -0.0 that produces value == 0 and loses the sign. Later the method outputs str(value) (line 192) or otherwise falls back to str(x) (line 194) only in other paths. As a result the negative sign is dropped and the output becomes "0" instead of "-0.0". This is why the test test_negative_zero fails: expected "-0.0" but got "0".
+
+Where it occurs (exact lines)
+- The problematic decision occurs at line 176.
+- The sign is lost when value = int(x) at line 177 and when the code later emits str(value) at line 192 (or otherwise emits "0" instead of "-0.0").
+- The negative-zero special case must be handled before line 176 so the method doesn't enter the integer branch for -0.0.
+
+Why that check is incorrect for -0.0
+- The comparison x == int(x) is a numeric equality that does not distinguish +0.0 from -0.0; it only tests magnitude/equality, not sign of a zero float. So it is the wrong test if you need to preserve negative zero.
+
+Concrete fix (clear steps)
+1. Add an explicit negative-zero check before the integer branch (i.e. before line 176). Use a robust is_negative_zero test. Example implementation:
+   - def is_negative_zero(x):
+       return x == 0.0 and math.copysign(1.0, x) < 0.0
+   or
+       return x == 0.0 and math.atan2(x, 1.0) < 0.0
+   Either approach distinguishes -0.0 from +0.0.
+
+2. If negative zero, emit "-0.0" and return immediately. Insert code like:
+   if CodeConsumer.is_negative_zero(x):
+       self.add("-0.0")
+       return
+
+   Place this block before line 176 so the integer-handling branch never runs for -0.0.
+
+3. Run the unit tests; the negative-zero test should now pass.
+
+Notes and additional attention
+- The fix must be done before any conversion that calls int(x) (line 177), because int(x) discards the sign for -0.0.
+- Verify that CodeConsumer.is_negative_zero exists and uses a sign-preserving test (math.copysign is simplest).
+- (Optional) While inspecting lines 180–183 you should confirm the variable exp is defined in scope when used. In the provided slice exp appears in check_val = (mantissa // 10) * (10 ** (exp + 1)) but exp is not visible in the shown lines; ensure exp is set earlier. That is a separate potential error if that path is reached.
+
+Why this explains the failing test
+- test_negative_zero calls add_number(-0.0). Because of the integer branch (line 176) the code converts -0.0 to int( -0.0 ) -> 0 and emits "0", so the test expecting "-0.0" fails. Adding the early is_negative_zero check fixes the sign-preservation and satisfies the test.

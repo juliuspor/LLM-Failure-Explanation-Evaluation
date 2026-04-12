@@ -1,0 +1,57 @@
+What happened (where it failed)
+- The IndexError occurred inside code_point_at when it tried to read code_units[index] with index == len(code_units). The stack slice shows code_point_at lines 38–44; the first thing that function does is high = code_units[index]. IndexError: "String index out of range: 2" means index was past the last element.
+
+Why it happened (root cause)
+- The loop that advances pos after a translator consumed something is wrong. At lines shown in your snippet:
+
+  1) consumed = self.translate_codepoint(code_units, pos, out)
+  2) if consumed != 0:
+         for pt in range(consumed):
+             pos += char_count(code_point_at(code_units, pos))
+
+- The variable consumed is intended to indicate how many codepoints/code units the translator consumed. The comment says "Contract with translators is that they have to understand codepoints and they just took care of a surrogate pair", but the code uses consumed to control a loop that repeatedly calls code_point_at(code_units, pos). That call requires pos < len(code_units). If the loop runs one time too many, or pos has already reached len(code_units) before a call, code_point_at will try to read code_units[pos] and throw IndexError.
+
+- More concretely, two likely mismatches lead to the out-of-range read:
+  - Mismatch #1: consumed represents number of UTF-16 code units (1 or 2) but you're iterating consumed times and inside each iteration you call code_point_at which expects a code unit index and may look ahead. This can advance pos incorrectly.
+  - Mismatch #2: consumed represents number of codepoints, but you call code_point_at repeatedly without checking pos < length before each call; if the translator consumed the final codepoint(s), the loop may attempt one extra iteration with pos == length and call code_point_at, causing the IndexError.
+
+Exactly where: the for pt in range(consumed): ... pos += char_count(code_point_at(code_units, pos)) loop (the last four lines of your snippet) is letting pos reach len(code_units) and then immediately calling code_point_at(code_units, pos), which tries to read code_units[index] and raises IndexError.
+
+How to fix it (concrete steps, with exact replacement options)
+
+Pick one of these two precise fixes depending on what consumed is supposed to mean:
+
+A) If translate_codepoint returns the number of UTF-16 code units consumed (1 or 2):
+- Replace the whole post-consumed loop with a simple advance by consumed code units:
+
+    # replace lines:
+    # for pt in range(consumed):
+    #     pos += char_count(code_point_at(code_units, pos))
+    # with:
+    pos += consumed
+
+- Rationale: consumed is already measured in code units, so just move pos forward by that many code units. This avoids calling code_point_at at pos==length.
+
+B) If translate_codepoint returns the number of codepoints consumed (not code units):
+- Advance pos by iterating exactly that many codepoints but check bounds before calling code_point_at:
+
+    for _ in range(consumed):
+        if pos >= length:
+            break   # defensive: don't call code_point_at past end
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+- Rationale: this ensures you never call code_point_at with pos == length, preventing the IndexError.
+
+Additional defensive measures (recommended)
+- Add an assertion or check immediately after translate_codepoint:
+
+    if consumed < 0:
+        raise ValueError("translate_codepoint returned negative")
+    if pos + consumed > length and consumed is in code units:
+        raise ValueError("translate_codepoint consumed more code units than remain")
+
+- If you control translate_codepoint, make its contract explicit in code / docstring: "returns number of UTF-16 code units consumed (1 or 2)" or "returns number of codepoints consumed" and make the caller's advancing code match that contract.
+
+Summary
+- Root cause: pos advanced incorrectly after translators returned consumed, so code_point_at was called with pos == len(code_units) and tried to read code_units[pos], raising IndexError. Fix by advancing pos in the correct unit (code units vs codepoints) — either pos += consumed (if consumed is code units) or iterate consumed times but check pos < length before calling code_point_at (if consumed is codepoints). Add defensive checks and document the translate_codepoint contract.

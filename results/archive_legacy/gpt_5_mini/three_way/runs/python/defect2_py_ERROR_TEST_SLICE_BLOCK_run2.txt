@@ -1,0 +1,54 @@
+What happened (where and why)
+- The test fails because get_paint(...) raises a ValueError at lines 74–75:
+  74 |         if g < 0 or g > 255:
+  75 |             raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- The root cause is that get_paint computes the grayscale channel g from the input value, and for values outside the configured [lower, upper] range g becomes negative or >255. Instead of clamping those out-of-range inputs to the allowed range, the method raises an exception when it sees g out of [0,255].
+- Example flow that triggers the failure:
+  - For test_lower_bound_clamping the input value is -0.5 (below default lower bound 0.0).
+  - The code computes the normalized fraction = (value - lower) / (upper - lower) → negative, then g = fraction * 255 → negative g.
+  - The code reaches the check on line 74, finds g < 0, and raises the ValueError (line 75). The tests expect clamping to black (0,0,0), but the method throws instead.
+
+Why this is the problem
+- The test suite expects get_paint to clamp inputs outside the bounds to the nearest bound (lower -> black, upper -> white). The method currently treats out-of-range computed color components as an error condition and raises rather than clamping.
+- The offending check is on g (the green/gray channel). Because g is derived from the input value, out-of-range inputs produce out-of-range g and hit that raise path.
+
+Concrete fixes (step-by-step)
+You can fix this in either of two straightforward ways (pick one):
+
+A) Clamp the input value before computing g (preferred because it preserves the linear mapping inside the range)
+1. At the start of get_paint(value), clamp value to the [lower, upper] interval:
+   - if value < self.lower: value = self.lower
+   - if value > self.upper: value = self.upper
+2. Compute fraction and g normally from the clamped value.
+3. Convert g to an int and ensure it is within 0..255 (e.g., int(g) or round then int).
+This guarantees negative inputs become black and inputs > upper become white, matching tests.
+
+B) Clamp g after computing it
+1. After computing g = fraction * 255.0, instead of raising, clamp:
+   - g = max(0, min(255, g))
+2. Convert to int (e.g., g = int(g)) and return (g,g,g).
+This is a minimal change if you want to leave value normalization logic intact.
+
+Also ensure conversion to integer matches the test's expectation:
+- The test expects 0.5 -> 127 (not 128). That comes from truncating 127.5 to 127 (int(127.5) in Python). Use int(g) (which truncates toward zero) or explicitly floor if that behavior is intended.
+
+Example patch sketch (replace raise with clamp; reference lines 74–75):
+  # compute g ...
+  if g < 0:
+      g = 0
+  elif g > 255:
+      g = 255
+  g = int(g)
+  return (g, g, g)
+
+Or clamp value earlier:
+  if value < self.lower:
+      value = self.lower
+  elif value > self.upper:
+      value = self.upper
+  fraction = (value - self.lower) / (self.upper - self.lower)
+  g = int(fraction * 255.0)
+  return (g, g, g)
+
+Summary
+- The ValueError is raised because the code treats computed g < 0 or > 255 as an error (lines 74–75) instead of clamping the input or the channel to the valid 0..255 range. Fix by clamping value or clamping g and convert to int. This will make the tests (negative input -> (0,0,0), >1.0 -> (255,255,255), 0.5 -> (127,127,127)) pass.

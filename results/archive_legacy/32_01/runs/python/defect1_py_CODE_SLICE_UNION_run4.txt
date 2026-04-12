@@ -1,0 +1,46 @@
+What fails
+- The method for_offset_hours_minutes rejects any negative minutes at line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That means a call like DateTimeZone.for_offset_hours_minutes(-2, -30) will fail immediately with "Minutes out of range: -30", even though a caller might reasonably expect -2 hours, -30 minutes to be allowed.
+
+Why that is wrong (root cause)
+- The code below (lines 406–409) treats minutes_offset as an unsigned 0..59 quantity that is combined with hours_in_minutes and then turned into a total minutes count:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- That combination logic expects minutes_offset to represent the magnitude of minutes to add/subtract from the hour component, and therefore the method should accept negative minute values when the caller intends a negative offset. The current validation (line 400) forbids negative minutes entirely, which is inconsistent with how the method combines hours and minutes and causes valid inputs to be rejected.
+
+Where it happens
+- Rejection happens at the validation check in for_offset_hours_minutes at the minutes validation (slice line ~400).
+- The combination logic that would have worked with negative minutes is at lines 406–409.
+
+How to fix (concrete steps)
+1. Allow negative minute values in the input validation. Replace the current check with one that permits -59..59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Normalize combination properly (keep current combination logic or make it clearer). For example:
+   hours_in_minutes = hours_offset * 60
+   if hours_in_minutes < 0 or (hours_in_minutes == 0 and minutes_offset < 0):
+       total_minutes = hours_in_minutes - abs(minutes_offset)
+   else:
+       total_minutes = hours_in_minutes + abs(minutes_offset)
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   Or simply use signs consistently:
+   total_minutes = hours_in_minutes + (minutes_offset if hours_offset >= 0 else -abs(minutes_offset))
+
+3. Keep the early-return for UTC:
+   if hours_offset == 0 and minutes_offset == 0:
+       return cls.UTC
+
+Why this fix works
+- Allowing minutes in -59..59 accepts inputs where minutes carry the sign explicitly (e.g. -30) and matches the intended combination logic.
+- Using abs() or explicit sign handling when combining prevents double-sign mistakes and yields the correct total minutes before converting to milliseconds.
+
+Summary
+- The method fails because it forbids negative minute inputs (line ~400) while the later logic expects to be able to subtract minute magnitudes for negative hour offsets. Change the minutes validation to -59..59 and normalize the combination as shown to fix the bug.

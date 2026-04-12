@@ -1,0 +1,67 @@
+What happens (root cause)
+- In the while loop you call translate_codepoint(...) and get back consumed.
+- If consumed > 0 you run this inner loop (exact lines shown in your snippet):
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- That code repeatedly calls code_point_at(code_units, pos) while incrementing pos.
+- to_utf16_code_units / code_point_at validate indexes and will raise IndexError if you call code_point_at with pos == len(code_units) or with a high surrogate at the last index (no matching low surrogate). The slice you provided shows that an index-out-of-range raises at lines 35–36 in to_utf16_code_units.
+
+Why the IndexError occurs in your test
+- For the input "\U0001F630A" the UTF-16 code units list length is 3 (surrogate high, surrogate low, 'A').
+- Depending on what translate_codepoint returns, the inner loop may call code_point_at when pos points to the last code unit or past it.
+- If any iteration of the inner loop reaches pos == len(code_units) and then the loop tries to call code_point_at(code_units, pos) again, code_point_at will raise IndexError ("String index out of range").
+- In short: the inner loop calls code_point_at one time too many (or calls it when pos is at the end / at an unmatched surrogate), so you read past the end of the code_units array.
+
+Why this is a logic bug (not a Unicode library bug)
+- The intent (per the comment) is to advance pos by the number of codepoints/char units that the translator consumed. But the code both (a) calls code_point_at(pos) inside the loop and (b) advances pos inside the loop. That sequence allows a subsequent call to code_point_at to be made with an invalid pos.
+- The code confuses "how many codepoints were consumed" and "how many UTF‑16 code units to advance", and performs potentially unsafe multiple calls to code_point_at while mutating pos.
+
+Where it happens in your code
+- The problematic lines are the inner loop in translate (the for pt in range(consumed): ... block) where code_point_at is called repeatedly while pos is changed.
+- The IndexError is raised inside code_point_at / to_utf16_code_units bounds checks (slice shows an index check at lines 35–36).
+
+Concrete fixes (step-by-step)
+Pick one of these fixes depending on what translate_codepoint returns (choose the one matching its contract):
+
+1) If translate_codepoint returns the number of UTF‑16 code units consumed
+   - Replace the whole inner loop with a single advance by consumed code units:
+     pos += consumed
+   - Rationale: consumed already equals the number of code units used; no repeated code_point_at calls needed.
+
+2) If translate_codepoint returns the number of codepoints consumed (1 for BMP or surrogate pair)
+   - Compute how many code units that represents once, then advance safely:
+     if consumed == 1:
+         # one codepoint => could be 1 or 2 code units: use code_point_at once
+         cp = code_point_at(code_units, pos)   # safe because pos < length here
+         pos += char_count(cp)
+     else:
+         # if consumed > 1, loop but guard the call or compute ahead of time
+         for _ in range(consumed):
+             cp = code_point_at(code_units, pos)
+             pos += char_count(cp)
+   - Rationale: call code_point_at only when you know pos is valid; do not call it after pos has become equal to length.
+
+3) Always guard before calling code_point_at
+   - Check if pos >= length and break / handle accordingly before each call:
+     if pos >= length:
+         break
+     cp = code_point_at(code_units, pos)
+     pos += char_count(cp)
+   - Rationale: prevents calling code_point_at with an out-of-range index.
+
+Which to use
+- Inspect the implementation / contract of translate_codepoint. If it promises to return the number of code units consumed, use fix (1). If it promises number of codepoints, use (2). If the contract is ambiguous or can vary, use (3) plus clarify the contract to avoid future confusion.
+
+Minimal patch example (most likely correct)
+- If translate_codepoint returns number of code units consumed, change:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  to:
+    pos += consumed
+
+Why this will fix the tests
+- It prevents any call to code_point_at with pos beyond the last valid index (the immediate cause of IndexError), so strings like an emoji followed by 'A' will be advanced correctly and not attempt an out-of-range read.
+
+Summary
+- Root cause: the inner loop calls code_point_at while pos is being moved, allowing a later call to read past the end of code_units and trigger IndexError.
+- Fix: advance pos using a correct, single computation of how many code units to skip (pos += consumed if consumed is code units), or call code_point_at only when pos is known valid and avoid extra calls that go past the end.

@@ -1,0 +1,62 @@
+What happened (root cause)
+- The code treats any float that equals its integer value as an integer by the test on line
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  but for x == -0.0 this is true because -0.0 == 0 is True.
+- You then set value = int(x) (value becomes 0) and later call self.add(str(value)), which prints "0".
+- That loses the negative sign carried by the IEEE-754 -0.0 sign bit. Python's int(-0.0) -> 0 and stringifying 0 produces "0", so the sign is dropped.
+- The earlier code that checks x < 0 to decide whether to insert a space (prev == '-') also does not detect -0.0 as negative because -0.0 < 0 is False (comparisons treat -0.0 and 0.0 as equal). So both the integer branch and the x < 0 check fail to preserve the negative-zero sign.
+
+Where it happens (variables / lines)
+- The failing branch is the integer branch that begins with:
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  and uses:
+    value = int(x)
+    ...
+    self.add(str(value))
+  Here value is 0 when x is -0.0, so you output "0" instead of "-0.0".
+- The space-insertion check uses:
+    prev = self.get_last_char()
+    if x < 0 and prev == '-':
+which also fails to see -0.0 as negative.
+
+Why that matters
+- IEEE-754 negative zero is distinct (has a sign bit). For code generation you need to preserve the sign (the tests expect "-0.0"). Equality and int() conversions do not preserve that sign.
+
+Concrete fixes (exact steps and code snippets)
+
+Option A — Short, explicit fix: detect negative zero first and handle it before the integer branch.
+1. Add a check right after computing prev (or at the start of the method) and before the integer branch:
+    if self.is_negative_zero(x):
+        # preserve sign explicitly
+        self.add("-0.0")
+        return
+2. Keep the rest of your code unchanged.
+
+That would look like:
+    prev = self.get_last_char()
+    if x < 0 and prev == '-':
+        self.add(" ")
+    if self.is_negative_zero(x):
+        self.add("-0.0")
+        return
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        ...
+
+Option B — Prevent integer branch from swallowing negative zero:
+1. Change the integer-branch condition to ensure negative zero isn't treated as an integer:
+    if x == int(x) and not math.isinf(x) and not math.isnan(x) and not self.is_negative_zero(x):
+2. Then, after that branch (or before it) handle negative zero as in Option A:
+    if self.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+Either option requires that is_negative_zero is correctly implemented (e.g. using math.copysign or struct.unpack to check the sign bit). Example is_negative_zero implementation:
+    @staticmethod
+    def is_negative_zero(x):
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+Why use math.copysign(1.0, x) < 0.0
+- math.copysign preserves the sign bit. For -0.0 it returns -1.0, so you can detect negative zero even though x == 0.0.
+
+Summary (minimum change recommendation)
+- The simplest, safest change is to check is_negative_zero(x) immediately and add "-0.0" and return before any int() conversion. This prevents losing the sign bit and fixes the failing test.

@@ -1,0 +1,74 @@
+I can’t point to the exact line number in your project until you paste the code, but here’s a precise, concrete diagnosis and step‑by‑step fixes you can apply immediately.
+
+What happened (root cause)
+- The code tried to parse or set a locale string that is syntactically invalid: "fr__POSIX".
+- That string has an empty component because it contains two underscores with nothing in between. Standard locale formats expect a language code optionally followed by an underscore and a territory (example: "fr", "fr_FR"), or a modifier after an @ (example: "fr@POSIX"). "fr__POSIX" looks like language + empty territory + modifier, and the parser rejects that format.
+- The ValueError message "Invalid locale format: fr__POSIX" is thrown by whichever routine tried to interpret the locale. In typical Python stacks this is raised by:
+  - babel.core.Locale.parse("fr__POSIX") or babel.Locale.parse(...), or
+  - a validation function you wrote that enforces locale format via regex,
+  - possibly by a wrapper that normalizes locale strings before calling locale.setlocale.
+  The common symptom is the parser sees an unexpected empty token and raises ValueError.
+
+Where it occurred (how to find it)
+1. Search your codebase for places that build or pass locale strings. Look for calls to:
+   - Locale.parse( ... ) or babel.core.Locale.parse( ... )
+   - locale.setlocale( ... )
+   - any function you wrote like set_user_locale(...), normalize_locale(...), parse_locale(...)
+2. Reproduce the error with a stack trace. The topmost frame that contains your project's filename and line number is the spot to inspect. That stack frame will show the exact method name and line number to change.
+
+Why that code rejects "fr__POSIX"
+- Parsers expect one of:
+  - language (e.g. "fr")
+  - language + "_" + territory (e.g. "fr_FR")
+  - language + "_" + territory + "." + encoding (e.g. "fr_FR.UTF-8")
+  - language + "@" + modifier (e.g. "fr@POSIX")
+- "fr__POSIX" fits no valid pattern because the territory field is empty (the double underscore means territory = ""), so the parser raises ValueError.
+
+Concrete fixes (step‑by‑step)
+1. Locate the failing line (from the stack trace). Note the file name, function name and line number (for example: myapp/i18n.py:42, in set_locale).
+2. Inspect the input value at that line (print or log it). Example:
+   - If the failing line is Locale.parse(locale_string) add a temporary log:
+     print("Parsing locale:", repr(locale_string))
+   - If failing in your own normalize_locale(value) function, log earlier to see where the value was constructed.
+3. Decide the correct intended locale:
+   - If the intent was "French with POSIX modifier", the correct formats are:
+     - "fr@POSIX"  (language + modifier), or
+     - "fr_POSIX" is not standard (POSIX is normally a modifier).
+   - If the intent was "French in French territory", use "fr_FR".
+4. Fix the generator of the invalid string:
+   - If code concatenates parts like f"{lang}_{country}_{modifier}" and country can be empty, change it to conditionally include separators:
+     Example replacement logic (pseudo-code):
+       parts = [lang]
+       if country: parts.append(country)
+       if modifier: parts.append("@"+modifier)   # or appropriate separator
+       locale_string = join_parts_correctly(parts)
+   - Or sanitize inputs before parsing:
+       locale_string = locale_string.replace("__", "_")   # quick hack
+     But prefer proper conditional composition rather than blind replace.
+5. Add validation and a graceful fallback at the parse site:
+   - If using Babel:
+       try:
+           locale = Locale.parse(locale_string)
+       except ValueError:
+           # log and fallback
+           locale = Locale.parse("fr")   # or another safe default
+   - Or use a regex to validate before calling parse:
+       valid = re.match(r'^[a-z]{2}(_[A-Z]{2}(\.[\w-]+)?)?(@[\w-]+)?$', locale_string)
+6. Write a unit test that covers the invalid case so it won’t regress:
+   - e.g., assert that passing "fr__POSIX" either normalizes to "fr@POSIX" or raises a controlled, documented error with a clear message.
+
+Example change you can make at the failing call site
+- If the error is at line X: Locale.parse(locale_string)
+  Replace with:
+    # sanitize empty components then parse
+    locale_string = locale_string.strip()
+    if "__" in locale_string:
+        # collapse accidental empty component(s)
+        locale_string = locale_string.replace("__", "_")
+    try:
+        locale = Locale.parse(locale_string)
+    except ValueError:
+        logger.warning("Invalid locale %r; falling back to 'fr'.", locale_string)
+        locale = Locale.parse("fr")
+
+If you paste the stack trace and the snippet around the failing line (the method name and line number shown in the trace), I will point exactly which file and line to change and produce the minimal patch you can apply.

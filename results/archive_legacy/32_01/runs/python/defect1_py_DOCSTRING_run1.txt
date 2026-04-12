@@ -1,0 +1,69 @@
+I can’t explain the exact root cause yet because you only pasted the docstring — I need the implementation to point to the failing line(s). Please paste the method implementation (or the file) with line numbers or indicate the method name and the lines where validation and offset calculation happen. Once I have that I will point to the exact line(s) and show why it fails and how to fix it.
+
+To make my diagnosis fast and precise, include these items when you paste the code:
+- The entire function/method body (including the signature and any helper functions it calls).
+- Any unit tests or example calls that fail (with input values and the actual vs expected behavior).
+- The exact exception message and stack trace (including file/line numbers).
+- The Python version / runtime environment (if relevant).
+
+While you prepare that, here are the specific, concrete checks I will perform and the exact likely mistakes to look for in your code. Each item lists what I will check, where to look, what the symptom looks like, and the exact fix I’ll propose if I find it.
+
+1) Sign/validation logic (common cause)
+- Where to look: validation block that checks ranges for hours and minutes, especially any code that tests minutes when hours are positive/negative.
+- Symptom: raising ValueError for allowed inputs such as (0, -15) or (2, 0), or not raising for (2, -15).
+- Likely bug: logic uses something like "if minutes < 0 and hours > 0: raise" but implemented incorrectly (e.g. reversed operands, or uses >= instead of >). Or uses absolute checks incorrectly: e.g. if hours < 0: minutes = -minutes (forcing sign).
+- Exact fix I’ll propose: change the condition to exactly match the docstring cases:
+  - hours must be between -23 and 23 inclusive
+  - minutes must be between -59 and 59 inclusive
+  - disallow minutes < 0 when hours > 0 (i.e. if hours > 0 and minutes < 0: raise ValueError)
+  - allow minutes < 0 when hours == 0 (this produces a negative offset)
+  - ensure that if hours < 0 and minutes != 0, the combined sign is negative; implement by computing total_seconds = hours * 3600 + sign(hours or minutes) * abs(minutes) * 60 (see calculation section below)
+
+2) Combining hour/minute into total offset (calculation bug)
+- Where to look: code that computes total seconds/minutes or constructs the timezone object (e.g. uses timedelta(hours=..., minutes=...)).
+- Symptom: offset has wrong sign (e.g. ( -2, 15 ) becomes +2:15) or results in > ±23:59:59.
+- Likely bug: minutes always treated as positive (abs), or hours and minutes summed without consistent sign. Or code does hours*3600 + minutes*60 without adjusting sign when hours is negative and minutes positive.
+- Exact fix I’ll propose: determine the sign for the combined offset first:
+  - If hours < 0: combined_sign = -1
+  - Else if hours > 0: combined_sign = +1
+  - Else combined_sign = -1 if minutes < 0 else +1 (minutes alone decides)
+  - Then compute total_seconds = combined_sign * (abs(hours)*3600 + abs(minutes)*60)
+  - Or, equivalently, compute total_minutes = hours*60 + (minutes if hours == 0 else sign(hours)*abs(minutes))
+  - Then validate that abs(total_seconds) <= 23*3600 + 59*60 + 59 (or whatever maximum you desire)
+  - Use timedelta(seconds=total_seconds) or integer seconds when building the DateTimeZone
+
+3) Range-limit/off-by-one (bounds check)
+- Where to look: checks for hours and minutes range.
+- Symptom: accepting hours=24 or minutes=60, or rejecting hours=23/minutes=59.
+- Likely bug: using > instead of >= or vice versa; using 24 and 60 instead of 23 and 59.
+- Exact fix: enforce hours ∈ [-23, 23], minutes ∈ [-59, 59].
+
+4) Maximum/overflow validation
+- Where to look: code that validates final offset does not exceed ±23:59:59.000.
+- Symptom: method allows e.g. (23, 59) then later uses milliseconds or seconds incorrectly and ends up exceeding allowed range or raises wrong exception.
+- Likely bug: not checking combined total; checking each part independently but not their combination.
+- Exact fix: validate abs(total_seconds) <= (23*3600 + 59*60 + 59).
+
+5) Zero-hour negative-minute special case (signed zero)
+- Where to look: code that normalizes sign when hours == 0.
+- Symptom: (0, -15) becomes +00:15 instead of -00:15, or sign lost.
+- Likely bug: implementation forces minute sign to match hours (minutes = abs(minutes) * sign(hours)) even when hours == 0.
+- Exact fix: if hours == 0, preserve the sign of minutes.
+
+6) Wrong exception or message (user confusion)
+- Where to look: the raise statements and messages.
+- Symptom: raising TypeError or custom exception instead of ValueError; messages that contradict docstring.
+- Exact fix: raise ValueError with a message that describes which parameter failed (e.g. "minutes must be between -59 and 59; got -75").
+
+What to paste if you want an immediate pinpointed fix
+- The function code with line numbers (paste from your editor or run: nl -ba file.py | sed -n 'start,endp' if on Unix).
+- The stack trace pointing to file and line.
+- One or two concrete failing inputs and what you expected vs what happened.
+
+If you paste the function now I will:
+- Point to the exact line number(s) where the logic fails.
+- Explain in plain language why that line causes the observed behavior (what value transforms into what wrong value).
+- Give a minimal, concrete code change (showing the exact lines to replace) that fixes the bug and preserves the documented behavior.
+- Provide 3 short tests (input -> expected) you can run to confirm the fix.
+
+Paste the method and failing trace and I’ll diagnose precisely.

@@ -1,0 +1,48 @@
+What happened (what failed)
+- A test expected the stored value to be the floating negative zero (-0.0) but the code stored/returned 0 (positive zero / integer zero).
+- The assertion message shows "Expected -0.0, got 0". That means the test passed a value that should preserve the negative sign bit, but the value that ended up in the object is a plain 0.
+
+Where it happened (exact places in your code)
+- add(self, newcode) at line 126 calls self.append(newcode).
+- append(newcode) at line 138 is the routine that actually stores/transforms the value. The sign change happens inside append (line 138).
+
+Why it happened (root cause, plain language)
+- The code in append is destroying the negative-zero sign when it stores newcode. Common ways that loses the negative-zero sign are:
+  - casting to int (int(-0.0) -> 0) or otherwise converting to an integer,
+  - converting to a string and parsing back in a way that drops the sign,
+  - normalizing/rounding using operations that turn -0.0 into 0.0 or 0,
+  - storing into a container that coerces type (for example, code doing something like self._values.append(int(newcode)) or self._values.append(0 if newcode == 0 else newcode).
+- Because Python treats -0.0 == 0.0 and int(-0.0) == 0, tests that check specifically for the negative zero bit will fail if you convert/demote the value before storing.
+
+What to check right now (concrete debugging steps)
+1. Open the append implementation at line 138 and inspect any conversions there:
+   - Look for int(...), round(...), trunc(...), or explicit 0/0.0 assignments.
+   - Look for code that says something like if newcode == 0: newcode = 0  (this will remove the negative sign).
+2. If you find a cast to int (int(newcode)) or similar, that is the direct cause — int(-0.0) yields 0.
+3. If you find normalization logic (e.g., newcode = float(str(newcode)) or newcode = 0 if newcode == 0 else newcode), that will also remove the sign.
+4. Add a quick assertion/print inside append to confirm what arrives and what is stored:
+   - print(repr(newcode), math.copysign(1.0, newcode)) — this shows the sign bit.
+
+How to fix it (explicit steps you can apply)
+- If you need to preserve floating negative zero:
+  1. Remove any cast to int or any branch that replaces zero with a literal 0 (e.g., the code at line 138).
+  2. Store the value as a float without normalization: self._data.append(float(newcode)) or self._data.append(newcode) if already a float.
+  3. If you must coerce numbers but want to preserve sign for zero, use math.copysign:
+     - example: preserved = math.copysign(0.0, newcode) when newcode == 0
+     - or if normalizing magnitude but keeping sign: newval = math.copysign(abs(newval), newcode)
+  4. If you intentionally produce integers for non-fractional numbers, handle negative zero as a special case before casting:
+     - if newcode == 0 and math.copysign(1.0, newcode) < 0: store -0.0 explicitly instead of int(newcode).
+
+Minimal code change example you can try at line 138
+- Replace any int(...) cast with float(...) if you want floating zero preserved.
+- Or guard the cast:
+  if newcode == 0 and math.copysign(1.0, newcode) < 0:
+      stored = -0.0
+  else:
+      stored = int(newcode)  # or whatever your intended cast is
+  self._data.append(stored)
+
+Why this will fix it
+- The root is an active conversion/normalization in append that drops the negative sign. Preserving the sign by avoiding destructive casts or by reattaching the sign with math.copysign stops the test from seeing 0 instead of -0.0.
+
+If you paste the exact code for append (around line 138), I can point to the exact offending expression and give the minimal one-line change.

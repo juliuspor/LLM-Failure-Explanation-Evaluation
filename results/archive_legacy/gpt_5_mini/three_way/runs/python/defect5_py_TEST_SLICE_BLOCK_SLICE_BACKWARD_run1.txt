@@ -1,0 +1,61 @@
+What happened (root cause)
+- At line 335 your code sets inferred_type = type(array). That gives you the Python type of the array object itself (e.g. <class 'list'>), not the element type stored in the array.
+- In the test that fails (first test), ArrayUtils.add(None, None, expected_type=str) is called:
+  - array is None, element is None → the code reaches the else branch at line 340 and sets inferred_type = object.
+  - At line 346 the code checks: if inferred_type == object and expected_type != object: raise TypeError(...)
+  - Because inferred_type is object and expected_type is str, the code raises the TypeError described in the slice (the code attempts to stop an imagined Java ClassCastException).
+- This is wrong for two reasons:
+  1. inferred_type was never correctly determined for arrays; when array is a real list you set inferred_type = type(array) (a list type) instead of inspecting element types (e.g. type(array[0])).
+  2. When both array and element are None, you should honor the caller's expected_type (str) and return [None], but your code treats the lack of inference as an error and raises at line 346 instead of using expected_type.
+
+Where it happens (exact variables/lines)
+- Line 335: "if array is not None: inferred_type = type(array)" — wrong: this gets list's type, not element type.
+- Lines 337–340: the fallbacks set inferred_type = type(element) or inferred_type = object when both are None.
+- Line 346: "if inferred_type == object and expected_type != object: raise TypeError(...)" — this raises for the test case instead of returning [None].
+
+Why that causes the failing test
+- The test calls ArrayUtils.add(None, None, expected_type=str) expecting [None].
+- Because inferred_type becomes object and the check at 346 treats that as an incompatible situation, it raises a TypeError instead of returning an array typed (logically) as String[] / list of str.
+
+Concrete fixes (step-by-step)
+1. Infer the element type correctly from an existing array:
+   - Replace inferred_type = type(array) with:
+     - if isinstance(array, (list, tuple)) and len(array) > 0:
+         inferred_type = type(array[0])
+       else:
+         inferred_type = object
+   - This gets the element type when the array has elements, and avoids mistaking the container type for element type.
+
+2. Handle the case where element and array are both None but expected_type is provided:
+   - If inferred_type is object and expected_type is not object, do not raise. Instead, set inferred_type = expected_type (use the caller's expected_type to construct the new single-element array).
+   - Concretely, replace the raise at line 346 with something like:
+       if inferred_type is object and expected_type is not object:
+           inferred_type = expected_type
+     (or simply proceed using expected_type when creating the new array).
+
+3. When element is None but expected_type is known, use expected_type for the new element's type:
+   - If element is None and expected_type is provided, use expected_type rather than object.
+
+4. Optional stronger check for incompatibility:
+   - Only raise if both inferred_type and expected_type are concrete and incompatible (e.g. expected_type is not the same as inferred_type and not a supertype), but do not raise when inference fails (inferred_type == object) and expected_type is provided.
+
+Example minimal code changes (pseudo):
+- At ~335:
+    if array is not None:
+        if isinstance(array, (list, tuple)) and len(array) > 0:
+            inferred_type = type(array[0])
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+- Replace lines 346–351:
+    if inferred_type is object and expected_type is not object:
+        inferred_type = expected_type
+    # If both are concrete and incompatible, then raise:
+    if inferred_type is not object and expected_type is not object and inferred_type is not expected_type:
+        raise TypeError(...)
+
+Result
+- After these changes, ArrayUtils.add(None, None, expected_type=str) will use expected_type (str) and return [None] instead of raising. Also array element-type inference will be correct when an array argument already exists.

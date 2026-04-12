@@ -1,0 +1,56 @@
+What happened (where it failed)
+- The call in the test is: DateTimeZone.for_offset_hours_minutes(-2, -15)
+- The exception was raised at lines 396–397:
+
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- The variable that triggered the check is minutes_offset with value -15, so the code raises ValueError("Minutes out of range: -15").
+
+Why it failed (root cause)
+- The method expects minutes_offset to be a non‑negative minute component in the range 0..59, but the test passed a negative minute (-15) to represent a total offset of -2 hours 15 minutes.
+- The code’s validation only allows minutes between 0 and 59, so a negative minute component is rejected before any total offset calculation is done.
+- In other words: the API and the test disagree about whether the minutes parameter may be signed. The implementation enforces unsigned minutes (0–59), but the caller passed signed minutes to indicate a negative offset.
+
+Concrete fixes (choose one, with exact steps and code changes)
+
+Option A — Keep minutes unsigned (recommended if existing callers expect this):
+1. Change the test call to pass minutes as a positive 15 and apply the sign via the hours:
+   - Replace DateTimeZone.for_offset_hours_minutes(-2, -15) with DateTimeZone.for_offset_hours_minutes(-2, 15)
+2. No change to lines 396–397 needed because they already enforce 0..59.
+
+Option B — Allow signed minutes (match the test as written):
+1. Adjust validation to accept signed minute values in range -59..59 and compute total minutes from hours + minutes:
+   - Replace the check at lines 396–397 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total offset as total_minutes = hours_offset * 60 + minutes_offset (where hours_offset is the hours argument). This preserves the sign provided in minutes.
+3. Add a test for ambiguity: ensure callers don’t pass mismatched signs (for clarity you may enforce that hours and minutes have the same sign or that minutes uses only the sign needed to represent the remainder).
+4. Example change (pseudocode around where minutes_offset is used):
+     # validate minutes_offset
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     # compute total minutes offset
+     total_minutes = hours_offset * 60 + minutes_offset
+     # then use total_minutes to build the zone
+
+Option C — Normalize mixed signs explicitly (if you want robust behavior):
+1. Keep minutes required 0..59, but accept a negative hours value and apply negative sign to minutes if caller passed minutes negative:
+   - If hours_offset < 0 and minutes_offset < 0: minutes_offset = abs(minutes_offset)
+   - If hours_offset < 0 and minutes_offset > 0: treat total as -(abs(hours)*60 + minutes)
+   - Validate minutes as 0..59 after normalization
+2. Implementation steps:
+   - At entry, capture hours_offset and minutes_offset
+   - If minutes_offset < 0: minutes_sign = -1 else minutes_sign = 1
+   - Compute total_minutes = abs(hours_offset) * 60
+     if hours_offset < 0: total_minutes = -total_minutes
+     total_minutes += minutes_sign * minutes_abs
+   - Use total_minutes to create zone
+3. Add unit tests for cases: (-2, -15), (-2, 15), (2, 15), (2, -15) and decide desired behavior for mixed-sign inputs.
+
+Which to pick
+- If the API originally documented that minutes must be 0..59, follow Option A and fix the test.
+- If the API wants to accept signed minutes (so callers can pass (-2, -15)), use Option B and adjust the validation and calculation at lines 396–397 and where the total offset is computed.
+
+Summary in one sentence
+The code rejects -15 because minutes_offset is validated as 0..59 at lines 396–397, but the test passed a negative minute to indicate a negative time offset; either pass positive minutes (15) with a negative hours value or change the validation and offset calculation to accept signed minutes and compute total_minutes = hours*60 + minutes.

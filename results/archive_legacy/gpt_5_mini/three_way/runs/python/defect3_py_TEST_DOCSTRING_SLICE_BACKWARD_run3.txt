@@ -1,0 +1,52 @@
+What happened (what failed)
+- The test with input "\U0001F630A" (emoji + "A") triggers an IndexError from to_utf16_code_units after CharSequenceTranslator.translate advances an index past the end of the code-units list.
+- The immediate exception comes from the check at to_utf16_code_units lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+
+Why it happened (root cause)
+- The code mixes two different views of the string:
+  - Python str indexing/iteration (which is in Unicode code points, each emoji is a single character),
+  - and a UTF-16 "code_units" list created by to_utf16_code_units (where a supplementary character like U+1F630 is represented as two 16-bit code units — a surrogate pair).
+- The translator uses a single variable named index to walk the input, but sometimes treats index as an index into code_points (Python str positions) and sometimes as an index into code_units (UTF-16 units). Those are not the same when surrogate pairs exist.
+- Concretely for "\U0001F630A":
+  - code_units length = 3 (high surrogate, low surrogate, 'A')
+  - Python string length (len(s)) = 2 (emoji, 'A')
+  - The translator advances index in a way appropriate for code points (or advances by 1) but then uses that same index to access code_units. After processing the surrogate pair the index value no longer matches valid positions in code_units and the bounds check at to_utf16_code_units triggers IndexError.
+- In short: inconsistent indexing between code_units and the string causes an out-of-range access.
+
+Where it occurred (specific variables/methods/lines)
+- to_utf16_code_units builds code_units (lines shown around 10–12).
+- The IndexError is raised at the check at lines 35–36 in to_utf16_code_units.
+- The translator's index variable (used in CharSequenceTranslator.translate / CsvEscaper.translate_string) is the one that diverges from the intended code_units index after encountering a surrogate pair.
+
+How to fix it (concrete steps)
+Pick one consistent representation and keep index logic consistent. Two safe options:
+
+Option A — Work in Python code points (recommended for Python code)
+1. Stop converting to a UTF-16 code_units list for indexing. Use Python str iteration and ord(s[i]) / code_point_at for supplemental code points.
+2. When you need to examine the next code point, use Python string indexing (which already treats supplementary characters as a single element). Do not index into a separate UTF-16 array.
+3. Remove the code path that treats index as an index into UTF-16 units, or ensure any helper that expects UTF-16 is only used with properly computed indices.
+
+Option B — Work entirely in UTF-16 code units (if you must)
+1. Build code_units once (to_utf16_code_units) and consistently use it for all indexing and length checks.
+2. When you encounter a high surrogate, advance index by 2 (to skip the pair) — every increment must reflect code-unit counts.
+3. Ensure any loop termination and bounds checks use len(code_units), and every place that increments index uses code-unit increments, never code-point increments.
+
+Minimal specific code fixes to try
+- If current loop uses:
+    if is_high_surrogate(...):
+        index += 1   # WRONG when working on code_units
+  change to:
+    index += 2   # to skip both surrogate units (when indexing into code_units)
+
+- Or, better, eliminate code_units indexing and change to:
+    for i, ch in enumerate(s):
+        cp = ord(ch)
+        ...  # handle code point cp
+  This avoids UTF-16 surrogate bookkeeping entirely.
+
+Why this fix resolves the test
+- The test that failed has an emoji (two UTF-16 code units) followed by 'A'. By using a single, consistent indexing model (either code points or code units) and advancing the index by the correct amount when a surrogate pair is present, you will not read past the end of code_units and the IndexError goes away. The translator will then preserve both the emoji and the following character as expected.
+
+If you want, paste the current translate loop here and I’ll show the exact line to change and a one-line patch.

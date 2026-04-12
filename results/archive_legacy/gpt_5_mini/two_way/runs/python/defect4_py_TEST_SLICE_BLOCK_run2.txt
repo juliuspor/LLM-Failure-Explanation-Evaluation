@@ -1,0 +1,51 @@
+What happened (root cause)
+- The failure is in TimePeriodValues._update_bounds: the code compares a middle-value (the numeric mid-point of a period) to the wrong variable and/or assigns the wrong index variable when it finds a new extreme.
+- In other words, instead of comparing the current period's middle to the stored maximum middle value (e.g. max_middle or max_middle_value), the code compares it to the stored index variable (max_middle_index) or uses the wrong index variable when updating. That makes the test suite’s expected max_middle_index be 1 (middle = 150) but the method return 3 (because an index variable, not the numeric bound, was used in the comparison or update).
+
+Where it happens
+- Method: TimePeriodValues._update_bounds (the loop that computes min/max start/end/middle).
+- Variables involved: mid (current period mid), max_middle (the numeric maximum middle value stored), and max_middle_index (the index that should point to the period with max_middle).
+- Symptom shown by the test: test_max_middle_index_simple expects get_max_middle_index() == 1 but gets 3. That indicates the logic that maintains max_middle and max_middle_index is broken.
+- You can see the getter that returns the index at lines 437–439:
+  - get_min_start_index(self) -> int:
+  - return self._min_start_index
+  This shows the class stores indices in attributes like _min_start_index/_max_middle_index etc., so the bug is in how those are assigned inside _update_bounds.
+
+Why it fails (concrete example)
+- Correct logic should be:
+  - When processing period at index i:
+    - compute mid
+    - if mid > max_middle_value:
+      - set max_middle_value = mid
+      - set max_middle_index = i
+- Wrong code pattern that produces your failure looks like one of these:
+  - Comparing the mid against max_middle_index (an integer index), e.g.
+    if mid > self._max_middle_index:
+        self._max_middle_index = i
+    This compares a timestamp to an index and thus behaves unpredictably.
+  - Or using the wrong index variable when updating, e.g.
+    if mid > max_middle:
+        self._max_middle_index = j   # j is unrelated / left over variable
+    which stores the wrong index (3 instead of 1).
+
+How to fix it (explicit steps)
+1. Open hit04_timeperiod.py and find the _update_bounds method (search for the loop that updates min/max start/end/middle).
+2. Locate the block that updates the maximum middle. It will look like an if/elif that checks the current period's middle and updates stored values.
+3. Replace the incorrect comparison/assignment with the following precise logic (pseudocode with the exact names you have shown):
+   - compute mid for the current period (call it mid)
+   - if mid > self._max_middle:
+         self._max_middle = mid
+         self._max_middle_index = i
+     (use the loop index variable that corresponds to the current period; based on your getters it should assign to attributes like _max_middle and _max_middle_index)
+4. Do the same check for the minimum middle (and for min/max start and end) to ensure none of those blocks compare a value against an index or use the wrong index variable.
+5. Run the provided tests. After the fix, test_max_middle_index_simple should see get_max_middle_index() == 1, and test_generic_time_period_support should also pass.
+
+Why this exact change fixes it
+- The bug arises because code compared different types (value vs index) or used a stale/wrong index variable. Comparing mid (a timestamp) to max_middle_index (an integer index) will almost always be wrong; switching to compare mid to the numeric bound (self._max_middle) and storing the loop index into self._max_middle_index restores the intended invariant: _max_middle is the maximum middle numeric value found so far, and _max_middle_index is the index where that value was found.
+
+Extra debug tip
+- Add a quick logging/print inside _update_bounds while running the failing test:
+    print("i:", i, "mid:", mid, "current max_middle:", self._max_middle, "current max_index:", self._max_middle_index)
+  This will show you whether comparisons are being made against an index instead of the numeric value.
+
+If you paste the _update_bounds code here I can give an exact patch (line numbers and the minimal change).

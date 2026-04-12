@@ -1,0 +1,55 @@
+What happened (symptom)
+- The test input "\U0001F630A" (emoji U+1F630 followed by 'A') causes an IndexError: "String index out of range: 2".
+- That means the translator tried to index the input string at position 2 while the string length is 2 (valid indices 0 and 1). The loop advanced incorrectly past the end of the string.
+
+Where it fails (the likely place)
+- In the translate routine you iterate over the input string using an index variable (commonly named i or index), calling code_point_at(...) / to_utf16_code_units(...) to read characters/code points and appending to out.
+- The bug is in how you advance the index after reading a code point: the code always does i += 1 (or otherwise assumes a single UTF-16 code unit was consumed) instead of advancing by 2 when the code point was represented as a surrogate pair in UTF-16.
+
+Why that causes IndexError (step-by-step, referencing variables)
+1. Let input_seq = "\U0001F630A". In a UTF-16 view this is two code units: a surrogate pair for the emoji (positions 0 and 1 in UTF-16) and then 'A' would be another unit — but in Python str the string length reported by the failing code is 2 here (emoji + 'A'), so valid indices are 0 and 1.
+2. The loop starts with i = 0. It calls code_point_at(input_seq, i) (or inspects ch = input_seq[i]) and detects a non-BMP character (a code point that needs a surrogate pair).
+3. code_point_at (or to_utf16_code_units) correctly decodes the surrogate pair and returns the full code point (>= 0x10000). But after decoding, the loop does i += 1 (consumes only one index).
+4. Now i == 1. The loop iterates again and attempts to read input_seq[1]. Depending on the implementation, that may be the low-surrogate half or the next visible character. After processing that element the code again does i += 1 -> i == 2.
+5. On the next loop condition the code still tries to access input_seq[2] (or otherwise uses i as an index before breaking), causing IndexError: String index out of range: 2.
+
+Root cause (clear statement)
+- The translator does not increment the loop index by the number of UTF-16 code units consumed. It treats every code point as length 1 when it should advance by 2 when a surrogate pair (non-BMP code point) was read. In short: the index advance logic is incorrect for surrogate pairs.
+
+How to reproduce quickly
+- Run the test case test_translate_surrogate_pair_with_suffix or call escaper.translate_string("\U0001F630A"). The failure occurs at the loop that walks the input string.
+
+Concrete fixes (explicit steps you can apply)
+Option A — Adjust index advance using the code point value
+- After you call cp = code_point_at(input_seq, i), increment i by either 1 or 2 depending on cp:
+  - if cp > 0xFFFF: i += 2
+  - else: i += 1
+
+Pseudo-fix:
+- Use a while loop:
+  i = 0
+  n = len(input_seq)
+  while i < n:
+      cp = code_point_at(input_seq, i)
+      # translate cp -> append to out
+      if cp > 0xFFFF:
+          i += 2
+      else:
+          i += 1
+
+Option B — Make code_point_at return both value and consumed length
+- Change code_point_at to return (cp, consumed_units). Then:
+  cp, consumed = code_point_at(input_seq, i)
+  i += consumed
+
+Option C — If you work in terms of UTF-16 code units explicitly
+- If your translate method expects the input in UTF-16 code units (to_utf16_code_units), ensure the buffer you iterate is that sequence and advance by the correct unit count. Do not mix Python str indexing (which is by code point) with UTF-16 unit logic without translating coordinates.
+
+Additional robustness recommendations
+- Before reading input_seq[i+1] to form a surrogate pair, check that i+1 < len(input_seq). If not, handle lone high-surrogate as a replacement or error instead of indexing out of bounds.
+- Add unit tests for: (a) surrogate at end of string, (b) surrogate followed by ASCII (your failing case), (c) consecutive surrogate-pair characters — these already exist in your suite and will confirm the fix.
+
+Why this explanation is confident
+- The error message and test description explicitly mention “surrogate pair handling bug where index advances incorrectly.” The only way to produce an index 2 out of range on a 2-length string in this context is advancing the loop index incorrectly after decoding a surrogate pair.
+
+If you want, paste the translate loop (the few lines around where i is advanced) and I will produce an exact corrected snippet you can drop in.

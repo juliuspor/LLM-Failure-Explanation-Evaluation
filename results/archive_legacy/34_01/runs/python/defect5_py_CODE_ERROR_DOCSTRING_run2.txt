@@ -1,0 +1,54 @@
+What happened (root cause)
+- The code uses type(array) to get the list’s element type:
+  - inferred_type = type(array)
+- But type(array) returns the runtime class of the container (e.g. built-in list), not the element/component type. So inferred_type becomes list, not str/int/whatever the element type is.
+- Later you compare inferred_type to object and to expected_type, and you pass inferred_type into ArrayUtils._copy_list_grow1. That code (and your type check) expects a component element type (like str), not the container class.
+- Result: the logic mis-detects the component type. In some inputs this leads to inferred_type == object (or otherwise wrong), which causes the TypeError to be raised in the block that raises:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  That is the line that produced:
+  TypeError: Cannot cast object list to str list (...)
+
+Where it occurs in your function
+- inferred_type = type(array) — wrong place to get element type.
+- new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — passes the wrong “type” into the copy/grow helper.
+- The raise TypeError(...) inside if expected_type is not None: ... causes the exception shown.
+
+Why that triggers this specific message
+- If the function thinks the component type is object (because both array and element were None, or because you passed an inferred_type that ends up treated as object), but expected_type is str, you hit the raise and get the ClassCastException-style message. If inferred_type is incorrectly list, ArrayUtils or subsequent logic will also behave incorrectly because it expects a component type, not the container class.
+
+Concrete fixes (pick one depending on desired behavior)
+1) If array is not None and you want the element type from the existing list:
+   - Inspect the list contents for a representative element (e.g. first non-None element) and use its type:
+     inferred_type = type(next((x for x in array if x is not None), object))
+   - This gives a reasonable component type when the array exists.
+
+2) If you want to respect expected_type when provided:
+   - Prefer expected_type over inferred_type when expected_type is given:
+     if expected_type is not None:
+         inferred_type = expected_type
+     elif array is not None:
+         ...derive from array contents...
+     elif element is not None:
+         inferred_type = type(element)
+     else:
+         inferred_type = object
+
+3) If ArrayUtils._copy_list_grow1 expects a python type for elements (not the container):
+   - Ensure you pass a true element type (e.g. str), not type(array) (which is list).
+
+Minimal change example (option 1 + prefer expected_type):
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None:
+        inferred_type = type(next((x for x in array if x is not None), object))
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Other notes
+- If the list can contain mixed types, you must decide how to pick a component type (common supertype, object, or raise).
+- If array may be empty and element is None, you correctly fall back to object — that behavior is sensible if you can’t determine a more specific type.
+
+This explains why the code fails (using type(array) instead of an element/component type) and gives concrete code-level fixes to avoid the TypeError you saw.

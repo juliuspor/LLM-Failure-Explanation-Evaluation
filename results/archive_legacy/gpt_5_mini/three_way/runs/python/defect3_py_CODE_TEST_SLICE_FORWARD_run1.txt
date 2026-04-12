@@ -1,0 +1,62 @@
+What went wrong (short)
+- The loop that advances pos after a translator handled a codepoint double-counts UTF‑16 surrogate pairs because it treats the translator's returned value consumed incorrectly. That makes pos jump past the end of code_units in some cases and triggers the IndexError.
+
+Where it happens (specific lines / names)
+- In translate(...): after consumed = self.translate_codepoint(code_units, pos, out) the code uses:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The helper code_point_at(...) (lines 38–44 in your slice) returns a whole Unicode code point when given a high surrogate followed by a low surrogate:
+  38 |     high = code_units[index]
+  39 |     if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+  40 |         low = code_units[index + 1]
+  41 |         if 0xDC00 <= low <= 0xDFFF:
+  43 |             return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  44 |     return high
+
+Root cause (what happened and why)
+- The variable consumed is the translator's contract: how many code points the translator consumed at the current pos. But the code treats consumed as "number of loop iterations each of which will advance pos by the code unit length of whatever is currently at pos". That logic doubles or miscounts advances when surrogate pairs are involved.
+
+Concrete example from your failing test
+- Input: a surrogate pair (emoji) followed by 'A' -> code_units = [high_surrogate, low_surrogate, ord('A')]
+- Suppose translate_codepoint returns consumed = 2 (translator reported it consumed two code points or two units — either way the caller interprets it incorrectly).
+- The loop runs twice:
+  1) First iteration: code_point_at(code_units, pos) sees the high+low surrogate and returns the emoji code point; char_count(...) returns 2; pos += 2 -> pos now points at 'A'.
+  2) Second iteration: code_point_at(code_units, pos) now sees 'A' and returns 0x41; char_count(...) returns 1; pos += 1 -> pos now points past the end (pos == len(code_units) + 0). If consumed was larger or the input shorter, a subsequent code_point_at or other access may try to read index+1 and fail; the position arithmetic ends up incorrect for surrogate pairs and causes an IndexError in boundary cases.
+- In short: the code repeatedly recomputes char_count at the advancing pos, so surrogate pairs get counted as 2 each time they are encountered — producing over-advancement when consumed doesn't match the interpretation in the loop.
+
+Why the current code is wrong (simple statement)
+- The loop assumes consumed corresponds to a count of code points to read one-by-one and advance by each code point's char count — but in practice consumed and the per-iteration char_count logic interact badly for surrogate pairs. The code double-counts or miscounts UTF‑16 code units when surrogate pairs are present.
+
+Exact fixes (step-by-step, concrete)
+Pick one consistent interpretation and implement it:
+
+Option A — If translate_codepoint returns the number of code units (char) consumed:
+1. Replace the whole loop with a single advance by consumed code units:
+     pos += consumed
+   Rationale: consumed already counts UTF‑16 code units; do not call code_point_at/char_count again.
+
+Option B — If translate_codepoint returns the number of code points consumed:
+1. Advance pos by repeatedly reading the code units of each consumed code point, but read from the current pos only and update pos inside the loop correctly:
+     for _ in range(consumed):
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+   Rationale: each iteration consumes exactly one code point starting at the then-current pos. This is safe because code_point_at inspects pos and pos is advanced only once per consumed code point.
+2. (Also) Ensure translate_codepoint's doc/contract clearly states whether consumed is code units or code points.
+
+Option C — Simpler and safer: have translate_codepoint return the absolute number of UTF‑16 code units consumed (most straightforward), then use pos += consumed (same as Option A).
+
+Which to pick
+- Option A (pos += consumed) is simplest if your translators naturally count UTF‑16 code units. Option B is appropriate if translators are meant to report code points, but only if you also guarantee translate_codepoint will never return a value that contradicts the actual code_units layout.
+
+Minimal code change example (Option A):
+- Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with
+    pos += consumed
+
+Why this fixes it
+- It stops recomputing char lengths at shifting positions so surrogate pairs aren't counted twice. It advances by the same number of UTF‑16 code units the translator said it consumed, preventing over-run or skipping.
+
+Summary
+- The translator return value "consumed" is being misinterpreted and combined with per-iteration char_count(code_point_at(...)) while pos is already being moved inside the loop. That double/mis-counts surrogate pairs and moves pos beyond the buffer boundary. Fix by advancing pos exactly by the number of code units the translator consumed (or by iterating exactly one code point per iteration with careful use of code_point_at), and make the contract between translate() and translate_codepoint() explicit.

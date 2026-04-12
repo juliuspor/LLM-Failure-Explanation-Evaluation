@@ -1,0 +1,52 @@
+What happened (what failed)
+- The IndexError is raised at line 35 of to_utf16_code_units:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- That means caller passed an index equal to len(code_units). The code later at lines 38–44 (high = code_units[index]; check for a high surrogate and read low = code_units[index + 1]) shows this function expects its index to address the UTF‑16 code unit array (code_units).
+
+Root cause (why it failed)
+- to_utf16_code_units() builds an array named code_units that contains UTF‑16 code units. For characters outside the BMP (like emoji), a single Python character corresponds to two UTF‑16 code units (a surrogate pair).
+- The translator code that calls code_point_at (the slice shows the logic to combine a high + low surrogate) is using an index that counts Python string characters (Python str indexes count Unicode code points, so an emoji is one index), not UTF‑16 code units.
+- Because UTF‑16 represents the emoji as two code units, the caller and to_utf16_code_units() disagree on what an index means. The caller advances its index as if the emoji consumed one unit; the code_units array still has two entries for that emoji, so later the caller asks for code_point_at(index) where index has drifted and can become equal to len(code_units) — triggering the IndexError at line 35.
+- In short: mismatch between "index is a Python-codepoint index" and "index is a UTF‑16 code-unit index." That mismatch is exactly what makes the function reach index == len(code_units) and raise.
+
+Where it occurred (specific names/lines)
+- IndexError thrown at to_utf16_code_units, line 35: the guard that checks index >= len(code_units).
+- The surrogate-combining logic that expects two code units is at lines 38–44:
+    high = code_units[index]
+    if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+        low = code_units[index + 1]
+        if 0xDC00 <= low <= 0xDFFF:
+            return 0x10000 + ...
+- The caller that iterates and advances the index (this is in translate_string / CsvEscaper) is advancing by Python-character counts, not UTF‑16 code units; that mismatch causes the bad index.
+
+Concrete fixes (clear, actionable steps)
+Pick one of these (easiest first):
+
+1) Iterate over the Python string (simplest, recommended)
+   - Change the translator loop to iterate characters of the Python str and use ord(c) to get the code point. You do not need to manually build UTF‑16 code units in Python — ord handles full Unicode code points.
+   - When you need to detect surrogate pairs, do it on UTF‑16 only if you interoperate with a system requiring UTF‑16. Otherwise: remove to_utf16_code_units/code_point_at entirely and use ord(char) in the main loop.
+   Steps:
+     a. Replace calls to to_utf16_code_units / code_point_at with ord(s[i]) where s is the Python string and i is the loop index over characters.
+     b. Advance the loop index by 1 always (Python characters are full code points).
+
+2) Keep using UTF‑16 code_units, but make index semantics consistent
+   - Iterate over code_units (the list from to_utf16_code_units) rather than Python string indices.
+   - When you detect and combine a surrogate pair (lines 38–44), increment your loop index by 2 (skip both code units). Otherwise increment by 1.
+   Steps:
+     a. In translate_string, call code_units = to_utf16_code_units(s) once and loop over i from 0 to len(code_units).
+     b. Use code_point_at(code_units, i) to get the code point (or inline lines 38–44).
+     c. If you returned a combined code point (> 0xFFFF), set i += 2; else i += 1.
+
+3) Convert between index spaces expressly (less ideal)
+   - If you must keep the current high-level loop over Python string indices, convert that char index into the corresponding UTF‑16 code-unit index before calling code_point_at.
+   Steps:
+     a. Maintain a separate variable unit_index that tracks how many UTF‑16 code_units have been consumed so far while iterating Python characters.
+     b. Before calling code_point_at, use unit_index as the index into code_units. After handling a character, increment unit_index by 1 for BMP characters or 2 when a surrogate pair was present.
+
+Which to pick
+- If the rest of your translator is written in Python and does not need explicit UTF‑16 units: go with fix (1) — it is simplest and avoids these index conversion pitfalls.
+- If you need to emulate Java/UTF‑16 semantics exactly, choose (2) and make the loop operate on code_units and increase the index by 2 when combining surrogates.
+
+Summary
+- The failure is caused by mixing two different index meanings: Python string indices (code points) versus UTF‑16 code unit indices. That mismatch causes an out‑of‑range index at line 35 of to_utf16_code_units. Fix by making the index space consistent: either operate on Python code points (ord) or operate on UTF‑16 code units and advance the index by 2 for surrogate pairs.

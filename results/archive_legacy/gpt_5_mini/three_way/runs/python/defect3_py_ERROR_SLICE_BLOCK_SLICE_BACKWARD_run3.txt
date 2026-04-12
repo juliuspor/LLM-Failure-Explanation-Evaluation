@@ -1,0 +1,48 @@
+What happened (exact failure)
+- At lines 35–36 the code raises IndexError because the condition is true:
+  - index has value 2, and len(code_units) is 2, so index >= len(code_units) → raise IndexError("String index out of range: 2").
+- In other words: the code attempted to access code_units[2] but code_units only has elements 0 and 1.
+
+Why that happened (root cause)
+- The immediate cause is correct: the bounds check caught an out-of-range access. The real bug is in how code_units is produced in to_utf16_code_units (start shown at line 10).
+- The mismatch is between the caller's expectation (an index measured in UTF‑16 code units) and the contents/length of code_units returned by to_utf16_code_units.
+  - to_utf16_code_units produced only 2 code units for the input string s.
+  - The caller tried to access the third UTF‑16 code unit (index 2), so it expected at least 3 code units.
+- Most likely concrete reason: characters above U+FFFF (supplementary characters) were not converted into two UTF‑16 code units (a surrogate pair). That makes len(code_units) smaller than the number of UTF‑16 code units the caller expects. For example, if s contains one supplementary character, Python's str iteration yields one code point, but UTF‑16 representation requires two 16‑bit units. If to_utf16_code_units treats each Python character as one UTF‑16 unit, it will under-count.
+
+Where it happened (lines/variables)
+- Function: to_utf16_code_units (line 10).
+- Variables: s (input string), code_units (list built in to_utf16_code_units), index (checked at line 35).
+- Check that raised the error:
+  - Line 35: if index < 0 or index >= len(code_units):
+  - Line 36: raise IndexError(f"String index out of range: {index}")
+
+How to confirm quickly (steps to reproduce / debug)
+1. Print the inputs and lengths right before the check:
+   - print("s =", repr(s))
+   - print("index =", index, "len(code_units) =", len(code_units))
+   - print("code_units =", code_units)
+2. If s contains any character with ord(c) > 0xFFFF (e.g. an emoji), you'll see code_units length smaller than the caller expects.
+3. Alternatively, run: for c in s: print(hex(ord(c))) to see code points.
+
+Exact fixes (clear, numbered steps)
+- Option A (recommended): Build code_units from an actual UTF‑16 encoding so surrogate pairs are correct.
+  1. Replace the current construction of code_units with a UTF‑16 encoding approach. Example implementation (use utf-16-le to avoid BOM):
+     - b = s.encode("utf-16-le")
+     - code_units = [int.from_bytes(b[i:i+2], "little") for i in range(0, len(b), 2)]
+  2. Keep the existing index bounds check (lines 35–36) — it is correct once code_units reflects true UTF‑16 units.
+- Option B: If you must construct code_units manually, implement surrogate-pair expansion:
+  1. For each code point cp = ord(c):
+     - If cp <= 0xFFFF: append cp
+     - Else: cp' = cp - 0x10000; high = 0xD800 + (cp' >> 10); low = 0xDC00 + (cp' & 0x3FF); append high then low
+  2. Then keep the existing bounds check.
+- Option C (if the caller is wrong): If the caller should be indexing code points rather than UTF‑16 units, make the caller use code point indexing (e.g., index into s) instead of UTF‑16 unit indexing — but this is only correct if the intended unit is code points.
+
+Which fix to choose
+- Use Option A unless you have a specific reason to manually implement UTF‑16: encoding is concise and less error-prone.
+- Verify with the debug prints that after the change len(code_units) matches the caller's expected number of UTF‑16 code units.
+
+Why a simple change to the bounds check is NOT the right fix
+- Changing the check to index > len(code_units) or similar would only hide the bug; it would allow out-of-range access or mask the mismatch in units. The correct approach is to make code_units truly represent UTF‑16 code units (Options A or B) or make the caller index the same unit type.
+
+If you want, paste the current body of to_utf16_code_units and I will give the exact replacement lines to use (either encode-based or manual surrogate conversion).

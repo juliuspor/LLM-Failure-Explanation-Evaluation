@@ -1,0 +1,38 @@
+What happened (root cause)
+- LocaleUtils.to_locale rejects "fr__POSIX" because the code that splits the input string drops the empty country token. The input "fr__POSIX" should parse as language="fr", country="", variant="POSIX", but the splitter returns only ["fr","POSIX"] (the empty token between the two underscores is lost), so the method then treats "POSIX" as the country and fails the country-format validation. That triggers the ValueError: "Invalid locale format: fr__POSIX".
+
+Exactly where it occurs
+- In LocaleUtils.to_locale (the method that parses the locale string) the input is split on '_' using a splitter that removes empty tokens (for example StringUtils.split(...) or similar). Right after that split the code checks parts length and validates language/country formats. Because the empty country token was removed, the parts have the wrong layout and the country/format validation rejects the input and raises the ValueError.
+
+Why the code mis-parses "fr__POSIX"
+- "fr__POSIX" has two underscores to indicate an empty country with a variant present. A splitter that collapses consecutive separators will return ["fr","POSIX"] instead of ["fr","","POSIX"]. The code expects three parts for language+country+variant; it never sees an explicit empty country part and so applies the wrong validation logic.
+
+How to fix it (concrete steps)
+1. Change the split call so it preserves empty tokens. Example fixes, depending on the language/library:
+   - If this is Java + Apache StringUtils: replace
+     parts = StringUtils.split(input, '_');
+     with
+     parts = StringUtils.splitPreserveAllTokens(input, '_');
+   - Or using Java core API: replace
+     parts = input.split("_");
+     with
+     parts = input.split("_", -1); // negative limit preserves trailing/empty tokens
+   - Or implement manual parsing by indexOf('_') to explicitly extract language, country (possibly empty), and variant.
+
+2. After preserving empty tokens, keep the existing validation logic that expects:
+   - language is 2–3 letters or empty where permitted,
+   - country is 0–2 letters,
+   - variant is whatever remains.
+   With preserved tokens, "fr__POSIX" will produce parts = ["fr", "", "POSIX"] and pass validation.
+
+3. Add or update unit tests:
+   - Keep the failing test:
+     result = LocaleUtils.to_locale("fr__POSIX")
+     assert result == Locale("fr", "", "POSIX")
+   - Add tests for other cases with empty tokens, e.g. "__POSIX", "en_US", "en__WIN" and verify behavior.
+
+Why this fix works
+- Preserving empty tokens yields the correct 3-element array for language/country/variant so the parsing and validation steps operate on the intended fields (country = "", variant = "POSIX") and the method returns the expected Locale instead of raising ValueError.
+
+Where to change in your codebase
+- Edit the file that contains LocaleUtils.to_locale. Look for the line that splits the input string on '_' (likely a call to StringUtils.split(...) or input.split("_")). Change that call to a variant that preserves empty tokens (splitPreserveAllTokens or split with limit -1), rerun tests, and confirm the test you showed now passes.

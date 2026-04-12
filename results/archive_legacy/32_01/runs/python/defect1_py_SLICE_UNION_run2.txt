@@ -1,0 +1,65 @@
+What happened (where — exact lines)
+- At lines 400–401 the code checks the minutes field:
+  - Line 400: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 401: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later, at lines 406 and 408 the same identifier minutes_offset is reused to compute a total-minute value:
+  - Line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Then that minutes_offset is multiplied into milliseconds at line 409 and returned at line 412.
+
+Why it fails (root cause)
+- The variable minutes_offset is being used for two different meanings without a clear handoff:
+  1. At lines 400–401 it is treated as the minute-component (must be 0–59).
+  2. Later (lines 406/408) it is reused for the combined minutes (hours_in_minutes ± minutes_offset).
+- Because the code validates minutes_offset early, then overwrites it with an arithmetic expression involving hours_in_minutes, the sign and magnitude of the final minutes_offset can be wrong or unexpected. That leads to:
+  - Incorrect total-minute calculation when hours has its own sign or when the intended sign logic is different (the code subtracts or adds minutes depending on sign), and
+  - Potential overflow or an "Offset is too large" path when the multiplied value goes outside allowed range.
+- In short: variable reuse (minutes_offset used both as the minute part and then as the overall offset in minutes) produces incorrect arithmetic and bad validation ordering.
+
+Why this explains observed failures (concrete example)
+- Example: hours = -5, minutes = 30
+  - Line 400 sees minutes_offset = 30 → passes 0..59 check.
+  - Suppose hours_in_minutes = -300. Line 406 does minutes_offset = -300 - 30 = -330.
+  - The final negative large minutes_offset may then trigger overflow or be treated as an invalid absolute offset by subsequent checks. The earlier validation did nothing to prevent this incorrect total because it validated only the minute component, not the final value.
+
+Where to fix (specific steps and code changes)
+1. Stop reusing minutes_offset for two different meanings. Introduce separate variables:
+   - minutes_part (0..59)
+   - total_minutes or minutes_offset_total
+2. Validate each field in the correct place:
+   - Keep the check at lines 400–401 but apply it to minutes_part (rename).
+   - Validate hours separately (make sure hours value is in expected range, if there is one).
+3. Compute the total minute offset with clear sign handling:
+   - Example:
+     - minutes_part = minutes_offset  # rename for clarity
+     - if hours_sign_is_negative:
+         total_minutes = hours_in_minutes - minutes_part
+       else:
+         total_minutes = hours_in_minutes + minutes_part
+4. Multiply total_minutes into milliseconds and check for overflow after that (line 409).
+5. Replace any later uses of minutes_offset with total_minutes, and keep the minute-part and total-minute variables distinct.
+
+Minimal code patch (illustrative, with line references)
+- Replace lines 400–401:
+  - Old: if minutes_offset < 0 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - New:
+     minutes_part = minutes_offset
+     if minutes_part < 0 or minutes_part > 59:
+         raise ValueError(f"Minutes out of range: {minutes_part}")
+- Replace lines 406/408 and 409:
+  - Compute total_minutes explicitly:
+     if hours_is_negative:
+         total_minutes = hours_in_minutes - minutes_part
+     else:
+         total_minutes = hours_in_minutes + minutes_part
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Tests to add
+- hours positive, minutes valid (e.g. +2:30) → check expected millis
+- hours negative, minutes valid (e.g. -2:30) → check expected millis
+- minute out of range (e.g. 0:-1 or 0:60) → should raise at the minutes check
+- large hours that would overflow → exercise the "Offset is too large" branch
+
+Bottom line
+The code fails because the same variable minutes_offset is validated as a minute component and then reused to hold a computed total minutes value. That mixing of roles leads to wrong arithmetic and incorrect/late validation. Fix by separating the minute component and the total-minute offset, validate each in the right place, and then compute the final offset.

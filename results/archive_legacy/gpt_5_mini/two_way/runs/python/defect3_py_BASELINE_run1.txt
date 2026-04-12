@@ -1,0 +1,43 @@
+What happened (root cause)
+- In translate() you mix two different notions of "how far to advance":
+  - translate_codepoint(...) returns how many UTF-16 code units it consumed at the current position (let's call that consumed — e.g. 2 for a surrogate pair).
+  - char_count(code_point_at(code_units, pos)) also returns the number of UTF-16 code units for the code point at pos (again 2 for a surrogate pair).
+- The buggy loop (lines shown in your snippet) runs for pt in range(consumed): and on each iteration does pos += char_count(code_point_at(code_units, pos)).
+  - For a surrogate pair at pos == 0, consumed == 2.
+  - First iteration: code_point_at(code_units, 0) returns the pair → char_count(...) == 2 → pos becomes 2.
+  - Second iteration: the code calls code_point_at(code_units, 2) but pos == 2 is past the end of the code_units list, so code_point_at raises IndexError: "String index out of range: 2".
+- In short: you advance pos too far (double-count) because you both loop consumed times and inside each iteration you advance by the full surrogate length.
+
+Where it occurs (specific names/lines)
+- In translate(self, input_seq, out):
+  - After consumed = self.translate_codepoint(code_units, pos, out)
+  - The problematic block is:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The offending functions are translate_codepoint(...) (which reports consumed), code_point_at(code_units, pos) (which can return a two-unit codepoint), and char_count(...) (which returns 2 for surrogate pairs). The index error is raised from code_point_at when called with an out-of-range pos (see your slice block lines 35–36).
+
+Why this is wrong (concise)
+- You should advance pos exactly by the number of UTF-16 code units consumed. Instead the code advances pos consumed times, each time by the code point length at the current pos — producing an over-advance for multi-unit (surrogate pair) code points and causing a subsequent out-of-range access.
+
+Exact fix (concrete steps)
+1. Replace the whole loop that advances pos with a single advance by consumed code units:
+   - Change:
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+     to:
+       pos += consumed
+2. Alternatively, if you prefer iterating per code unit, advance by 1 per iteration:
+   - Change to:
+       for _ in range(consumed):
+           pos += 1
+   but the single pos += consumed is clearer and less error-prone.
+
+Why the fix works
+- translate_codepoint already tells you how many UTF-16 code units were handled (1 or 2). Moving pos by exactly that many units keeps pos in sync with the underlying code_units list and prevents calling code_point_at with an out-of-range index.
+
+Quick example showing the failure case
+- Input code_units length = 2 (surrogate pair), pos = 0, consumed = 2.
+- Buggy loop: first iteration adds 2 → pos = 2, second iteration attempts code_point_at(2) → IndexError.
+- Fixed code: pos += consumed → pos = 2 and loop ends cleanly.
+
+No other changes are required unless translate_codepoint's contract changes — just trust its returned consumed value and advance pos by it.

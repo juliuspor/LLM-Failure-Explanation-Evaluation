@@ -1,0 +1,14 @@
+    /**
+     * Returns a paint for the specified value.
+     * 
+     * @param value  the value.
+     * 
+     * @return A paint for the specified value.
+     */
+    public Paint getPaint(double value) {
+        double v = Math.max(value, this.lowerBound);
+        v = Math.min(v, this.upperBound);
+        int g = (int) ((v - this.lowerBound) / (this.upperBound 
+                - this.lowerBound) * 255.0);
+        return new Color(g, g, g);
+    }

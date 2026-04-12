@@ -1,0 +1,54 @@
+What’s happening at lines 30–31 is that the function is unconditionally treating the incoming value named index like a plain Python integer and then raising IndexError when the check fails:
+
+  30 |     if index < 0 or index >= len(s):
+  31 |         raise IndexError(f"String index out of range: {index}")
+
+Root cause (concise and exact)
+- The failure comes from index not being a regular Python int (or otherwise not comparable to 0 and to len(s)) or not being the kind of value you expect. When index is a non-integer (for example: a slice object, None, a float, or some numeric type that doesn't compare the way you expect), either:
+  - One of the comparisons (index < 0 or index >= len(s)) raises a TypeError because Python cannot compare those types to an int, or
+  - The comparisons behave unexpectedly and cause you to raise IndexError even though the caller passed a valid index-like object.
+- The code at lines 30–31 is therefore checking the wrong thing without validating or normalizing index first, so the error is raised at that exact location.
+
+Why this happens (concrete examples)
+- If index is a slice (caller passed s[1:4] style input), then Python will raise TypeError at the first comparison because slice < 0 is invalid.
+- If index is a float (e.g. 3.0) or None, index < 0 will raise TypeError.
+- If index is a numpy.int64, a plain isinstance(index, int) check would be False in some code paths; comparisons might still work, but other downstream code may rely on exact int semantics.
+- If the caller passed a negative numpy integer or an object that implements custom comparison, the boolean logic may give surprising results and you’ll raise IndexError incorrectly.
+
+Where it occurs
+- The failure occurs exactly at line 30 during evaluation of the boolean expression index < 0 or index >= len(s), and the exception is raised on line 31 when that expression evaluates True or when the comparison itself raises TypeError.
+
+How to fix it (clear step-by-step fixes you can apply)
+1. Decide the allowed index types: do you accept only ints, or any object that can be converted to an integer (operator.index), or do you also want to accept slices?
+2. Normalize/validate index before making range checks. Example fixes:
+
+- If you only want integers:
+  - Use operator.index to coerce objects that implement the integer protocol (works for Python ints and types that implement __index__ such as numpy integers).
+    - from operator import index as to_index
+    - try:
+        i = to_index(index)
+      except TypeError:
+        raise TypeError(f"index must be an integer, not {type(index).__name__}")
+    - if i < 0 or i >= len(s):
+        raise IndexError(f"String index out of range: {index}")
+  - This prevents TypeError in comparisons and ensures consistent behavior.
+
+- If you want to accept slices and treat them specially:
+  - Check isinstance(index, slice) first and handle slicing separately (compute start/stop/step using index.indices(len(s))).
+    - if isinstance(index, slice):
+        return s[index]  # or handle explicitly
+    - else convert/validate as above.
+
+3. Add clearer error messages and type checks so callers know whether they passed a wrong type vs an out-of-range integer.
+4. Add unit tests that pass a plain int, numpy.int64, float, slice, and None to confirm behavior.
+
+Minimal corrected example (replace lines 30–31)
+  from operator import index as to_index
+  try:
+      i = to_index(index)
+  except TypeError:
+      raise TypeError(f"index must be an integer, not {type(index).__name__}") from None
+  if i < 0 or i >= len(s):
+      raise IndexError(f"String index out of range: {i}")
+
+If you paste the exact failing input and stack trace, I can point to which of the above cases actually happened and show a one-line patch for your code.

@@ -1,0 +1,60 @@
+What happened (where it fails)
+- The exception originates at lines 346–351 in the slice you showed. That block runs this check:
+  - if inferred_type == object and expected_type != object: raise TypeError(...)
+- So the function decided inferred_type was object, expected_type was some concrete type (not object), and therefore raised:
+  - "Cannot cast object list to X list (ClassCastException: ... )"
+
+Why that decision was made (root cause)
+- inferred_type is the inferred component type of the input list (variable name inferred_type).
+  - inferred_type becomes object when the code cannot determine a more specific element type for the existing list.
+  - This happens for examples such as:
+    - array is an empty list (no elements to infer from),
+    - array contains only None values,
+    - array contains mixed types so the code falls back to object,
+    - or the function sets inferred_type = object when array is None and element is None.
+- expected_type is the caller-supplied type you want the result to have (variable name expected_type).
+- The code is asserting that if the existing list is only known as an object-list (inferred_type == object) you cannot return a list typed to a more specific expected_type, so it raises a TypeError instead of performing an unchecked cast.
+
+Concrete examples that trigger the error
+- Call the function with an empty list and expected_type=int:
+  - array = [], element = 5, expected_type = int -> inferred_type == object, expected_type != object -> raises.
+- Call with array = [None, None], element = None, expected_type = str -> inferred_type == object -> raises.
+- Call with array = None, element = None, expected_type = SomeClass -> inferred_type falls back to object -> raises.
+
+Why the error message mentions ClassCastException
+- The code forms a Java-like message "cannot be cast to [Ljava.lang.X;" to indicate the conceptual reason: you cannot safely treat a runtime object-array as a runtime X-array. The code raises a Python TypeError to report this.
+
+How to fix it (precise steps)
+Choose one of these concrete fixes depending on desired behavior:
+
+1) If you want the function to accept empty/object-typed lists when expected_type is concrete:
+   - Remove or change the check at lines 346–351 so it does not raise when inferred_type == object.
+   - Instead, allow constructing a new list of expected_type and copy elements with runtime checks (see step 3 below).
+   - Code change: replace the raise with a conversion attempt or a warning.
+
+2) If you intend to require a matching element type:
+   - Make sure callers pass a matching expected_type or give the function enough information to infer the type.
+   - For example, if array is empty, pass expected_type=int when you expect ints; if element is None and array is None, pass expected_type explicitly.
+
+3) If you want safe runtime checking and conversion:
+   - When inferred_type == object and expected_type != object:
+     - Create a new list for expected_type and iterate through existing elements (if any).
+     - For each element e:
+       - If e is None: accept or validate according to policy.
+       - Else if not isinstance(e, expected_type): raise TypeError at the element-level with the element index and actual type.
+     - Append the new element after the same checks.
+   - This provides a precise element-level TypeError instead of a blanket error.
+
+4) If None elements should be allowed for any expected_type:
+   - Decide whether None is acceptable as an instance of expected_type.
+   - If acceptable, change the check so None values do not force inferred_type to object, or treat None as compatible.
+
+Exactly where to change
+- Update the condition at lines 346–351 in the function that implements "Copies the given list and adds the given element..." (the function containing the docstring).
+- Either:
+  - loosen the condition so it does not raise immediately when inferred_type == object, or
+  - perform explicit element-by-element verification/conversion before raising.
+
+Summary
+- The function raises because it computed inferred_type == object (no concrete element type known) but expected_type is a concrete type; the code refuses to cast an "object list" to a concrete-type list and raises at lines 346–351.
+- Fix by (a) supplying expected_type when the caller knows it, or (b) changing the code to perform element-level checks/casts or to accept object->concrete conversions instead of raising immediately.

@@ -1,0 +1,45 @@
+What happened (root cause)
+- The bug is in the pos-advancement after a translator consumes codepoints:
+  - At line: consumed = self.translate_codepoint(code_units, pos)
+  - Then you do:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The code assumes it can inspect code_point_at(code_units, pos) repeatedly to find how many UTF-16 code units to skip. But translate_codepoint has already "consumed" those codepoints at the current pos. Because you never advance a separate cursor before calling code_point_at, the first iteration of the loop re-reads the same codepoint that translate_codepoint just processed. That makes the loop compute the wrong increments (and repeat the same advance), which leads to:
+  - wrong pos values (skipping the wrong amount or not advancing at all), and as a result
+  - an infinite loop or an IndexError when you run past the end of code_units.
+
+Why that is incorrect in plain terms
+- translate_codepoint tells you "I consumed N codepoints starting at pos" but you treat that N as a count of iterations where you re-query the codepoint at the unchanged pos each time. You should either:
+  - move pos forward as you inspect successive codepoints, or
+  - have translate_codepoint return the number of UTF-16 code units consumed so you can advance pos in one step.
+- As written, the loop uses pos both as the starting point for translate_codepoint and as the argument to code_point_at inside the loop without moving a separate scanning index first. That mismatch between the translator's contract and your advancement logic is the immediate cause of failure.
+
+Where it happens (lines)
+- Line assigning consumed: consumed = self.translate_codepoint(code_units, pos)
+- The problem line(s): for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))
+
+Concrete fixes (step-by-step)
+Choose one of these two correct approaches:
+
+A) Make translate_codepoint return the number of UTF-16 code units consumed
+1. Change translate_codepoint so it returns units_consumed (1 or 2), not codepoint count.
+2. Replace the whole for-loop with:
+     pos += units_consumed
+3. That way pos is advanced by the exact number of code units the translator consumed.
+
+B) Keep translate_codepoint returning number of codepoints consumed, but advance correctly
+1. Introduce a separate cursor next_pos = pos before the loop.
+2. Iterate over consumed codepoints reading successive codepoints from next_pos:
+     next_pos = pos
+     for pt in range(consumed):
+         cp = code_point_at(code_units, next_pos)
+         next_pos += char_count(cp)
+     pos = next_pos
+3. This ensures each call to code_point_at reads the next codepoint, not the same one repeatedly.
+
+Either fix eliminates the incorrect repeated code_point_at(code_units, pos) calls and prevents the infinite loop/IndexError.
+
+Minimal recommended change
+- If you control translate_codepoint, implement (A) — simpler and less error-prone: return the number of UTF-16 code units consumed and do pos += units_consumed immediately after the call.
+
+That is the exact bug, where it occurs, why it causes failure, and concrete step-by-step fixes.

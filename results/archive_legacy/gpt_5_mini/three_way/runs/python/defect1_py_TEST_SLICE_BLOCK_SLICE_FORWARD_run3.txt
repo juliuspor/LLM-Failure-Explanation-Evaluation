@@ -1,0 +1,55 @@
+What went wrong (what failed)
+- The tests that pass negative minutes (for example test_negative_hours_negative_minutes which calls DateTimeZone.for_offset_hours_minutes(-2, -15)) raise ValueError immediately.
+- The ValueError comes from this check at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minute value unconditionally, so any call with minutes < 0 fails there even when a negative minute is intended (for negative hour offsets).
+
+Where it happens
+- File: hit01_timezone.py
+- Exact lines shown in the slice:
+  - Line 396: the minutes range check that raises the ValueError
+  - Later logic (lines ~402 and 404) tries to combine hours and minutes into a total minutes value, but that code cannot run because the method already raised at line 396 for negative minutes.
+
+Why it fails (root cause)
+- The code enforces minutes must be >= 0 (minutes_offset < 0 triggers error). But the expected behaviors (per the tests and the file docstring) allow negative minute values in some combinations (e.g., (-2, -15) should produce -02:15). In other words, the validation on line 396 is too strict and rejects valid inputs.
+- Additionally, there is logic later (lines 402 and 404) that attempts to combine hours and minutes with sign-aware arithmetic, so the code was intended to accept negative minutes. But because the earlier validation bars negative minutes, that later sign-handling code never gets a chance to run for negative minute inputs.
+
+How to fix it (specific steps)
+1. Relax the minutes check so it allows negative minute values within the valid minute range:
+   - Replace the existing check at line 396:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With a range check that permits -59..+59:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Make the combination of hours and minutes explicit and sign-correct (replace the brittle subsequent adjustment logic). A clear, correct approach is:
+   - Compute total_minutes = hours * 60
+   - If hours < 0, treat minutes as extending the negative magnitude: total_minutes -= abs(minutes)
+   - Else (hours >= 0), treat minutes as extending the positive magnitude: total_minutes += minutes
+   - Example implementation (insert/replace the portion around lines 402–405):
+       # after validating hours and minutes ranges
+       total_minutes = hours * 60
+       if hours < 0:
+           total_minutes -= abs(minutes_offset)
+       else:
+           total_minutes += minutes_offset
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - This implements the documented behavior where (-2, 15) and (-2, -15) both yield -02:15, while (2, -15) is invalid (see next step).
+
+3. Enforce the mixed-sign invalid case (positive hours with negative minutes):
+   - If hours > 0 and minutes_offset < 0, raise ValueError (this matches the tests expecting (2, -15) to raise).
+   - If hours < 0 and minutes_offset > 0 you want to allow it (per docstring) and treat minutes as extending the negative. If you prefer a stricter rule you could normalize minutes sign first, but the tests expect the docstring behavior.
+
+4. Keep the existing hours bounds check (hours in [-23, 23]) and overflow guard around the final millis multiplication (existing code already checks offset is not too large).
+
+Which tests will stop failing after this
+- test_negative_hours_negative_minutes
+- test_zero_hours_negative_minutes
+- test_mixed_signs_invalid (the (2, -15) case will still raise, while (-2, 15) and (-2, -15) will succeed)
+- Any tests using negative minutes where minutes are in the allowed range
+
+Summary (concise)
+- Problem: minutes validation at line 396 rejects negative minute values unconditionally.
+- Fix: allow minutes in [-59, +59] and compute total_minutes using hours sign (e.g., subtract abs(minutes) if hours < 0). Also explicitly reject the mixed-sign invalid case positive hours with negative minutes. This change matches the docstring/tests and prevents the premature ValueError.

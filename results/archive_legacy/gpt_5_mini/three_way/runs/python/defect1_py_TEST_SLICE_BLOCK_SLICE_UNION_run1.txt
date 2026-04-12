@@ -1,0 +1,41 @@
+What failed
+- The function DateTimeZone.for_offset_hours_minutes is rejecting valid negative minute values because of the check on minutes_offset at lines 396–397:
+  - Lines shown:
+    396 |         if minutes_offset < 0 or minutes_offset > 59:
+    397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That condition treats any negative minute as out of range. Your tests call for_offset_hours_minutes with negative minutes (for example (0, -15), (0, -15) and (-2, -15)), so those calls raise ValueError immediately. That is why tests expecting negative-minute offsets fail.
+
+Where it happens in the code
+- Method: DateTimeZone.for_offset_hours_minutes
+- Variable: minutes_offset
+- Exact lines: 396–397 (the minutes range check)
+- Downstream logic (lines 402 and 404) appears to handle sign adjustments (minutes_offset = hours_in_minutes - minutes_offset or hours_in_minutes + minutes_offset), so the implementation intends to accept negative minutes, but the early check prevents that code from ever running for negative minute values.
+
+Why this is the root cause
+- The code both intends to handle negative minutes and also forbids them. The contradiction is caused by the wrong bounds check:
+  - It enforces 0..59, but the intended valid range is -59..+59 (per the rest of the logic and the tests).
+- Because the negative-minute inputs are rejected before the sign-handling logic executes, tests that expect negative-minute offsets either fail or raise ValueError incorrectly.
+
+Exact fix (step-by-step, with lines to change)
+1. Open hit01_timezone.py and locate the minutes validation at lines ~396–397 in DateTimeZone.for_offset_hours_minutes.
+2. Change the range check from:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   to:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - This allows minutes in [-59, +59], which matches later sign-handling code.
+3. Leave the later sign handling code (lines ~402 and ~404) as-is, since it already appears written to normalize mixed signs or combine hours and minutes into a single offset in minutes.
+4. Run tests again. Expected outcomes:
+   - Calls with negative minutes (e.g. (0, -15), (-2, -15)) will no longer be rejected and will proceed to the sign-handling logic.
+   - Calls like (2, -15) that should be invalid can still be caught either by explicit sign checks or by existing logic; verify behavior and add a check if needed.
+
+Why this fix works
+- It aligns the validation with the intended input domain (-59..59). The subsequent code uses negative minutes to compute a negative total offset; allowing negative minute values lets that downstream logic run and produce the expected offsets and IDs (e.g. "-00:15", "-02:15").
+
+Optional additional check (if you want stricter sign-mismatch behavior)
+- If you want to explicitly forbid mixed-sign inputs such as (2, -15) while allowing (-2, 15) and (-2, -15), add after the minutes range check:
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("Hour positive and minute negative is not allowed")
+  # (or similar rules per your spec)
+- But implement this only if your spec requires it; the immediate failing tests are caused solely by the too-strict minutes range check.

@@ -1,0 +1,56 @@
+What happened (root cause)
+- The failure happens in ArrayUtils.add when both inputs that determine the new array's element type are None: array is None and element is None. The call in the failing test is:
+  ArrayUtils.add(None, None, expected_type=str)
+- The add implementation falls into the branch that creates a neutral/object-typed array/list (Object[] / List[object]) when it cannot infer a component type from array or element.
+- Later the caller (or surrounding code on the JVM) attempts to use the returned Object[] as a String[] (because expected_type=str was passed). That cast fails at runtime with:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+  which is shown in the Python test as TypeError: Cannot cast object list to str list.
+
+Where in the code it occurs
+- The problem occurs in ArrayUtils.add, specifically the branch that handles "array is None". Within that branch there are three possibilities:
+  1. element is not None -> use element's type
+  2. element is None -> currently create Object[] / List[object]
+  3. expected_type parameter may be provided but is ignored in the element-is-None case
+- Because expected_type is ignored when element is None, the method returns an Object-typed container even though the caller requested a str-typed result (expected_type=str). The mismatch causes the ClassCastException when the JVM-level code expects String[].
+
+Why that causes the ClassCastException
+- On the JVM arrays are covariant but not safely interchangeable by runtime type. An Object[] is not a String[]; attempting to cast results in ClassCastException.
+- The tests simulate a caller expecting String[] (via expected_type=str) but receiving Object[] causes the explicit runtime cast to fail.
+
+Exactly what to change (concrete steps)
+1. In ArrayUtils.add(array, element, expected_type=None), in the "array is None" branch, consult expected_type before defaulting to object:
+   - If expected_type is provided (not None), use expected_type as the component type for the new array/list.
+   - Else if element is not None, use type(element).
+   - Else (both element and expected_type are None) fall back to object.
+
+2. Construct the returned container with that chosen component type:
+   - On JVM/Java code: use Array.newInstance(component_type, 1) and set index 0 to element (which may be None). This ensures the runtime array type matches component_type.
+   - On Python-only code: if expected_type matters to caller via typing or a binding layer, ensure any code that performs an array-type cast uses component_type. If the code is running under a Java-Python bridge, create a Java array of the chosen component_type instead of a plain Python list.
+
+3. Validate and raise readable errors:
+   - If element is not None but its type is incompatible with expected_type, raise TypeError immediately with a clear message:
+     "element of type X is not compatible with expected_type Y"
+   - If expected_type is not a type/class, raise TypeError early.
+
+4. Add unit tests for the specific case:
+   - ArrayUtils.add(None, None, expected_type=str) should return a string-typed array/list with a single None (or an array whose runtime component type is str/String). The existing failing test covers this — keep it.
+
+Example of the logic flow (pseudo):
+- if array is None:
+    if expected_type is not None:
+        component_type = expected_type
+    elif element is not None:
+        component_type = type(element)
+    else:
+        component_type = object
+    create array of component_type length 1 and put element at index 0
+    return it
+
+Why this fix works
+- If expected_type is honored when element is None, the returned array will have the requested runtime component type (String[] on JVM), so no ClassCastException will occur when the caller expects a String[].
+- The change preserves current behavior when expected_type is not supplied (existing logic still picks element's type or falls back to object).
+
+One more specific note
+- The bug report mentions "LANG-35 type inference when adding elements to arrays." The concrete cause is simply: expected_type was ignored in the "both None" inference path in ArrayUtils.add, producing an Object[] where a typed array was expected.
+
+If you want, paste the current ArrayUtils.add implementation here and I will show the exact lines to change and a minimal patch.

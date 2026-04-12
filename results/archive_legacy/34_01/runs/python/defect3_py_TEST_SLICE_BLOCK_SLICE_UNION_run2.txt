@@ -1,0 +1,40 @@
+What happened (where it failed)
+- The test calls CsvEscaper.translate_string('\U0001F630') — the string contains a single Unicode codepoint U+1F630 (an "astral" character > 0xFFFF).
+- Inside your code the error comes from these lines in to_utf16_code_units (shown in the slice):
+  - Line 35–36: the function raises IndexError(f"String index out of range: {index}") because index >= len(code_units).
+  - Lines 38–44 show later code that assumes a high surrogate may be at code_units[index] and tries to read code_units[index + 1].
+
+Why it fails (root cause, no jargon)
+- The code is mixing two different views of the string:
+  - Python strings use Unicode code points: '\U0001F630' is one character (one ord() value > 0xFFFF).
+  - Your code expects UTF-16 code units (surrogate pairs), so it sometimes reads index+1 to get the low surrogate.
+- to_utf16_code_units produced a list that does not contain the surrogate pair for the astral character. It left the astral character as a single integer (one code point) instead of splitting it into two UTF-16 code units (high and low surrogate).
+- Later, when the code checks for and then tries to read the low surrogate at index + 1 (line 39 / 40), there is no element at that position, so the index check at lines 35–36 fails and raises IndexError.
+
+Consequence
+- translate_string fails with IndexError for any character outside the Basic Multilingual Plane (code point > 0xFFFF) because you treat Python code points as if they were UTF-16 units (or you generate the wrong code_units array).
+
+Concrete fixes (step-by-step, exact place to change)
+1. Decide which representation you want everywhere:
+   - Option A — Treat strings as Python code points (recommended for Python): remove logic that expects surrogate pairs; operate on ord(ch) for each character and stop accessing index+1 for surrogate logic.
+   - Option B — Use UTF-16 code units consistently: make to_utf16_code_units actually emit surrogate pairs for code points > 0xFFFF.
+
+2. If you choose Option B, change to_utf16_code_units (around lines 10–44) to split astral code points into two UTF-16 units. Replace the code that appends ord(ch) with this:
+
+   - For each character ch in s:
+     - cp = ord(ch)
+     - if cp <= 0xFFFF:
+         append cp to code_units
+       else:
+         cp' = cp - 0x10000
+         high = 0xD800 + (cp' >> 10)
+         low  = 0xDC00 + (cp' & 0x3FF)
+         append high, then low to code_units
+
+   This guarantees code_units has two entries for '\U0001F630', so reading code_units[index+1] is safe when index points at the high surrogate.
+
+3. If you choose Option A, remove or change the surrogate-indexing code (lines 38–44):
+   - Do not try to detect a high surrogate followed by low surrogate using code_units[index + 1].
+   - Simply return ord(s[index]) (or otherwise handle the code point) and update other logic to treat each Python character as one item.
+
+Which fix to apply depends on the rest of your code; the core bug is the mismatch between Python code points and expected UTF-16 surrogate pairs. Implement one of the two fixes above and the IndexError will go away.

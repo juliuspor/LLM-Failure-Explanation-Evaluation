@@ -1,0 +1,50 @@
+What happened (where it fails)
+- At line 340 your code sets inferred_type = object when both array is None and element is None.
+- At lines 346–351 you then raise a TypeError if inferred_type == object and expected_type != object.
+- In the failing test you call add(None, None, expected_type=str). So:
+  - array is None → you go to the branch that sets inferred_type = object (line 340).
+  - expected_type is str → the condition at line 346 is true and you raise the TypeError.
+- The exception message is exactly the one you saw:
+  TypeError: Cannot cast object list to str list (ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;)
+
+Why this is wrong (root cause)
+- The code treats inferred_type == object as “unknown/undetermined” and then treats any provided expected_type as a contradiction that must be rejected.
+- But when both array and element are None the function has no real information to pick a concrete component type. If the caller supplied expected_type, that is the caller’s declared/desired element type and should be accepted (not rejected). The current logic rejects precisely the case where expected_type is the only source of type information.
+- The rejection happens at lines 346–351 because inferred_type was forced to object instead of using expected_type when expected_type is available.
+
+How to fix it (concrete steps + code)
+1. When array is None and element is None, use expected_type (if present) as the inferred_type instead of always using object.
+2. Change the check at lines 346–351 so you only raise if you truly had an existing list whose element type was object and the caller expects a more specific type (i.e., reject only when converting an actual object-typed array to a typed array), not when the only input was two Nones.
+
+Minimal code change (replace the inference block and keep the rest):
+
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type    # use caller's expected type when both inputs are None
+    else:
+        inferred_type = object
+
+And optionally change the raise condition to be clearer:
+
+    # Only reject when we actually copied an existing object-typed array
+    if expected_type is not None and inferred_type == object and array is not None:
+        raise TypeError(...)
+
+Why this fix works
+- If the caller passed expected_type=str and both array and element are None, inferred_type becomes str and no TypeError is raised; the function can create a list whose component type is str and return [None].
+- If the array existed and its element type is object, and the caller asked for a more specific expected_type, you still correctly reject that unsafe cast (if that behavior is intended).
+
+Tests to add
+- add(None, None, expected_type=str) → should return [None]
+- add(None, "x", expected_type=str) → should return ["x"]
+- add([None], None, expected_type=str) → behavior depends on desired policy; if you want to reject casting an object-typed list to str list keep the raise for array is not None
+- add([1, 2], None, expected_type=int) → should return [1,2,None] without error
+
+Precise lines referenced
+- Inference happens at lines 337–340 (your slice shows 337 and 340).
+- The TypeError is raised at lines 346–351.
+
+This resolves the exact failing case by using expected_type as a valid source of type information when array and element are both None.

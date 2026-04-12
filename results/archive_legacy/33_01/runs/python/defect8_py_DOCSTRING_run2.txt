@@ -1,0 +1,74 @@
+I can’t point to exact line numbers because you didn’t paste the code, but I can explain the single, specific root cause that most often makes a strict Locale string parser like your docstring describe fail — and I’ll tell you exactly where to look, what to expect, and exactly how to fix it.
+
+Summary of the root cause
+- The method LocaleUtils.to_locale(String locale_str) performs very strict validation and parsing of locale_str into the variables language, country, and variant.
+- The code fails when the input string does not match the strict format the parser expects (lowercase language, uppercase country, underscore separators) — e.g. when callers pass "en-GB", "EN_gb", "en_gb", "en", "", or null in a form the code does not handle.
+- Two concrete failure modes you will see in the code:
+  1. The code tests for underscores and uses fixed substring indices (e.g. locale_str.substring(0,2), substring(3,5), substring(6) ) — that throws StringIndexOutOfBoundsException if the actual string is shorter than expected or separators are not in the expected position.
+  2. The code validates case strictly (expects language lower-case and country upper-case) and throws ValueError/IllegalArgumentException when the input uses a hyphen, wrong-case letters, or mixed separators.
+
+Where to look in your code
+- Method: LocaleUtils.to_locale(String locale_str)
+- Input parameter: locale_str
+- Variables you will find or should look for: language, country, variant (or code that assigns parts using split/substring)
+- Look specifically at:
+  - The code path that does locale_str.substring(...) or expects underscores at indices 2 and 5.
+  - Any code that calls locale_str.split("_") and then blindly accesses parts[1] or parts[2] without checking length.
+  - Any strict case checks like language.equals(language.toLowerCase()) or country.equals(country.toUpperCase()) that throw exceptions rather than normalizing input.
+  - The code that treats null or empty string — docstring says None returns None, but code may not handle null properly.
+
+Exactly what happened (typical examples)
+- Caller passed "en-GB" (hyphen) or "en_gb" (lowercase country) or "EN_GB".
+- Code looks for '_' at index 2 and 5, or does locale_str.split("_") and expects exact lengths and cases.
+- Because the separator is '-' instead of '_', or string length/case is wrong, either:
+  - The code throws StringIndexOutOfBoundsException when it does substring with indices that don’t exist
+  - Or the code throws IllegalArgumentException/ValueError because of the strict case/format checks
+- The exception occurs in to_locale, at the point of parsing/validation — not later when constructing Locale.
+
+Explicit fixes (step‑by‑step)
+1. Make the method robust to common valid inputs:
+   - Accept both '-' and '_' as separators (convert '-' to '_' at the start).
+   - Trim leading/trailing whitespace, return null if locale_str == null or locale_str.trim().isEmpty().
+2. Avoid fixed-index substring calls. Use split and check lengths before accessing parts:
+   - String[] parts = locale_str.split("_", -1);
+   - if (parts.length >= 1) language = parts[0];
+   - if (parts.length >= 2) country = parts[1];
+   - if (parts.length >= 3) variant = parts[2]; (join remaining parts if variants contain underscores)
+3. Handle case normalization rather than rejecting:
+   - language = language.toLowerCase(Locale.ROOT);
+   - country = country.toUpperCase(Locale.ROOT);
+   - variant = variant; (variants may be mixed case; preserve original or normalize per your policy)
+4. Validate lengths and characters explicitly before substring/split:
+   - language length should be 2 or 3, all letters.
+   - country length should be 2 or 3 (ISO codes), letters.
+   - Variant may be any non-empty string.
+   - If validation fails, throw a clear IllegalArgumentException with the offending locale_str.
+5. Prefer built-in parsing where available:
+   - In Java 7+, consider Locale.forLanguageTag(String) for BCP47 tags, or new Locale.Builder().setLanguage(...).setRegion(...).setVariant(...)
+   - If you must accept old formats, normalize to BCP47 first (replace '_' with '-') and call forLanguageTag when appropriate.
+
+Concrete example (logic to replace fragile code)
+- At the top of to_locale(String locale_str):
+  - if (locale_str == null) return null;
+  - locale_str = locale_str.trim();
+  - if (locale_str.isEmpty()) return null; (or throw — follow your API)
+  - locale_str = locale_str.replace('-', '_');
+  - String[] parts = locale_str.split("_", -1);
+  - if (parts.length == 0) throw new IllegalArgumentException("Invalid locale: " + locale_str);
+  - language = parts[0].toLowerCase(Locale.ROOT);
+  - if (language.length() < 2 || language.length() > 3 || !language.matches("[a-z]+")) throw ...
+  - if (parts.length >= 2) {
+      country = parts[1].toUpperCase(Locale.ROOT);
+      if (country.length() != 2 || !country.matches("[A-Z]+")) throw ...
+    }
+  - if (parts.length >= 3) {
+      variant = join remaining parts with '_';
+    }
+  - return new Locale(language, country, variant);
+
+What to test after the fix
+- Inputs that previously failed: "en-GB", "en_gb", "EN_GB", " en_GB ", "en", "en_GB_xxx", null, "".
+- Inputs with multiple underscores in variant: "en_US_POSIX" should produce variant "POSIX".
+- Edge-cases: short/long codes, non-letter chars -> should raise clear exception.
+
+If you paste the actual implementation of LocaleUtils.to_locale (the method body), I will point to the exact line(s) that throw the exception and give a minimal patch showing the few line changes required.

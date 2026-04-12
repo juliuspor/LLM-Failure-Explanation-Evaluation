@@ -1,0 +1,50 @@
+What happens (what failed)
+- The code rejects negative minute values before any normalization can occur. At lines 396–397 the method does:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  Because of that check, calls such as DateTimeZone.for_offset_hours_minutes(0, -15), (2, -15), (-2, -15), or (-2, 15) that rely on later sign/normalization logic hit this ValueError immediately. Your tests that expect negative minutes (or mixed-sign normalization) therefore fail with ValueError.
+
+Why it fails (root cause)
+- The intention in the rest of the method is to accept minute values in the inclusive range -59..+59 and then normalize them together with hours (see subsequent code at lines 402–405, which adjusts minutes_offset relative to hours_in_minutes and computes offset in millis). But the early guard wrongly restricts minutes to 0..59 (minutes_offset < 0 is treated as invalid). That guard is at the wrong bounds and prevents the later normalization code from running.
+
+Where exactly (file/lines/variables)
+- Faulty check: lines 396–397:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - Variable involved: minutes_offset
+- Later code that would have handled negative minutes is at lines 402–405:
+    minutes_offset = hours_in_minutes - minutes_offset
+    ...
+    minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+What to change (concrete fixes, step-by-step)
+Option A — minimal fix to match intended behavior
+1. Change the guard to allow negative minutes in the range -59..+59:
+   Replace lines 396–397 with:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Leave the rest of the normalization code as-is (it will then run for negative minutes).
+
+Option B — clearer, explicit normalization (preferred for readability)
+1. Replace the early check with a symmetric bounds check:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total minutes explicitly and consistently, avoiding confusing in-place adjustments:
+       total_minutes = hours * 60 + (minutes_offset if hours >= 0 else -abs(minutes_offset))
+   or more generally:
+       sign = 1 if hours >= 0 else -1
+       total_minutes = hours * 60 + sign * abs(minutes_offset)
+3. Convert to millis:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return cls.for_offset_millis(offset)
+
+Why these fixes work
+- They allow minute arguments in the intended -59..+59 range so that negative-minute cases and mixed-sign normalization are reached and handled by the normalization code. They also make the sign handling explicit (so (-2, 15) and (-2, -15) become -02:15 as your docstring expects, while (2, -15) can be rejected if that's desired).
+
+Tests affected
+- Current failing tests: test_negative_hours_negative_minutes, test_zero_hours_negative_minutes, test_mixed_signs_invalid (the parts that pass negative minutes), and test_out_of_range (for minutes < -59 should still raise).
+- After applying Option A or B the tests expecting negative minutes to be accepted/normalized should pass; minutes less than -59 or greater than 59 will still raise.
+
+If you want, I can produce the exact patch text showing the line replacements.

@@ -1,0 +1,54 @@
+What happens
+- The test calls GrayPaintScale.get_paint(-0.5). The implementation does not clamp the input before turning it into a color component.
+- At runtime the code reaches lines 74–75:
+  74 |         if g < 0 or g > 255:
+  75 |             raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- For the negative input the computed grayscale component g is negative (for example -127.5). The condition g < 0 is true, so the code raises ValueError and the test fails.
+
+Why this is the root cause
+- The code checks only variable g (line 74). It does not:
+  - clamp the input value to the lower/upper bounds before conversion (so negative inputs produce negative color components), and
+  - ensure r, g, b are valid integers in 0..255 after conversion.
+- Raising the ValueError here is the symptom. The real bug is the missing clamping/conversion steps before this check. The test expects inputs outside the value range to be clamped to the bounds (0 -> black, 255 -> white), not to raise an exception.
+
+Where it occurs
+- In get_paint, after computing the grayscale component and before returning the color (around lines 74–75). The failure is triggered because g is negative for inputs < lower bound (and could be >255 for inputs > upper bound).
+
+Exact fixes (step-by-step)
+1. Clamp the input value to the configured bounds (lower, upper) at the start of get_paint:
+   - If value < lower, set value = lower.
+   - If value > upper, set value = upper.
+2. Convert the clamped normalized value to an integer 0..255 safely:
+   - Compute a float gray = (value - lower) / (upper - lower) * 255.0
+   - Round or floor explicitly and convert to int: gray_int = int(round(gray)) or int(gray) depending on desired rounding.
+3. Ensure r, g, b are integers in 0..255 (use min/max to clamp if needed).
+4. Remove or change the current single-variable check (line 74) so it verifies all components or is unnecessary because proper clamping already ensures valid range.
+
+Concrete replacement example
+Replace the problematic section (around lines 74–75 and colour construction) with something like:
+
+    # clamp value to bounds first
+    if value < self.lower_bound:
+        value = self.lower_bound
+    elif value > self.upper_bound:
+        value = self.upper_bound
+
+    # normalize into 0..255
+    if self.upper_bound == self.lower_bound:
+        gray_f = 0.0
+    else:
+        gray_f = (value - self.lower_bound) / (self.upper_bound - self.lower_bound) * 255.0
+
+    # convert to int and clamp to 0..255
+    gray = int(round(gray_f))
+    gray = max(0, min(255, gray))
+
+    r, g, b = gray, gray, gray
+
+    return (r, g, b)
+
+Notes
+- Using round avoids truncation surprises (0.5 -> 1 instead of 0). The test expects 0.5 -> 127; for 127.5 round gives 128, so if you must match the test exactly, use int(gray_f) (floor) instead of round. Adjust that conversion to match the intended behavior.
+- If you keep a range-check like the original, check all components (r, g, b) or check the original clamped gray value, not only g.
+
+This explains why the test fails (negative input leads to negative g, which triggers the ValueError at lines 74–75) and gives explicit steps and code to fix the logic.

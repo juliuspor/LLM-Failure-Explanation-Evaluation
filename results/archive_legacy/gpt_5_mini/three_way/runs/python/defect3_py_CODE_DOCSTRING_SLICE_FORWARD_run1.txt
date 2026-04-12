@@ -1,0 +1,41 @@
+What goes wrong
+- At line "consumed = self.translate_codepoint(code_units, pos, out)" you treat consumed as “how many code units were consumed”.
+- But the for-loop after that (the problematic block) does:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+  That loop advances pos by char_count(code_point_at(...)) once for each unit in consumed.
+
+Why that breaks (concrete example and root cause)
+- code_point_at (lines 38–44 in your SLICE_FORWARD) returns a full Unicode code point: if the value at code_units[pos] is a high surrogate and the next element is a low surrogate, code_point_at returns the combined codepoint (0x10000 + ...). char_count(codepoint) will therefore return 2 for that combined codepoint (because that code point requires two UTF-16 code units).
+- Suppose translate_codepoint consumed a surrogate pair and returned consumed == 2 (it handled two code units). Your for-loop will iterate twice. On the first iteration you call code_point_at(code_units, pos), get the combined codepoint, char_count(...) returns 2 and you do pos += 2. On the second iteration you again call code_point_at at the new pos and advance further. Net effect: pos advances by 4, not 2 — you have doubled the advance for surrogate pairs.
+- Even if translate_codepoint returned consumed == 1 (it claimed one unit was consumed), but code_point_at at that pos is a high surrogate followed by a low surrogate, char_count will return 2 and you will still advance by 2 even though you expected to advance 1. So you either skip characters or go out of bounds. The bug is double-counting (or otherwise miscounting) UTF-16 code units because you combine two different notions: "consumed" and char_count(code_point_at(...)).
+
+Where exactly this happens in your code
+- The problematic region starts at the while loop:
+    consumed = self.translate_codepoint(code_units, pos, out)  # (your code)
+  and specifically the for-loop that updates pos:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The slice_forward snippet (lines 38–44) shows code_point_at returns the combined codepoint for a surrogate pair, which makes char_count return 2 for that result — causing the mismatch described above.
+
+How to fix it (explicit steps)
+1. Use consumed directly as the number of UTF-16 code units advanced. Replace the whole for-loop with:
+    pos += consumed
+   This is the simplest fix if translate_codepoint is supposed to return the number of code units it consumed.
+
+2. If translate_codepoint is meant to return the number of code points (not code units), make that contract explicit and change the call site accordingly. Then you must advance pos by the actual number of code units corresponding to each code point. Example:
+   - If consumed is a number of code points, then loop consumed times and for each iteration compute the code point at pos and advance pos by char_count(code_point). But in that case you must call code_point_at once per iteration starting at the correct pos.
+
+3. Alternatively, compute the codepoint once and use its char_count when translate_codepoint reports it handled a single code point:
+   - If translate_codepoint returns 1 (one code point), do:
+       cp = code_point_at(code_units, pos)
+       pos += char_count(cp)
+     If it returns n (n code points), repeat that n times but recompute cp at each new pos.
+
+Which option to pick
+- If translate_codepoint returns the number of UTF-16 code units (1 or 2) — use pos += consumed.
+- If translate_codepoint returns the number of code points — rework the loop to advance by the char_count of each code point exactly once per code point.
+
+Summary
+The loop double-counts/ miscounts advances because code_point_at returns combined code points for surrogate pairs and char_count returns 2 for those. The code uses char_count inside a loop over consumed units, so pos is advanced too far (causing skipped characters or index errors). Fix by advancing pos by consumed (if consumed is code units) or by advancing by char_count once per code point (if consumed is code points).

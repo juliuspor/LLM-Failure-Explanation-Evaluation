@@ -1,0 +1,39 @@
+What happened
+- Your test calls cc.add_number(-0.0).
+- add_number ends up calling MockCodeConsumer.add (line 126), which immediately calls self.append(newcode) on line 138.
+- The implementation of append converts the numeric argument into a canonical zero (positive 0.0) before turning it into text. That normalization step treats -0.0 as equal to 0 and replaces it with 0.0 (dropping the sign). As a result result becomes "0.0" (or "0") instead of the expected "-0.0", so the assertion fails.
+
+Why this happens (root cause)
+- Python considers -0.0 == 0.0 True. Any code that tests equality with 0 (e.g. if newcode == 0: newcode = 0.0) or that treats numbers as “falsey” (if not newcode: ...) will treat negative zero the same as positive zero and will erase the sign.
+- The sign was lost inside append (line 138) by such normalization logic — not at the call site. The comparison/normalization occurs there, so the negative sign never reaches get_code().
+
+Where to look in your code
+- add(self, newcode) at line 126 calls append(newcode).
+- Inspect append at line 138: look for code like
+  - if newcode == 0: newcode = 0.0
+  - if not newcode: newcode = 0
+  - newcode = float(newcode) or any explicit normalization that re-creates a zero value
+  Those lines are the place that converts -0.0 into +0.0.
+
+Concrete fixes (step-by-step)
+1. Decide whether you must preserve negative zero in output. If yes, change append so it does not normalize zeros away.
+2. Replace any equality/falsey normalization in append with either:
+   - Convert the value to a string with repr(newcode) or format(newcode) without normalizing; e.g.
+     - text = repr(newcode)  # repr preserves -0.0
+   - Or detect negative zero explicitly and preserve it:
+     - import math, then
+       if isinstance(newcode, float) and newcode == 0.0 and math.copysign(1.0, newcode) < 0:
+           text = "-0.0"
+       else:
+           text = str(newcode)
+3. If normalization is required in other cases, localize it so you do not run it for numeric zeros. For example, replace
+     if newcode == 0:
+         newcode = 0.0
+   with
+     if isinstance(newcode, (int, float)) and newcode != 0:
+         newcode = float(newcode)
+   (or better: only normalize non-zero numbers).
+4. Run the test again. If you used repr() or math.copysign logic, cc.get_code() will now produce "-0.0" and the assertion will pass.
+
+Summary
+The failure is caused by append (line 138) normalizing numeric zeros (using an equality or falsey check) and thus stripping the negative sign off -0.0. Fix by avoiding that normalization for zero values or by using repr() / math.copysign to detect and preserve negative zero.

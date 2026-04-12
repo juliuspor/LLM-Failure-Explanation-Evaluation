@@ -1,0 +1,41 @@
+What happened (where it fails)
+- Failure occurs in method get_paint at line 71 when you compute
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Then lines 74–75 immediately raise a ValueError when g < 0 or g > 255:
+  raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- So the code fails because the normalized result falls outside the 0–255 range, triggering that ValueError at line 74.
+
+Why it fails (root cause)
+- The check at line 74 is detecting that the input value does not map into the expected interval [lower_bound, upper_bound]. Concretely:
+  - If value < self._lower_bound then (value - lower) is negative → normalized < 0 → g < 0.
+  - If value > self._upper_bound then normalized > 1 → g > 255.
+- There are two common ways this arises:
+  1) The caller passed a value that lies outside the configured bounds (value outside [self._lower_bound, self._upper_bound]).
+  2) The bounds are incorrect (for example swapped or set unexpectedly), so a value you thought was inside is actually outside.
+- Also note a related failure mode you should guard against: if self._upper_bound == self._lower_bound, the expression divides by zero at line 71 and raises ZeroDivisionError before you even reach the ValueError.
+
+Exactly what to change (clear, step-by-step fixes)
+1) Add an explicit bounds check with an informative error before you compute g:
+   - At the start of get_paint, check value against the bounds and raise a clear message including the offending numbers:
+     if self._upper_bound == self._lower_bound:
+         raise ValueError(f"Invalid bounds: lower_bound ({self._lower_bound}) == upper_bound ({self._upper_bound})")
+     if not (self._lower_bound <= value <= self._upper_bound):
+         raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+   - This prevents ZeroDivisionError and tells the caller exactly which value/bounds caused the problem.
+
+2) If out-of-range values are expected and you want to handle them instead of raising, clamp the normalized value before converting to int:
+   - Compute ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+   - Clamp: ratio = max(0.0, min(1.0, ratio))
+   - Then g = int(ratio * 255.0)
+   - This avoids raising ValueError at line 74 and maps any input to the nearest endpoint color.
+
+3) Improve the exception message at line 75 if you keep raising:
+   - Replace the opaque message "Color parameter outside of expected range: Red Green Blue" with one that includes variable values:
+     raise ValueError(f"Computed g={g} from value={value} outside 0..255 (bounds [{self._lower_bound},{self._upper_bound}])")
+
+Which change to pick
+- If callers should never pass out-of-range values: use fix (1) so you fail fast with an informative message.
+- If callers may pass out-of-range values and you want graceful behavior: use fix (2) to clamp.
+- Always add the zero-range check to avoid ZeroDivisionError.
+
+Applying these fixes will stop the unhelpful ValueError (and avoid division by zero), and will tell you exactly which value or bounds caused the failure.

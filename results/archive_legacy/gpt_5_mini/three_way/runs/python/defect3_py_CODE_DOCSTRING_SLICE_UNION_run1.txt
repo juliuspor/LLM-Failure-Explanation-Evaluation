@@ -1,0 +1,47 @@
+What goes wrong
+- Root cause: the code advances pos incorrectly after a translator consumes one or more UTF-16 code units.
+- Where it happens: inside the while loop, in this block:
+
+      # Contract with translators is that they have to understand codepoints
+      # and they just took care of a surrogate pair
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  (the three lines above are the failing lines)
+
+- Why that fails:
+  - translate_codepoint(...) returns consumed (the number of UTF‑16 code units the translator handled). The comment says translators "took care of a surrogate pair", so consumed will typically be 1 or 2 (code units).
+  - The buggy loop tries to advance pos by querying the codepoint at the current position and adding char_count(...) repeatedly. That double-counts/overrides the intended movement:
+    - If consumed == 2 (translator consumed a surrogate pair), the loop runs twice. On the first iteration it calls code_point_at(code_units, pos), which will see the high surrogate and low surrogate and return a single codepoint, and char_count of that codepoint is 2. So pos is incremented by 2 in the first iteration already. On the second iteration the code calls code_point_at(code_units, pos) again but now pos has already been advanced by 2, so you end up advancing too far (or hitting the end), possibly causing IndexError from code_point_at or skipping input.
+    - In short: the logic uses char_count(code_point_at(...)) inside a loop of range(consumed), which causes pos to move by far more than consumed (and sometimes to be moved while the call reads past the end). That directly produces out‑of‑range errors (see code_point_at index checks) or incorrect skipping of characters.
+  - Example failure mode: translator returns consumed == 2. First iteration does pos += 2. Second iteration calls code_point_at with pos already advanced past the original surrogate pair; that can raise IndexError("String index out of range: index") or cause incorrect translation.
+
+Exact location of the exception
+- The IndexError would come from code_point_at(code_units, pos) (lines shown in the slice: the index check at lines 35–36 in your slice union). That happens because pos is advanced incorrectly and code_point_at is called with an out‑of‑range index.
+
+How to fix it (concrete steps and exact replacement)
+- If translate_codepoint returns the number of UTF‑16 code units consumed (1 or 2), replace the entire for-loop with a single increment by consumed:
+
+    # replace these lines
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+    # with this single line
+    pos += consumed
+
+- If consumed instead represented "number of codepoints consumed" (unlikely given the comment), then you would need to advance pos by the UTF‑16 length of that many codepoints. In that case do this explicit loop but compute each codepoint once and advance by its UTF‑16 length:
+
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+  (Note: this variant obtains each codepoint and advances once per codepoint. Do NOT re‑call code_point_at with the same pos after you already advanced it.)
+
+Why the suggested fix works
+- If consumed is the number of code units consumed, pos += consumed advances exactly the number of UTF‑16 code units the translator wrote about, no double counting and no extra calls to code_point_at that can run past the end.
+- If consumed is the number of codepoints, the corrected loop (compute cp then pos += char_count(cp)) ensures you read the codepoint at the current pos and advance exactly its UTF‑16 length, then repeat for the next codepoint.
+
+Summary
+- Bug: over‑advancing pos by calling code_point_at/char_count repeatedly inside a loop indexed by consumed.
+- Consequence: IndexError("String index out of range") or skipped characters.
+- Fix: replace the for-loop with pos += consumed (if consumed is code units), or if consumed is codepoints, compute each codepoint once and advance by its char_count.

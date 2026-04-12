@@ -1,0 +1,60 @@
+What happened
+- The code rejects negative minute values unconditionally at line 396:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - That check forces minutes_offset to be between 0 and 59 only, so any test that calls for_offset_hours_minutes(..., -15) fails immediately with ValueError even when the intended behavior (per the file's docstring and your tests) is to accept negative minutes in some cases (for example (-2, -15) or (0, -15)).
+
+Why that causes the test failures
+- Your tests expect:
+  - Negative minutes to be allowed when minutes are intended to make the total offset negative (e.g. (0, -15) -> -00:15, (-2, -15) -> -02:15).
+  - Mixed-sign rules as documented in the module: e.g. (2, -15) should raise ValueError, but (-2, 15) and (-2, -15) should both produce -02:15.
+- Because of the check at line 396, the function never reaches the later logic that adjusts minutes based on the sign of hours (lines ~402-405). Those later branches are therefore never executed for negative minutes, so correct negative-minute behavior never occurs.
+
+Where it occurs in the code (precise references)
+- The guard that stops negative minutes is at line 396:
+  - 396 | if minutes_offset < 0 or minutes_offset > 59:
+  - 397 |     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later code that attempts to handle sign adjustments is at lines 402–405, but it never runs for negative minutes because of the check above:
+  - 402 |                 minutes_offset = hours_in_minutes - minutes_offset
+  - 404 |                 minutes_offset = hours_in_minutes + minutes_offset
+  - 405 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Root cause summary
+- The minutes range check is too strict and disallows negative minutes entirely. The code intends to accept minutes in -59..+59 and then combine sign rules with hours, but the early check prevents this. As a result, calls like for_offset_hours_minutes(0, -15) or for_offset_hours_minutes(-2, -15) raise ValueError incorrectly.
+
+Concrete fixes (step-by-step)
+1. Allow minutes in the range -59..+59 instead of 0..59:
+   - Replace the check at line 396 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Implement sign/combination logic that matches the docstring and tests:
+   - After validating ranges, compute total minutes using consistent sign rules:
+     - If hours > 0 and minutes < 0: raise ValueError (mixed positive hour and negative minute is invalid).
+     - If hours < 0 and minutes > 0: treat minutes as extending the negative offset (i.e. minutes should subtract from the negative hour: total_minutes = hours * 60 - minutes).
+     - If hours == 0: sign is taken from minutes (so (0, -15) -> -15).
+     - Otherwise (both non-negative or both non-negative but hours negative and minutes negative), add normally: total_minutes = hours * 60 + minutes (minutes may be negative).
+3. Use the total_minutes to compute offset in milliseconds:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return cls.for_offset_millis(offset) as before.
+
+Example corrected logic (pseudocode referencing variable names)
+- After range check (modified to -59..59):
+  if hours_offset > 23 or hours_offset < -23:
+      raise ValueError(...)
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(...)
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("Mixed signs: positive hours and negative minutes not allowed")
+  if hours_offset < 0 and minutes_offset > 0:
+      total_minutes = hours_offset * 60 - minutes_offset  # (-2, 15) -> -135
+  else:
+      total_minutes = hours_offset * 60 + minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+  return cls.for_offset_millis(offset)
+
+Why this fix answers every requirement you listed
+- It removes the erroneous unconditional rejection of negative minutes (fixes where the failure occurs).
+- It keeps explicit checks for out-of-range minutes and illegal mixed signs (so you still get ValueError for (2, -15)).
+- It clearly names variables used in calculation (minutes_offset, hours_offset, total_minutes, offset) and shows where to change code (line ~396 and the combination logic around lines 402–405).
+- It’s a minimal, deterministic change that matches the module docstring and your tests.
+
+If you want, I can produce a concrete patch with exact line edits for the file.

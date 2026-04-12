@@ -1,0 +1,49 @@
+What happened (root cause)
+- The for_offset_hours_minutes call rejects -15 because the method treats the minutes parameter as an absolute 0..59 value and does not accept a negative minutes argument. The code validates "minutes in range 0..59" (or equivalently disallows minutes < 0), so passing (-2, -15) fails that check and raises ValueError: Minutes out of range: -15.
+- In other words, the method expects the minutes sign to be carried only by the hours argument (or expects minutes to be positive and combined with a separately-supplied negative hours), but your test passed a negative minutes value and the validator failed.
+
+Where it happens
+- In DateTimeZone.for_offset_hours_minutes (the public factory you called). The ValueError is thrown during the minutes validation inside that method (the lines that check minutes >= 0 and minutes < 60).
+
+Why that logic is wrong for your call
+- A time zone offset like -02:15 is a single signed offset. Calling for_offset_hours_minutes(-2, -15) is a legitimate representation of that signed offset, but the method treats minutes independently and refuses negative minutes. The method therefore cannot accept a valid signed minutes representation — it only accepts either:
+  - (hours = -2, minutes = 15) or
+  - (hours = 2, minutes = 15, sign = negative) — but you passed (-2, -15), so the minutes check fails.
+
+Concrete fixes (step-by-step)
+1. Option A — normalize sign and accept negative minutes:
+   - Change for_offset_hours_minutes to accept minutes with the same sign as hours. Compute total offset minutes by combining hours and minutes with consistent sign, then validate absolute minutes < 60.
+   - Example replacement logic (Python-like):
+     ```
+     def for_offset_hours_minutes(hours, minutes):
+         if hours == 0 and minutes == 0:
+             return DateTimeZone.UTC
+         # allow minutes to be negative but enforce same sign as hours (or zero)
+         if minutes == 0:
+             sign_ok = True
+         else:
+             sign_ok = (hours == 0) or ((hours > 0) == (minutes > 0))
+         if not sign_ok:
+             raise ValueError("Hour and minute sign mismatch")
+         if abs(minutes) >= 60:
+             raise ValueError("Minutes out of range: %d" % minutes)
+         total_minutes = hours * 60 + (1 if hours >= 0 else -1) * abs(minutes)
+         return DateTimeZone.for_minutes_offset(total_minutes)
+     ```
+   - This accepts (-2, -15) and computes -135 total minutes.
+
+2. Option B — require minutes non-negative and document usage:
+   - Keep minutes validation as 0..59, but update tests and documentation to call for_offset_hours_minutes(-2, 15) instead of (-2, -15).
+   - This is simpler but changes the API expectation: minutes are always positive and the sign is only in hours.
+
+3. Unit-test changes
+   - If you choose A, add a test that for_offset_hours_minutes(-2, -15) returns id '-02:15' and also test mixed-sign rejection, e.g. for_offset_hours_minutes(-2, 15) should be invalid if you require same-sign minutes in your policy (or acceptable if you choose normalized semantics).
+   - If you choose B, update your tests to call for_offset_hours_minutes(-2, 15) and possibly add a check that negative minutes raise a clear error message instructing the caller to supply non-negative minutes.
+
+Recommended minimal fix
+- I recommend Option A: accept negative minutes when they carry the same sign as hours and normalize to total offset minutes. That is the least-surprising behavior for callers who naturally express offsets as (-2, -15). Implement the sign check plus abs(minutes) < 60 and compute total offset minutes = hours*60 +/- abs(minutes).
+
+Why this fix is safe
+- It preserves strict minute bounds (abs(minutes) < 60) while allowing the two-part signed representation callers sometimes use. It also makes for_offset_hours_minutes symmetric for positive and negative offsets and avoids surprising ValueError for a valid offset.
+
+If you want, paste the current for_offset_hours_minutes implementation here and I will show the exact line changes to make.

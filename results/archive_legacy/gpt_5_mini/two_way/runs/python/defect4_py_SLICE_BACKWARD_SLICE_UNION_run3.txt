@@ -1,0 +1,60 @@
+What fails
+- At runtime the code always sets self._min_start_index = index at line 349, regardless of the comparison at line 346. That makes the conditional update at line 347 meaningless and breaks the intended logic for keeping the smallest-start item.
+- There is also a definite risk of a NameError (local variable referenced before assignment) at line 346: min_start may not be defined if get_data_item(...).get_period() is not a SimpleTimePeriod. In that case the code reaches if start < min_start: but min_start was never assigned.
+
+Where it occurs (exact lines)
+- The logic branch starts at line 340: if self._min_start_index >= 0:
+- A candidate minimum period is fetched at line 341 and tested at line 342.
+- min_start is set inside the SimpleTimePeriod branch at line 343 or 345.
+- The comparison is at line 346: if start < min_start:
+- The intended update is at line 347: self._min_start_index = index
+- But then line 349 unconditionally does self._min_start_index = index, undoing the conditional.
+- The getter at lines 437–439 just returns the field that has been incorrectly set.
+
+Why it happens (root causes)
+1) Unconditional overwrite (logic bug): line 349 always assigns self._min_start_index = index, so even when start >= min_start the index still changes. That makes the “minimum start” tracking incorrect and will cause wrong results whenever you expect the stored index to point to the earliest-start period.
+
+2) Undefined min_start (runtime error): if min_start_period is not a SimpleTimePeriod, the inner if (line 342) will skip assigning min_start. Then line 346 does start < min_start and Python raises UnboundLocalError because min_start does not exist in that control flow. The code assumes min_start is always assigned but it is not.
+
+Suggested fixes (explicit steps and code snippets)
+1) Remove the unconditional overwrite. Replace the block from 340–349 with code that:
+   - If there is no current min (self._min_start_index < 0), set it to index unconditionally.
+   - Otherwise, compute min_start safely and update only when start < min_start.
+
+Example replacement (pseudo-lines mapped to original numbers):
+
+Replace lines 340–349 with:
+
+    if self._min_start_index < 0:
+        # no current minimum, initialize it
+        self._min_start_index = index
+    else:
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        if isinstance(min_start_period, SimpleTimePeriod):
+            min_start = int(min_start_period.get_start().timestamp() * 1000)
+            if start < min_start:
+                self._min_start_index = index
+        else:
+            # Decide how to handle non-SimpleTimePeriod: skip or set as min.
+            # If you want to treat non-SimpleTimePeriod as not comparable, do nothing.
+            pass
+
+Notes:
+- This removes the unconditional assignment at line 349 and makes the conditional update meaningful.
+- Use the same timestamp conversion approach you already used for start (line 335/345) for min_start to keep consistent types (integers).
+
+2) Ensure min_start is always defined before comparison (already covered by the revised structure).
+   - Do not compare to min_start unless you have assigned it (i.e., guarded by isinstance(min_start_period, SimpleTimePeriod)).
+
+3) Add a unit test to cover these cases:
+   - Insert first item with SimpleTimePeriod and check get_min_start_index() == index
+   - Insert a later-start item and verify index does not change
+   - Insert an earlier-start item and verify index updates
+   - Insert an item whose period is not a SimpleTimePeriod and ensure no exception is raised (and decide expected behavior)
+
+Why these fixes solve it
+- Removing the unconditional assignment prevents overwriting the correct minimum index when the new item's start is not earlier.
+- Guarding the comparison with a proper check for min_start assignment prevents UnboundLocalError.
+- The tests ensure both normal and edge flows are covered so regressions are less likely.
+
+If you want, I can produce a concrete diff for the file showing exact line replacements and the final code block to paste in.

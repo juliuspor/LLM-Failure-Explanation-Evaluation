@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The IndexError occurs on this line inside the consumed > 0 branch:
+  pos += char_count(code_point_at(code_units, pos))
+- The exception message "String index out of range: 2" means code_point_at tried to read past the end of code_units (pos == length or pos+1 == length for a surrogate pair).
+- This happens when translate_codepoint returned consumed > 0 (it told the caller it handled N code units), but the loop that advances pos uses code_point_at(code_units, pos) and calls it with pos that is already at or beyond length.
+
+Why it fails (root cause)
+- translate_codepoint reports how many code units it consumed (consumed is in code units), but the code that advances pos mixes units and codepoints incorrectly:
+  - The for pt in range(consumed) loop intends to advance pos over the consumed code units.
+  - Instead of simply advancing pos by the number of code units consumed, it calls code_point_at(code_units, pos) and then char_count(...) and adds that. code_point_at can read the next code unit(s); if pos is at the end or a translator already consumed the last unit(s), that call reads out of bounds.
+- In short: you call code_point_at(code_units, pos) when pos may already equal length (or when only one code unit remains but code_point_at expects a pair), causing the IndexError.
+
+Concrete example
+- Suppose code_units length == 2 and pos == 1 when translate_codepoint returns consumed == 1.
+- The for-loop runs once and executes code_point_at(code_units, pos) with pos == 1. If code_point_at attempts to read a second code unit (because it checks for a surrogate pair or uses pos+1), it goes past index 1 and throws IndexError.
+
+Where to change (exact line)
+- The problematic line is the body of the for loop:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- That code is responsible for the out-of-range read.
+
+How to fix it (clear, ordered steps)
+Pick one of these fixes depending on intended semantics:
+
+1) If consumed is a number of code units (likely):
+- Replace the whole for-loop with a single advance by consumed code units:
+    pos += consumed
+- Rationale: translate_codepoint already told you how many code units were consumed; you do not need to call code_point_at again.
+
+2) If you intended to advance by codepoints and consumed counts codepoints:
+- If consumed counts codepoints, then you must not call code_point_at at a pos that might be past length. Use a safe loop that checks bounds:
+    for _ in range(consumed):
+        if pos >= length:
+            break   # or raise an error if this is unexpected
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+- Rationale: check pos < length before calling code_point_at.
+
+3) If you intended to advance by one code unit per iteration:
+- Use:
+    for _ in range(consumed):
+        pos += 1
+- Rationale: this avoids calling code_point_at and is correct when consumed is measured in code units.
+
+Tests to add
+- Test with input that ends in a single high surrogate or single low surrogate (length small), and with translate_codepoint returning various consumed values (0, 1, 2).
+- Test with a translator that returns consumed == 2 at the end of the string.
+- Add assertions that pos never exceeds length and that code_point_at is only called when pos < length.
+
+Summary
+- The loop that advances pos calls code_point_at when pos may already be at or beyond length, causing the IndexError.
+- The fix is to stop calling code_point_at there and instead advance pos consistently with what consumed actually measures (most likely: pos += consumed).

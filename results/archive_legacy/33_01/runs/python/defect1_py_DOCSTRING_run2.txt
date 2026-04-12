@@ -1,0 +1,115 @@
+I can’t see the actual source file, so I can’t point to an actual line number in your repository. However, using the names and behavior in your docstring I can point to the exact expressions and variables that usually cause this failure, explain why they fail, and give precise, actionable changes you can make (including exact code lines to add or replace). Use these changes at the locations in your code where you validate and compute the offset.
+
+Root cause summary
+- Most likely the code computes the total offset as a signed combination of hours_offset and minutes_offset with incorrect sign handling. That leads to wrong offsets or rejected inputs, e.g. hours_offset = 2, minutes_offset = -15 should be invalid (per your docstring) but implementation may accept it; or hours_offset = -2, minutes_offset = -15 should be treated as -02:15 but an incorrect algorithm can produce -01:45 or +02:15.
+- Another common error is failing to normalize minutes (using the sign of minutes instead of the sign of hours when hours ≠ 0), or computing total_seconds = hours_offset * 3600 + minutes_offset * 60 without handling sign rules. That expression is the precise place to inspect and fix.
+
+Exact places to inspect (by name and expression)
+- Variable names: hours_offset, minutes_offset
+- The line that computes the raw offset in seconds (look for something like):
+  total_seconds = hours_offset * 3600 + minutes_offset * 60
+  — call this the “total_seconds expression”
+- The validation lines that check ranges (look for hours range check and minutes range check)
+- Any lines that test whether minutes_offset is negative when hours_offset is positive (or vice versa)
+
+Why that expression fails (concrete)
+1. Wrong sign combination handling
+   - The docstring requires that when hours_offset is positive, minutes_offset must be nonnegative; when hours_offset is negative, minutes_offset must be nonpositive; when hours_offset is zero minutes may be positive or negative to indicate +00:15 or -00:15.
+   - If you compute total_seconds = hours_offset*3600 + minutes_offset*60 directly, an input of hours_offset = -2, minutes_offset = -15 gives total_seconds = -7200 + (-900) = -8100 (correct). But an input of hours_offset = -2, minutes_offset = 15 gives total_seconds = -7200 + 900 = -6300 (which is -01:45) — that is wrong for (-2, +15) which per doc should be -02:15. The correct rule is that minutes must carry the sign of the hours unless hours == 0. So you must apply the sign of hours to |minutes| when hours != 0.
+2. Rejection where doc allows value (or acceptance where it shouldn’t)
+   - If you reject any negative minutes at all, you’ll incorrectly reject (0, -15) which is valid per the docstring (should mean -00:15).
+   - If you forbid minutes with opposite sign relative to hours but then compute total_seconds without applying hours’ sign, you may accept incorrect inputs.
+3. Range/overflow logic error
+   - If you convert to seconds and then check > 24*3600 etc., ensure the checks use absolute value <= 23*3600 + 59*60 + 59 (or <= 23*3600 + 59*60; docstring mentions 23:59:59.000). Off-by-one in seconds check will either reject valid offsets or allow invalid ones.
+
+Precise checklist and fixes (apply these at the validation/computation point)
+
+1) Validate input ranges (insert at top of factory/method)
+- Add:
+
+  if not (-23 <= hours_offset <= 23):
+      raise ValueError("hours_offset must be in range -23..+23")
+  if not (-59 <= minutes_offset <= 59):
+      raise ValueError("minutes_offset must be in range -59..+59")
+
+2) Enforce sign rules (exact code to add/replace before computing total_seconds)
+- Replace any direct use of minutes_offset in the seconds computation with a normalized minutes value that follows the docstring sign rules:
+
+  # Normalize minutes so their sign follows hours when hours != 0
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("minutes_offset must be non-negative when hours_offset is positive")
+  if hours_offset < 0 and minutes_offset > 0:
+      raise ValueError("minutes_offset must be non-positive when hours_offset is negative")
+
+  # Determine signed_minutes to use in seconds calculation
+  if hours_offset > 0:
+      signed_minutes = abs(minutes_offset)   # should already be >= 0 from checks above
+  elif hours_offset < 0:
+      signed_minutes = -abs(minutes_offset)  # ensure minutes carry negative sign
+  else:
+      # hours_offset == 0: minutes_offset sign is allowed to determine final sign
+      signed_minutes = minutes_offset
+
+3) Compute total seconds using normalized minutes (replace incorrect expression)
+- Replace total_seconds = hours_offset * 3600 + minutes_offset * 60
+  with:
+
+  total_seconds = hours_offset * 3600 + signed_minutes * 60
+
+This guarantees that (-2, 15) -> signed_minutes = -15 -> total_seconds = -2*3600 + (-15)*60 = -8100 => -02:15, and (2, -15) triggers the ValueError above.
+
+4) Final range check for combined offset (exact check to add)
+- After computing total_seconds, check the magnitude does not exceed 23:59:59 (or 23:59:00 if you only accept minute resolution). For second precision:
+
+  max_offset_seconds = 23*3600 + 59*60 + 59  # or 23*3600 + 59*60 if seconds not used
+  if abs(total_seconds) > max_offset_seconds:
+      raise ValueError("resulting offset exceeds +/-23:59:59")
+
+5) Error messages
+- Make ValueError messages specific and include the offending variable and value, e.g.,
+  raise ValueError(f"minutes_offset ({minutes_offset}) must be non-negative when hours_offset ({hours_offset}) is positive")
+
+How to reproduce the bug locally (specific test cases)
+- Run these cases and inspect the produced timezone or exceptions:
+  - (hours_offset=2, minutes_offset=-15) — should raise ValueError per doc; failing code will sometimes accept and compute +01:45.
+  - (hours_offset=-2, minutes_offset=15) — should produce -02:15; failing code will sometimes produce -01:45 or +02:15.
+  - (hours_offset=0, minutes_offset=-15) — should produce -00:15; failing code that forbids negative minutes will reject this.
+
+Where to place changes
+- Place the validation and normalization steps immediately before the line that computes the timezone object from total_seconds. If you have a method named something like make_fixed_offset, get_timezone_from_offset, or from_hours_and_minutes, modify that method.
+
+Minimal example patch (conceptual — adapt to your code style)
+- Before:
+
+  if not (-23 <= hours_offset <= 23):
+      ...
+  if not (-59 <= minutes_offset <= 59):
+      ...
+  total_seconds = hours_offset * 3600 + minutes_offset * 60
+  # build timezone from total_seconds
+
+- After:
+
+  if not (-23 <= hours_offset <= 23):
+      raise ValueError(...)
+  if not (-59 <= minutes_offset <= 59):
+      raise ValueError(...)
+
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError(...)
+  if hours_offset < 0 and minutes_offset > 0:
+      raise ValueError(...)
+
+  if hours_offset > 0:
+      signed_minutes = abs(minutes_offset)
+  elif hours_offset < 0:
+      signed_minutes = -abs(minutes_offset)
+  else:
+      signed_minutes = minutes_offset
+
+  total_seconds = hours_offset * 3600 + signed_minutes * 60
+
+  if abs(total_seconds) > 23*3600 + 59*60 + 59:
+      raise ValueError(...)
+
+If you paste the actual function (the few lines that validate and compute total_seconds and build the timezone) I will edit it in-place and return a tested patch with exact line numbers adjusted to your file.

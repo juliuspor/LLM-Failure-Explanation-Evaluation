@@ -1,0 +1,50 @@
+What happened
+- The test calls escaper.translate_string('\U0001F630') (the single code point U+1F630).
+- Inside translate_string the code uses a variable named code_units and an index variable. On a character outside the BMP the code tries to access the next code unit (e.g. code_units[index + 1]) without checking that the next unit exists.
+- That access fails the bounds check at lines 35–36 and raises IndexError("String index out of range: {index}"), so the function never returns and the assert never runs.
+
+Why it happened (root cause)
+- The algorithm is written around "code units" (UTF-16-like pairs) but the test is passing a Python str, where the character '\U0001F630' is a single Python code point. The code's logic attempts to treat the character as two code units (a surrogate pair) and accesses code_units[index + 1] without ensuring that index + 1 < len(code_units). That out-of-range access trips the check on lines 35–36.
+- In short: mismatch between the function's expectation of the input representation (code units / UTF-16 surrogates) and the actual representation passed in (Python code points) causes the index to point past the end of code_units.
+
+Where it occurs
+- Method: translate_string
+- Variables: code_units and index
+- Lines: bounds check fails at lines 35–36 in the slice block:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+
+Concrete fixes (step-by-step)
+Pick one of the following fixes depending on which representation you intend translate_string to use:
+
+1) If translate_string should operate on Unicode code points (Python str):
+   - Change the algorithm to iterate over the Python string directly (for ch in input_seq or indexing into input_seq) and treat any code point >= 0x10000 as a single unit (use ord(ch) to inspect).
+   - Remove/avoid any logic that assumes a surrogate pair (accessing code_units[index + 1]) unless you first verify the next index is in range.
+   Steps:
+     a. Replace use of code_units with the input_seq (or a list(input_seq)).
+     b. Wherever code looks ahead to index + 1, add an explicit check: if index + 1 < len(input_seq) before accessing.
+     c. Use ord(ch) to decide how to escape or translate the character.
+
+2) If translate_string is intended to operate on UTF-16 code units:
+   - Convert the Python string into a sequence of UTF-16 code units before running the algorithm, so surrogate pairs are explicit and indices match expectations.
+   Steps:
+     a. At function start, build code_units = list(input_seq.encode('utf-16-le')) is bytes; better build list of 16-bit units:
+        units = []
+        utf16 = input_seq.encode('utf-16-le')
+        for i in range(0, len(utf16), 2):
+            units.append(utf16[i] | (utf16[i+1] << 8))
+     b. Run the existing algorithm on units, ensuring all accesses to index+1 etc. are safe because units length reflects code units.
+     c. Convert back to string only if required, or change the API to return the code-unit list.
+
+3) Quick safety patch (minimal change):
+   - Before every access to code_units[index + 1], add a guard:
+       if index + 1 >= len(code_units):
+           raise ValueError("Unexpected truncated surrogate at end of input")
+     This avoids the IndexError and gives a clearer error, but you should still pick approach 1 or 2 above for correct behavior.
+
+Which to choose
+- If the public API is documented/expected to accept Python strings and return strings, use fix (1).
+- If the internal algorithm relies on UTF-16 code units and that is deliberate, use fix (2) and make that conversion explicit at the API boundary.
+
+Summary
+The code fails because translate_string mixes two different notions of "unit": it assumes a surrogate pair exists and accesses code_units[index + 1] without checking its existence. That triggers the check at lines 35–36 and raises IndexError for the single code-point '\U0001F630'. Fix by making the input representation consistent with the algorithm and/or adding proper bounds checks before looking ahead.

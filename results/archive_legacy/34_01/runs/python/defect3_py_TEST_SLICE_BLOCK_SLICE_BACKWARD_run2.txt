@@ -1,0 +1,41 @@
+What happened (where it fails)
+- The failure happens inside to_utf16_code_units (shown in your slice). At runtime you raised IndexError at lines 35–36:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+- The test calls translate_string('\U0001F630') — that is a Unicode code point U+1F630 (an “astral” character, > U+FFFF). Python's str holds this as one code point, but UTF‑16 represents it as a surrogate pair (two 16‑bit code units).
+- Your code is mixing two different index spaces: an index that comes from positions in the original Python string (one code point) is being used to access code_units (the UTF‑16 code unit list). For an astral character code_units has length 2 where the string has length 1 (or vice‑versa depending on exact ordering), so the index check fails and you hit the IndexError.
+
+Why this is the root cause (how it happened)
+- Variable names and lines involved:
+  - s is the input string passed into to_utf16_code_units.
+  - code_units is the list of 16‑bit values you built to represent s in UTF‑16.
+  - index is later used to read from code_units and you check it against len(code_units).
+- For U+1F630 you should append two code units (a high surrogate and a low surrogate) to code_units. If the rest of the code that computes or uses index assumes one code unit per Python character, that assumption breaks. The check at line 35 is correctly protecting you from an out‑of‑range read, but the out‑of‑range condition itself reveals the mismatch between the index source and code_units length.
+
+Exactly what to change (concrete fixes, steps)
+1. Build code_units from s by iterating over Python code points (for ch in s) and appending correct UTF‑16 units:
+   - For code point cp = ord(ch):
+     - if cp <= 0xFFFF: append cp
+     - else: cp -= 0x10000; append high = 0xD800 + (cp >> 10); append low = 0xDC00 + (cp & 0x3FF)
+2. Do not reuse an index that was computed in terms of Python string positions to index into code_units. Either:
+   - Recompute indexes into code_units after building it, or
+   - Do all processing while you build code_units (keep a separate position counter for code_units).
+3. If other functions expect a 1:1 mapping between Python characters and UTF‑16 code units, change those functions to operate on Unicode code points (iterate over characters) instead of assuming UTF‑16 length.
+
+Minimal patch sketch (replace faulty loop with this)
+- In to_utf16_code_units(s: str) replace the code that builds code_units with:
+
+  code_units = []
+  for ch in s:
+      cp = ord(ch)
+      if cp <= 0xFFFF:
+          code_units.append(cp)
+      else:
+          cp -= 0x10000
+          code_units.append(0xD800 + (cp >> 10))
+          code_units.append(0xDC00 + (cp & 0x3FF))
+
+- Then ensure any subsequent uses of indexes against code_units use a counter that walks code_units, not the original string index.
+
+Why this fix works
+- It makes code_units contain the exact UTF‑16 representation (including surrogate pairs) for each Python character, and it prevents mixing an index from the Python-string domain with the UTF‑16 code unit domain. That removes the out‑of‑range condition you observed for astral characters like '\U0001F630'.

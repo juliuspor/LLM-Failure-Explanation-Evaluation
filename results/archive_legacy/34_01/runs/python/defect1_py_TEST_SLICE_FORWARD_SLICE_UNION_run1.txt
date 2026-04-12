@@ -1,0 +1,26 @@
+What happened (where and why)
+- The call Exception happens at the validation guard on line 396:
+  - Line 396: `if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")`
+- You passed minutes = -15. That makes `minutes_offset` < 0 and triggers the ValueError immediately, so DateTimeZone.for_offset_hours_minutes(-2, -15) fails before any offset math runs.
+- The later lines (402 and 404) show code that tries to adjust minutes when combining a negative hours value, but those lines never run because the function has already rejected negative minute values at line 396.
+
+Root cause
+- The API expects the minutes argument to be in the range 0..59 (non-negative). Passing a negative minute value to indicate a negative offset is not supported. The function requires you express the sign on the hours argument, not on the minutes argument.
+
+Concrete fixes (exact steps)
+1. Use a non-negative minutes argument:
+   - Call DateTimeZone.for_offset_hours_minutes(-2, 15) instead of DateTimeZone.for_offset_hours_minutes(-2, -15).
+   - This will pass the validation at line 396 and produce the expected id '-02:15'.
+
+2. If you want the function to accept a negative minutes parameter, change the validation and normalization logic:
+   - Replace the guard at line 396 with a check that allows -59..59:
+     - `if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)`
+   - Normalize before computing total minutes (insert after the new guard):
+     - `hours_in_minutes = hours_offset * 60`
+     - `if hours_offset < 0: minutes_offset = -abs(minutes_offset)`  # or: minutes_offset = -abs(minutes_offset) if minutes_offset < 0 else -minutes_offset?
+     - `total_minutes = hours_in_minutes + minutes_offset`
+   - Then use `offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)` as on line 405 and continue.
+   - (Be careful to write the normalization so the sign of minutes is applied consistently with hours; test edge cases like (-0, -15), (0, 15), (-2, 0).)
+
+Recommendation
+- The quickest, least-invasive fix is to pass positive minutes (step 1). If you control the API and want negative-minute inputs to be accepted, implement the normalization described in step 2 and add unit tests covering negative hours with positive minutes and vice versa.

@@ -1,0 +1,55 @@
+What went wrong (root cause)
+- The bug is in the block that starts
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The code mixes two different meanings of "consumed":
+  - translate_codepoint(...) returns a count (the code assumes it is "how many UTF-16 code units were consumed" — or possibly "how many codepoints were consumed"). The later adjustment loop treats "consumed" as "how many codepoints to skip" and uses char_count(code_point_at(...)) to compute how many UTF-16 code units each of those codepoints occupies.
+- When translate_codepoint has already consumed a surrogate pair (two UTF-16 code units representing one codepoint) this double-meaning causes pos to be advanced too far (or incorrectly), which results in skipping characters or reading past the end of the array.
+
+Concrete example that demonstrates the bad behavior
+- Suppose code_units at pos is a surrogate pair representing one non-BMP codepoint.
+- If translate_codepoint(...) already handled that surrogate pair and returned consumed = 2 (meaning "I used 2 UTF-16 code units"):
+  - The for loop runs twice (range(2)).
+  - First iteration: code_point_at(code_units, pos) returns the non-BMP codepoint, char_count(...) returns 2, so pos += 2 (pos now points just after that pair).
+  - Second iteration: code_point_at(code_units, pos) now reads the *next* codepoint (because pos moved), char_count(...) returns >=1, so pos is increased again — you have skipped the subsequent character(s).
+- If translate_codepoint(...) returned consumed = 1 (meaning "I consumed one codepoint, which itself might be two UTF-16 units"), the same logic would sometimes work, but the code is fragile because it depends on the return semantics of translate_codepoint. The loop therefore double-counts when translate_codepoint reports code units rather than codepoints.
+
+Exactly where it occurred (lines / variables)
+- The failing lines are:
+  consumed = self.translate_codepoint(code_units, pos, out)
+  ...
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The variables involved are:
+  - consumed (return from translate_codepoint)
+  - pos (index into code_units)
+  - code_units (UTF-16 code unit list)
+  - char_count(...) and code_point_at(...)
+
+Why this causes failure (simple statement)
+- Because consumed and the for-loop use different units (code units vs codepoints), pos is advanced incorrectly, which either skips characters or overruns the array. The code therefore fails to process the buffer correctly and can produce wrong output or an index error.
+
+Specific, actionable fixes (step-by-step)
+Choose one of the two fixes below depending on the intended contract of translate_codepoint:
+
+Fix A — If translate_codepoint returns the number of UTF-16 code units consumed:
+1. Stop iterating per codepoint. Replace the for-loop with a single direct advance:
+     pos += consumed
+   Rationale: consumed already counts UTF-16 units, so pos should move by that many units.
+2. Remove the inner char_count/code_point_at usage entirely.
+
+Fix B — If translate_codepoint returns the number of codepoints consumed:
+1. Leave translate_codepoint's semantics as "codepoints consumed".
+2. But iterate using a captured position and advance per-codepoint without letting pos move while you still need to inspect the original position for the next loop step. For example:
+     for pt in range(consumed):
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+   (This updates pos exactly once per codepoint and uses the codepoint read at the current pos.)
+3. Ensure translate_codepoint indeed returns the number of codepoints (not code units) and document this contract.
+
+Other notes
+- Pick and document one clear contract for translate_codepoint: does its return value count UTF-16 code units or codepoints? The rest of the code must be written to match that contract.
+- As written, the code assumes two different interpretations at once; that mismatch is the bug.
+
+Summary (short)
+- The loop that advances pos after translate_codepoint misinterprets the meaning of consumed and double-counts or skips code units. Replace the loop with either pos += consumed (if consumed is code units) or a per-codepoint advancement that reads the codepoint at the current pos and then advances by char_count(codepoint) — but do not mix the two meanings.

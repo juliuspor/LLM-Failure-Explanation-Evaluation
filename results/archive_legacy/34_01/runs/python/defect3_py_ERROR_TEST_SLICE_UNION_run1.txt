@@ -1,0 +1,34 @@
+What happened
+- The code that checks and accesses UTF-16 code units raised IndexError at line 36: "String index out of range: 2".
+- The failing call sequence came from translate_string('\U0001F630') (U+1F630, an emoji outside the Basic Multilingual Plane). That single Python string character is being handled incorrectly as if it were already a pair of UTF-16 code units.
+
+Why it failed (root cause)
+- The variable names and lines show the caller expects a list of UTF-16 code units in code_units and uses an index (named index) into that list:
+  - At line 35–36 the code checks index >= len(code_units) and raises the IndexError when the index is too large.
+  - At lines 38–41 the code treats code_units[index] as a possible high surrogate and then reads code_units[index + 1] as a low surrogate when appropriate.
+- The function to_utf16_code_units(s: str) is supposed to produce those UTF-16 code units, but it does not actually emit surrogate pairs for characters above U+FFFF. Instead it returns a single integer for U+1F630 (the single Python code point), so len(code_units) is 1.
+- Later code calls with index == 2 (or otherwise computes an index based on an assumption about UTF-16 unit length) and tries to access code_units[2]. Because to_utf16_code_units returned only one element, index 2 is out of range, so the IndexError is raised.
+- In short: the program mixes two different models:
+  - callers use UTF-16 code-unit indexing (expecting surrogate pairs for characters > 0xFFFF),
+  - but to_utf16_code_units produced Python code points (one element per Unicode code point), so indexes are wrong and you get out-of-range accesses.
+
+Where to change it (concrete steps)
+1. Fix to_utf16_code_units so it returns actual UTF-16 code units:
+   - For each character c in s:
+     - cp = ord(c)
+     - If cp <= 0xFFFF: append cp
+     - Else (cp > 0xFFFF): compute the UTF-16 surrogate pair and append both code units:
+       - cp' = cp - 0x10000
+       - high = 0xD800 + (cp' >> 10)
+       - low  = 0xDC00 + (cp' & 0x3FF)
+       - append high; append low
+   - This makes len(code_units) match the number of UTF-16 units and prevents index mismatches.
+2. (Optional safety) Keep or add the existing runtime check at line 35–36:
+   - It already prevents invalid reads. After fixing to_utf16_code_units, that check will not be triggered for valid inputs.
+3. Alternatively (if you prefer not to work in UTF-16 units), change all code that indexes into code_units to operate on Python code points (i.e., use ord(c) directly, not surrogate pairs), and remove the surrogate-pair logic. But do not mix the two models.
+
+Why this exact change fixes the error
+- With the corrected to_utf16_code_units, the emoji U+1F630 will produce two elements [high_surrogate, low_surrogate]. An access at index 2 will no longer be out of range if the rest of the code genuinely expects UTF-16 indexing; the code that checks index + 1 < len(code_units) (line 39) will properly find the low surrogate at index + 1, and the combined code point calculation at line 43 will be correct.
+
+Summary (concise)
+- The bug is caused by to_utf16_code_units returning a single code point integer for U+1F630 instead of a UTF-16 surrogate pair. That makes len(code_units) smaller than the downstream code expects, producing an IndexError at line 36 when the code tries to read code_units[index or index+1]. Fix to_utf16_code_units to append surrogate pairs for cp > 0xFFFF (or uniformly use code points everywhere).

@@ -1,0 +1,61 @@
+What went wrong (summary)
+- The factory method that builds a fixed-offset zone accepts separate hours and minutes but treats the minutes value as if it were always added to the hours’ contribution. That makes offsets with a negative hour and a positive minute compute the wrong sign (for example (-2, 15) becomes -01:45 instead of -02:15).
+- A related validation bug incorrectly rejects offsets where hours == 0 and minutes is negative (for example (0, -15) which should be permitted as -00:15). This happens because the code tests the sign of minutes using the hours >= 0 case instead of hours > 0.
+
+Where it happens (method and lines)
+- Method: forOffsetHoursMinutes (the factory described in your docstring).
+- Faulty validation check (approx. lines 1–3 of the parameter validation block):
+  if (hours >= 0 && minutes < 0) {
+      throw new ValueError(...);
+  }
+  This rejects (0, -15) incorrectly. It should only reject minutes < 0 when hours > 0.
+- Faulty offset calculation (approx. lines 10–12 of the method):
+  totalSeconds = hours * 3600 + minutes * 60;
+  zone = DateTimeZone.forOffsetSeconds(totalSeconds);
+  This sums hours and minutes directly and therefore loses the sign of minutes when hours is negative and minutes positive, producing -02:15 -> -01:45.
+
+Why that produces the observed failures (concrete)
+- Example A (hours = 0, minutes = -15): the condition hours >= 0 && minutes < 0 is true, so the code throws ValueError even though the docstring says (0, -15) should be allowed and represent -00:15.
+- Example B (hours = -2, minutes = +15): totalSeconds = (-2)*3600 + 15*60 = -7200 + 900 = -6300 seconds => -1 hour 45 minutes, not -2 hours 15 minutes. The expected total offset is -(2*3600 + 15*60) = -8100 seconds.
+
+How to fix it (exact steps)
+1. Fix the validation condition:
+   - Replace the incorrect check
+     if (hours >= 0 && minutes < 0) { ... }
+     with
+     if (hours > 0 && minutes < 0) { ... }
+   - This allows (0, -15) while still rejecting combinations like (2, -15) as your docstring requires.
+
+2. Compute a single sign and use absolute values when forming seconds:
+   - Determine sign = (hours < 0 || minutes < 0) ? -1 : +1, but be careful to treat the combination of signs consistently (see step 3).
+   - A robust approach: enforce that hours and minutes have consistent signs except when hours == 0 (minutes may be negative for a negative offset). Then compute
+       totalSeconds = sign * (abs(hours) * 3600 + abs(minutes) * 60);
+   - Concretely:
+       sign = (hours < 0 || minutes < 0) ? -1 : +1;
+       totalSeconds = sign * (Math.abs(hours) * 3600 + Math.abs(minutes) * 60);
+
+3. Add/clarify validation of allowed sign combinations:
+   - If hours > 0 and minutes < 0 -> reject (as your docstring says).
+   - If hours < 0 and minutes > 0 -> accept, treated as negative offset (e.g., (-2, 15) -> -02:15).
+   - If hours == 0 -> minutes can be positive (UTC+) or negative (UTC-).
+   - Also confirm final absolute value <= 23*3600 + 59*60 + 59 (or <= 86399.000s depending on your precision) and that minutes is in [-59, 59] and hours in [-23, 23].
+
+4. Example replacement implementation (pseudo/Java-like)
+   // Validate ranges first
+   if (hours < -23 || hours > 23) throw new ValueError(...);
+   if (minutes < -59 || minutes > 59) throw new ValueError(...);
+   // Reject +hours with negative minutes only
+   if (hours > 0 && minutes < 0) throw new ValueError(...);
+   // Compute sign and seconds
+   int sign = (hours < 0 || minutes < 0) ? -1 : +1;
+   int totalSeconds = sign * (Math.abs(hours) * 3600 + Math.abs(minutes) * 60);
+   // Check magnitude
+   if (Math.abs(totalSeconds) > 23*3600 + 59*60 + 59) throw new ValueError(...);
+   return DateTimeZone.forOffsetSeconds(totalSeconds);
+
+Why this solves the bug
+- It prevents incorrectly rejecting (0, -15).
+- It guarantees minutes are applied with the intended sign, so (-2, 15) becomes -(2*3600 + 15*60) = -02:15 rather than -01:45.
+- It preserves the docstring rules (reject (2, -15), accept (-2, -15) as -02:15, etc.)
+
+If you paste the exact code for forOffsetHoursMinutes (or the line numbers that perform validation and compute total seconds), I can give an exact one-line patch or a minimal diff.

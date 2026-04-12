@@ -1,0 +1,51 @@
+What happened (root cause)
+- The failure is raised inside LocaleUtils.to_locale when the input string is validated. The ValueError "Invalid locale format: fr__POSIX" is thrown because the method enforces the pattern language[_COUNTRY[_VARIANT]] where:
+  - language must be lowercase letters (usually 2),
+  - country must be uppercase letters (usually 2), and
+  - separators must be underscores.
+- Your input "fr__POSIX" has two underscores in a row, which means an empty country field. The validator treats that as an invalid country (not a 2-letter uppercase code) and rejects the whole string. In short: language = "fr" is valid, variant = "POSIX" could be valid, but the empty country between underscores is not allowed by the strict checks in LocaleUtils.to_locale, so the method raises ValueError.
+
+Where it happens
+- In LocaleUtils.to_locale where the input string is split and validated (the code path that checks country length and case after splitting by '_'). The ValueError is raised in that validation block immediately after parsing the parts.
+
+Why the code rejects "fr__POSIX"
+- The validator expects either:
+  - "fr" (language only), or
+  - "fr_FR" (language + country), or
+  - "fr_FR_VARIANT" (language + country + variant).
+- It does not accept a missing country with a present variant (i.e., an empty middle element). The empty country fails the country-format check, so the method considers the whole input invalid.
+
+Concrete ways to fix it (pick one)
+
+1) Change the input to a valid format
+   - If you intended a variant without a country, pass a form the validator accepts. Two common options:
+     - Use only language and variant together with a single underscore: "fr_POSIX" (if your code treats the second element as country, this may not represent the variant semantically in other libraries).
+     - Or include a valid country code (if applicable): "fr__POSIX" is invalid here; instead use "fr_FR_POSIX" or "fr_FR" etc.
+
+2) Modify LocaleUtils.to_locale to accept an empty country when a variant is present
+   - Edit the validation block after you split the input (e.g., parts = locale_str.split('_')).
+   - Allow the pattern language + "" + variant: when len(parts) == 3 and parts[1] == "" and parts[2] != "":
+     - Accept this as language=parts[0], country="", variant=parts[2].
+   - Example change (pseudocode):
+     - After splitting, instead of rejecting when parts[1] is empty, add a branch:
+       if len(parts) == 3:
+           if parts[1] == "" and is_valid_language(parts[0]) and is_valid_variant(parts[2]):
+               return Locale(parts[0], "", parts[2])
+           else:
+               existing checks...
+   - Also update any strict country-case checks accordingly.
+   - Tests: add a unit test for "fr__POSIX" and existing tests for "fr", "fr_FR", etc.
+
+3) Relax validation rules (if acceptable)
+   - Replace strict country-format checking with a more permissive rule that allows zero-length country when a variant exists. Implement a clear comment documenting the relaxed rule, and add tests.
+
+Exactly what to change and where
+- Change the validation block in LocaleUtils.to_locale that runs after splitting the input string. The ValueError is raised from that block — modify the conditional(s) that currently reject an empty country field (the code that checks country length and case).
+- Add/adjust unit tests so "fr__POSIX" is either explicitly rejected or explicitly accepted, depending on the fix you choose.
+
+Which fix to choose
+- If you control the input: prefer changing the input to a valid form (option 1).
+- If you need to support legacy strings that omit country but include a variant: implement option 2 (allow empty country + variant).
+- If you want broader leniency: choose option 3, but document the change and run tests to ensure no regressions.
+
+If you want, paste the exact LocaleUtils.to_locale implementation and I’ll point to the exact lines and provide a minimal patch.

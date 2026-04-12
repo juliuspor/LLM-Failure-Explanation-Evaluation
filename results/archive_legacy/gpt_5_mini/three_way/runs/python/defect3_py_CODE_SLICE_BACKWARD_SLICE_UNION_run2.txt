@@ -1,0 +1,54 @@
+What fails
+- The code raises IndexError in code_point_at(...) (the check at slice line 35) while executing the loop in translate(...).
+- This happens when the code calls code_point_at(code_units, pos) with pos == len(code_units). The code_point_at function checks "if index < 0 or index >= len(code_units)" and raises IndexError if index >= len(code_units).
+
+Why it happens (root cause), with the exact variables/lines
+1. You convert the input to UTF-16 code units and set:
+   - pos = 0 (translate method)
+   - length = len(code_units) (translate method)
+2. You call consumed = self.translate_codepoint(code_units, pos, out).
+   - The contract (comment) says translate_codepoint works in codepoints and "just took care of a surrogate pair".
+   - It returns a positive consumed value when it handled one or more codepoints.
+3. When consumed > 0 you run:
+   for pt in range(consumed):
+       pos += char_count(code_point_at(code_units, pos))
+   (translate method)
+4. The bug: code_point_at(code_units, pos) is called without guarding that pos is still < length. During the loop pos is advanced based on char_count(...). After some increments pos can become equal to length; on the next iteration code_point_at is called with index == len(code_units), and code_point_at raises IndexError (slice lines 35–36). In short: you call code_point_at with an out-of-range index because you increment pos in the loop and then call code_point_at again.
+
+Why the code is wrong conceptually
+- translate_codepoint returns the number of codepoints it consumed, but the loop advances pos by the number of UTF-16 code units per codepoint by repeatedly calling code_point_at at the current pos. That requires pos remain valid at each iteration. Because pos is changed inside the loop and there is no bounds check before each code_point_at call, the loop may try to read past the end of code_units.
+- The code assumes there is always another code unit available when calling code_point_at; that assumption fails at the end of input.
+
+Concrete fixes (step-by-step, exact changes)
+Choose one of the two safe approaches below:
+
+A) Advance pos using the number of UTF-16 code units consumed by translate_codepoint directly
+- Change translate_codepoint to return the number of UTF-16 code units consumed (1 or 2 per codepoint), not the number of codepoints.
+- Then replace the for-loop with a single increment:
+    pos += consumed
+- Steps:
+  1. Update translate_codepoint to return units_consumed (an int >= 1 for each codepoint processed).
+  2. Replace the current for pt in range(consumed): ... block with:
+       pos += consumed
+  This removes repeated calls to code_point_at and prevents out-of-range access.
+
+B) Keep translate_codepoint returning codepoint count, but avoid calling code_point_at past end
+- Before calling code_point_at inside the loop check pos < length. Also compute the codepoint once and guard that you have enough code units for it.
+- Example change (exact logic to insert in place of your loop):
+    for _ in range(consumed):
+        if pos >= length:
+            # nothing left to advance, stop to avoid IndexError
+            break
+        cp = code_point_at(code_units, pos)   # safe because pos < length
+        pos += char_count(cp)
+- Steps:
+  1. Replace the for loop with the code above.
+  2. Optionally, if it's an error for translate_codepoint to claim it consumed more codepoints than remain, raise a ValueError instead of silently breaking.
+
+Which fix to pick
+- If the translator's contract is supposed to report how many UTF-16 code units it consumed, use fix A (simpler and clearer).
+- If the translator is meant to report how many codepoints it consumed, use fix B and add a bounds check or explicit error when consumed exceeds the remaining codepoints.
+
+Summary, succinctly
+- The loop increments pos and then calls code_point_at without checking pos against length, so code_point_at ends up called with index == len(code_units) and raises IndexError (slice lines 35–36).
+- Fix by either (A) making translate_codepoint return code unit count and advance pos by consumed, or (B) adding a bounds check before each code_point_at call (and/or validate that consumed does not exceed remaining codepoints).

@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The code raised ValueError("Minutes out of range: -15") at the check on lines 396–397:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means minutes_offset was -15 when that check executed.
+
+Why this is the root cause (why minutes_offset is negative)
+- Earlier code computes minutes_offset from parsed hour/minute parts and the sign of the offset, but the negative sign can be applied to the hours only while minutes stay positive (for input like "-1:15"), or the sign can be applied to the combined value incorrectly.
+- The code later tries to adjust minutes with these lines (402 and 404):
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  These adjustments indicate the code expects minutes_offset to be a non-negative minute-part (0..59) and then combine it with hours_in_minutes, but the range check on 396 runs too early against minutes_offset before that normalization.
+- Concretely: for an input that represents -1 hour and 15 minutes, minutes_offset may be computed as -15 (minutes * sign). The early check at line 396 treats -15 as invalid and raises, instead of treating it as the 15-minute part of a negative offset.
+
+Where to look in the code
+- The failing variable: minutes_offset
+- The failing check: lines 396–397 (range validation)
+- The later normalization/combination that expects a non-negative minute part: lines 402 and 404
+- The eventual use: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) (line 405)
+
+Exact fixes (concrete steps)
+You can pick one of these two concrete fixes — both make the logic accept offsets like -1:15 correctly.
+
+Fix A — validate absolute minute value, then apply sign
+1. Change the validation at lines 396–397 to check the absolute value:
+   - Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Keep the later adjustments at lines 402/404 as written (they will then operate on a minute part whose absolute value is within 0..59).
+3. Add a unit test for negative-hour positive-minute input, e.g. "-1:15", to ensure the combined offset becomes -75 minutes.
+
+Fix B — normalize minute-part before range check
+1. Compute a normalized minute_part (non-negative) from the parsed minute and sign before validating:
+   - e.g.
+     minute_part = abs(parsed_minutes)
+     if minute_part > 59:
+         raise ValueError(f"Minutes out of range: {minute_part}")
+2. Use minute_part in the later combination (replace uses of minutes_offset where the code expects a minute part).
+3. Ensure sign is applied only when combining hours_in_minutes and minute_part (lines 402/404).
+4. Add the same unit test for "-1:15".
+
+Suggested unit-test to add
+- Parse these inputs and check resulting offset minutes:
+  - "-1:15" -> -75 minutes
+  - "1:15"  -> +75 minutes
+  - "-0:15" -> -15 minutes
+  - "0:-15" (invalid) -> should raise ValueError (minutes absolute > 59 or negative minute literal)
+
+Summary
+- The code raises because minutes_offset can be negative (e.g. -15) before the range check at lines 396–397. The later logic (lines 402/404) expects minutes to be a non-negative part (0..59) and combines it with hours. Move/adjust the validation so you validate the absolute minute-part (abs(minutes)) or normalize the minute-part before the check. That will allow offsets like "-1:15" to be handled correctly.

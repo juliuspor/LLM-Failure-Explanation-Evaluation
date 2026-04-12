@@ -1,0 +1,49 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- That method validates the minutes argument at lines 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15 the validation fails and raises ValueError: "Minutes out of range: -15" (this is the error you saw).
+
+Why it happened (root cause)
+- The method's docstring describes allowed combinations where minutes can be negative when the hours are negative (e.g. (-2, -15) should produce -02:15). The implementation, however, unconditionally forbids negative minutes. That check is at for_offset_hours_minutes (lines ~384–401 in the snippet).
+- The code later attempts to combine hours and minutes into a total minutes value and does handle negative hours (lines around 369–378), but the early validation never lets negative minutes through, so valid inputs like (-2, -15) are rejected before they are combined.
+
+Where it occurred
+- Method: DateTimeZone.for_offset_hours_minutes
+- Exact code location (slice shown): the validation lines 400–401:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+What to do (concrete fixes)
+1. Allow negative minutes when hours are negative (or when hours == 0 allow either sign per the doc). Replace the current check with logic matching the doc:
+   - Reject minutes if abs(minutes_offset) > 59.
+   - Reject minutes if hours > 0 and minutes < 0 (positive hours cannot have negative minutes).
+   - Reject minutes if hours < 0 and minutes > 0 (negative hours cannot have positive minutes).
+   - Accept minutes when hours == 0 with either sign (so (0, -15) -> -00:15).
+   Concretely, change the validation block to something like:
+       if abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Minutes must be positive when hours is positive")
+       if hours_offset < 0 and minutes_offset > 0:
+           raise ValueError("Minutes must be negative when hours is negative")
+   This preserves the doc behaviour.
+
+2. Alternatively (simpler): interpret the pair as signed total minutes before validating minutes absolute range. For example:
+       total_minutes = hours_offset * 60 + ( -minutes_offset if hours_offset < 0 else minutes_offset )
+   but you still must validate that abs(minutes_part) <= 59 and that resulting total is within allowed range. The current code already does a correct combine later; so the main fix is to remove the unconditional negative-minute rejection.
+
+Minimum code change (recommended)
+- Replace lines 400–401:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  with:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+This change will allow negative minutes and will make the test DateTimeZone.for_offset_hours_minutes(-2, -15) succeed (producing zone id '-02:15').
+
+Why that minimal change works
+- The rest of the method already adjusts the sign of minutes based on hours (around lines 370–377), and later multiplies by MILLIS_PER_MINUTE and checks overall millis range. Allowing negative minutes (but still enforcing abs <= 59) matches the documented allowable inputs and prevents the premature ValueError.
+
+If you want, I can produce the exact patched function text.

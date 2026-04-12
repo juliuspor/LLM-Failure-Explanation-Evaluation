@@ -1,0 +1,51 @@
+What failed
+- The tests call GrayPaintScale.get_paint(value) with values outside the [lower, upper] range (e.g. value = -0.5) and expect the method to clamp to the endpoint gray (black or white).
+- The implementation instead raises a ValueError when the computed RGB falls outside 0–255 or otherwise does not clamp. That is why test_lower_bound_clamping and test_upper_bound_clamping fail with an exception instead of returning (0,0,0) or (255,255,255).
+
+Where it happens
+- In GrayPaintScale.get_paint(value). The code computes a normalized fraction from value (something like normalized = (value - lower_bound)/(upper_bound - lower_bound)), maps that to a gray level gray = normalized * 255, then checks the RGB range and raises ValueError if outside 0–255. Because negative inputs produce gray < 0 and large inputs produce gray > 255, the ValueError is raised there instead of clamping.
+- Variable names affected: value, lower_bound, upper_bound, normalized, gray (or r/g/b if computed immediately).
+
+Why it happens (root cause)
+1. Order-of-operations bug: clamping is not applied to the input value (or to normalized) before mapping to  0–255. The code only checks after mapping and raises instead of producing clamped endpoints.
+2. Conversion/rounding detail: the tests expect 0.5 → 127 (they treat 127.5 as 127). If the implementation uses round(gray) or int(round(gray)) it would return 128 and cause test_mid_value_interpolation to fail. So there are two related issues: missing clamping and possibly different rounding semantics.
+
+Concrete symptoms you would see when running the tests
+- test_lower_bound_clamping raises ValueError with a message like "RGB value out of range" instead of returning (0, 0, 0).
+- test_upper_bound_clamping similar for value > upper bound.
+- test_mid_value_interpolation may fail if the implementation rounds 127.5 to 128 rather than truncating to 127.
+
+How to fix it (step-by-step)
+1. Clamp the input (or the normalized fraction) to [0.0, 1.0] before mapping to 0–255. That prevents negative/overshoot gray values and avoids raising exceptions for out-of-range inputs that should be clamped.
+   - Example: normalized = (value - lower_bound) / (upper_bound - lower_bound)
+   - Then clamp: if normalized < 0.0: normalized = 0.0; elif normalized > 1.0: normalized = 1.0
+2. Map to a gray integer using the test's expected rule. The tests expect 0.5 -> 127 (i.e., truncate 127.5 to 127). Use int(normalized * 255) (which truncates toward zero) rather than round().
+   - gray = int(normalized * 255)
+3. Return the RGB tuple (gray, gray, gray).
+4. Remove the ValueError raise for out-of-range RGB (or at least only raise it for programmer/logic errors, not for values that should be clamped).
+5. Update the docstring to reflect the clamping behavior (don’t claim you raise ValueError for normal out-of-range inputs).
+
+Minimal replacement for get_paint (illustrative)
+- Current problematic structure (pseudo):
+    normalized = (value - lower_bound) / (upper_bound - lower_bound)
+    gray = normalized * 255
+    if gray < 0 or gray > 255:
+        raise ValueError("RGB out of range")
+    return (int(gray), int(gray), int(gray))
+- Replace with:
+    normalized = (value - lower_bound) / (upper_bound - lower_bound)
+    # clamp normalized to [0.0, 1.0]
+    if normalized < 0.0:
+        normalized = 0.0
+    elif normalized > 1.0:
+        normalized = 1.0
+    gray = int(normalized * 255)   # truncates 127.5 -> 127 to match tests
+    return (gray, gray, gray)
+
+Why this exact fix works
+- Clamping before conversion ensures negative inputs or inputs > upper_bound map to endpoints instead of producing negative/overshoot gray and causing an exception.
+- Using int(...) matches the tests' expectation for 0.5 → 127.
+- Returning the tuple (gray, gray, gray) satisfies all three test cases and matches the intended grayscale mapping.
+
+Extra note
+- If you prefer a different rounding rule (e.g., round to nearest), update the tests accordingly. But to make the existing tests pass, use truncation (int()) and clamp prior to mapping.

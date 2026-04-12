@@ -1,0 +1,42 @@
+What happened (where)
+- The failing input is "fr__POSIX".
+- The parsing code around to_locale() is wrong at and after line 231. The block starting at line 231 uses the test if length == 2: but then immediately reads locale_str[3] and locale_str[4] (lines 237–238) and later expects an underscore at locale_str[5] (line 245). The code never handles the "language + empty country + variant" form "ll__variant" correctly.
+- For "fr__POSIX" the code either:
+  - treats the characters at indexes 3 and 4 as if they were a two-letter country (ch3, ch4) and fails the A–Z check because ch3 is '_' (lines 237–240), or
+  - later checks locale_str[5] != '_' (line 245) and raises ValueError because the variant starts earlier (at index 4) in the double-underscore form.
+So the function rejects "fr__POSIX" instead of returning Locale('fr', '', 'POSIX').
+
+Why it failed (root cause)
+- The parser assumes a country is always present and uses fixed indexes for country and variant (indexes 3–4 for country, index 5 for the separator before variant).
+- It does not detect the double-underscore case where the country is empty ("__"). Concretely:
+  - The check at line 231 is wrong for the alternatives being parsed.
+  - Accesses ch3 = locale_str[3] and ch4 = locale_str[4] (lines 237–238) are invalid assumptions for the empty-country form because ch3 will be '_' and fail the A–Z test at line 239–240.
+  - The later check locale_str[5] != '_' (line 245) is also the wrong location for the variant separator when country is empty.
+
+How to fix (concrete steps)
+1. Add an explicit branch for the "ll__variant" pattern before you try to read a two-letter country:
+   - Check if len(locale_str) >= 4 and locale_str[2:4] == "__". If so, return Locale(locale_str[0:2], "", locale_str[4:]).
+2. Keep the existing handling for the normal cases (language only, language+country, language+country+variant) but do those after handling the double-underscore case.
+3. Make the index and bounds checks explicit to avoid out-of-range indexing.
+
+Example replacement logic (pseudocode with exact indices you can drop in)
+- let length = len(locale_str)
+- if length == 2:
+    return Locale(locale_str[0:2])
+- if length >= 4 and locale_str[2:4] == "__":
+    # language + empty country + variant
+    return Locale(locale_str[0:2], "", locale_str[4:])
+- if length >= 5 and locale_str[2] == '_' and locale_str[3].isupper() and locale_str[4].isupper():
+    # language + country
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    if locale_str[5] != '_':
+        raise ValueError(...)
+    return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+This addresses the exact lines:
+- move a test for locale_str[2:4] == "__" before the code at lines 237–246,
+- avoid assuming ch3/ch4 are letters when they could be '_'.
+
+Result
+- With the added double-underscore branch, to_locale("fr__POSIX") will return Locale('fr', '', 'POSIX') as the test expects.

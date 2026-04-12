@@ -1,0 +1,26 @@
+What happened
+- The test calls CsvEscaper().translate_string('\U0001F630') — the input is an astral character (U+1F630) that is represented in UTF-16 as a surrogate pair (two 16-bit code units).
+- The function shown, to_utf16_code_units(s) (lines 10–12 and following), sets code_units = [] but never fills it before later code tries to index into it.
+- When translate_string (or a helper) calls the code that checks index against len(code_units) (line 35) the check fails because len(code_units) == 0, so the code raises IndexError("String index out of range: {index}") at line 36.
+
+Why that causes the test to fail
+- translate_string expects to examine UTF-16 code units (it has logic at lines 38–44 that looks for a high surrogate at code_units[index] and a low surrogate at code_units[index+1]). Because code_units is empty, those lines never run — the code errors earlier with IndexError. The root cause is that code_units was never populated with the UTF-16 16-bit units for the input string, so surrogate-pair handling cannot happen and the function fails.
+
+Where it happens (specific references)
+- Initialization: line 12 sets code_units = [].
+- Bounds check and error: line 35–36 checks index against len(code_units) and raises IndexError when code_units is empty.
+- Surrogate handling that was meant to run: lines 38–44 (reading high = code_units[index], checking high between 0xD800–0xDBFF, reading low = code_units[index+1], combining to code point) never gets to run successfully because code_units was never filled.
+
+How to fix it (concrete steps)
+1. Populate code_units with UTF-16 16-bit code units for the input string before any indexing. One correct and simple implementation is to encode to UTF-16 little-endian bytes and split into 16-bit words, for example:
+   - Replace the body starting at line 12 with:
+     bs = s.encode('utf-16-le')
+     code_units = [bs[i] | (bs[i+1] << 8) for i in range(0, len(bs), 2)]
+   - This yields a list of integers each 0..0xFFFF; for U+1F630 it produces the correct high and low surrogate values.
+
+2. Do NOT use a naive [ord(c) for c in s] to produce code_units if you expect UTF-16 surrogate pairs: ord() on the single astral character returns 0x1F630 (one value > 0xFFFF) and will break the existing surrogate-pair logic at lines 38–44.
+
+3. After populating code_units, keep the existing surrogate-detection and combination code (lines 38–44) unchanged; it will then correctly convert surrogate pairs into code points and allow translate_string to handle the input without raising IndexError.
+
+Summary
+The immediate cause is that code_units is left empty (line 12) and indexing into it triggers the IndexError at line 36. Populate code_units with proper UTF-16 16-bit units (for example via s.encode('utf-16-le')) so the surrogate-pair logic at lines 38–44 can run correctly and the test will pass.

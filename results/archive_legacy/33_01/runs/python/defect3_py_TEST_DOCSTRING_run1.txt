@@ -1,0 +1,47 @@
+What happened (what failed)
+- The test calls escaper.translate_string('\U0001F630') expecting the single Unicode character U+1F630 (😰) to be preserved.
+- The implementation of translate_string iterates over the input_seq as if it were a stream of 16-bit code units and does not correctly handle UTF-16 surrogate pairs. As a result, the single character U+1F630 is seen as two code units (a high surrogate and a low surrogate) and is processed as two separate items. The escaper emits output for each half of the surrogate pair, so the produced result is not equal to '\U0001F630' and the assert fails.
+
+Where it happens (exact places in the method)
+- Method: translate_string
+- Variables: input_seq, out, i, ch, cp (or whatever names you actually use in the loop)
+- The bug is in the loop that walks input_seq (the section that checks/reads code units and appends to out). Specifically:
+  - At the line that reads the next character into ch (the loop header or the statement like ch = input_seq[i]).
+  - At the line that checks surrogate ranges with something like "if 0xD800 <= ord(ch) <= 0xDBFF" (high surrogate test) but then fails to combine that high surrogate with the following low surrogate before emitting a code point.
+  - At the line that appends/returns values to out (you append two separate code units instead of one combined code point when a surrogate pair is present).
+
+Why it happens (root cause)
+- Your translate_string implementation assumes that each element read from input_seq is an independent code unit that can be translated on its own. That assumption breaks for characters above U+FFFF on Python builds (or encodings) that represent them as UTF-16 surrogate pairs. For the character '\U0001F630' (U+1F630):
+  - ord(ch) for the first iteration yields a high-surrogate value (0xD83D).
+  - Your code treats 0xD83D like a complete unit and emits output for it, then separately emits output for the low surrogate (0xDE30). Together those two outputs do not equal the original single code point, so the test fails.
+
+Concrete, step-by-step fixes
+1. Decide what translate_string should accept and document it:
+   - Option A (recommended): accept a Python str as a sequence of Unicode code points and always produce output that corresponds to full code points.
+   - Option B: accept a list/sequence of UTF-16 code units; if you pick this, make callers responsible for providing that form.
+
+2. If you adopt Option A (handle Python str correctly), change the iteration inside translate_string:
+   - Replace the current code-unit-based loop with iteration over characters and use ord() to get the code point:
+     - Example algorithm:
+       - for ch in input_seq:
+           cp = ord(ch)
+           # now cp is the full Unicode code point (e.g. 0x1F630) on normal Python builds
+           # encode/escape cp as you need and append to out
+   - This handles characters > U+FFFF correctly because each ch is already a full code point on standard Python 3 strings.
+
+3. If you must support narrow-Python/UTF-16 surrogate sequences explicitly (older Python builds or if input_seq can contain surrogate code units):
+   - Detect surrogate pairs and combine them before emitting:
+     - When you see a high surrogate H (0xD800..0xDBFF), check that the next code unit exists and is a low surrogate L (0xDC00..0xDFFF).
+     - Compute the actual code point: cp = ((H - 0xD800) << 10) + (L - 0xDC00) + 0x10000
+     - Advance the index by two and emit cp.
+     - If the high surrogate is not followed by a valid low surrogate, treat it as an error or handle it according to your policy.
+   - Implement that combine-at-source logic where you currently read ch and append immediately.
+
+4. Tests to add
+   - Keep the test you have: assert translate_string('\U0001F630') == '\U0001F630'
+   - Add tests with explicit surrogate pairs if you expect to receive UTF-16 code units.
+   - Add tests for boundary code points (U+FFFF, U+10000) and malformed surrogates.
+
+Summary (short)
+- Root cause: translate_string treats UTF-16 surrogate halves as independent units and does not combine them into the correct code point. That makes the single character '\U0001F630' be processed as two separate units, so the output differs.
+- Fix: iterate by full code points (use ord(ch) on each str character), or explicitly detect and combine high/low surrogates before emitting. Add tests for surrogate pairs and boundary cases.

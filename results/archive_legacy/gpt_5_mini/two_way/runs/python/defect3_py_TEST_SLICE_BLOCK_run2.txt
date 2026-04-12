@@ -1,0 +1,52 @@
+What happened (summary)
+- The code raises IndexError at the check in code_point_at (lines 35–36) because the translator advances the index incorrectly when it encounters a UTF‑16 surrogate pair. That produces an index value that is outside the bounds of the UTF‑16 code_units array passed to code_point_at.
+
+Why it happens (root cause, plain)
+- The translator converts the input string into UTF‑16 code units (to_utf16_code_units) and then walks those code units using a variable named index.
+- When it detects a supplementary code point (a character encoded as a surrogate pair in UTF‑16), the translator advances index by 2 to skip the two code units that make the pair.
+- But the loop surrounding that logic also advances the iteration (or otherwise advances index again), so index ends up incremented one time too many. On the next call to code_point_at(code_units, index) the index equals or exceeds len(code_units), so the check at lines 35–36 raises IndexError: "String index out of range: {index}".
+- In short: index is advanced twice for surrogate pairs (once for the surrogate handling and once by the loop), so the code asks for a code unit past the end of the code_units list.
+
+Where it happens (specific references)
+- Failing check: code_point_at, lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- Offending variables and methods: index (the loop index), code_units (from to_utf16_code_units), and the call site in the translator (CsvEscaper.translate_string / CharSequenceTranslator.translate) where the code advances index after handling a surrogate pair.
+
+Concrete reproduction scenario (your test)
+- Input "\U0001F630A" (emoji + 'A'):
+  - to_utf16_code_units produces 3 code units: [high_surrogate, low_surrogate, ord('A')]
+  - code attempts to skip the pair by adding 2 to index, then the loop also advances, so index becomes 3, and the next code_point_at(..., 3) triggers the IndexError because valid indexes are 0..2.
+
+Precise fixes (step-by-step)
+Pick one of these clear fixes; each includes the exact places to change:
+
+1) Use a while loop and control index only in one place
+   - Replace the for-loop that iterates the sequence with:
+       index = 0
+       while index < len(code_units):
+           ...  # compute code point
+           if code point is supplementary:
+               index += 2
+               continue
+           index += 1
+   - Rationale: the code explicitly controls index increments, so you cannot accidentally advance it twice.
+
+2) If you must keep the for-loop, avoid double-incrementing
+   - Remove the extra increment inside the surrogate-pair handling block (do not increment index there), and rely on the for loop to advance the loop index by exactly 1 each iteration.
+   - Or set a flag to skip the for-loop's increment and use continue to avoid the extra step. (Less clean than #1.)
+
+3) Operate on Python code points (simpler, less error-prone)
+   - Instead of converting to UTF‑16 code units, operate on Python str code points directly (Python str uses Unicode code points).
+   - Use ord() and detect surrogate pairs only if you must create UTF‑16 output; otherwise treating each Python character as a code point avoids surrogate bookkeeping entirely.
+
+Minimum code changes to try first
+- Change the translator loop to a while loop and remove any implicit loop increment. Make sure only that loop updates index, and only by 1 for BMP characters or 2 for surrogate pairs.
+- Verify with your failing test input ("\U0001F630A") that index never reaches len(code_units) when calling code_point_at.
+
+Why these fixes fix the bug
+- They ensure index is advanced exactly once per processed code unit group (1 for BMP, 2 for surrogate pair). That prevents asking code_point_at for an out-of-range index, so the check at lines 35–36 will no longer fail in this scenario.
+
+If you want, I can:
+- Show a short corrected code snippet for the translate loop (while-based) using the existing variable names, or
+- Update the logic to avoid UTF‑16 code units and work with Python code points instead.

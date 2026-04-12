@@ -1,0 +1,54 @@
+What failed
+- The failing check is in DateTimeZone.for_offset_hours_minutes, at the minutes validation:
+  lines 396-397:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- That condition rejects any negative minute value (minutes_offset < 0), so calls like
+  DateTimeZone.for_offset_hours_minutes(0, -15) or (..., -15) raise ValueError even though tests expect negative minutes to be allowed (range should be -59..+59).
+
+Why it fails (root cause)
+- The code erroneously treats valid negative minutes as invalid by testing minutes_offset < 0.
+- The intended valid range for minutes is -59 through +59 inclusive. The condition should be minutes_offset < -59 (not < 0).
+- Because of this, tests that rely on negative minute offsets (e.g., test_zero_hours_negative_minutes, test_negative_hours_negative_minutes, and the check that (2, -15) raises only when mixed-sign rules require it) fail at the minutes validation step instead of proceeding to the sign-combination logic.
+
+Where it occurs
+- Method: DateTimeZone.for_offset_hours_minutes
+- Variable: minutes_offset
+- File/lines: the slice shows lines 396-397 (minutes range check)
+
+What to change (clear step-by-step fix)
+1. Change the minutes range check to allow negative minutes down to -59:
+   Replace:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   With:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Ensure the sign-combination rules are handled explicitly after range checking:
+   - If hours_offset > 0 and minutes_offset < 0, raise ValueError (mixed-sign invalid).
+   - If hours_offset < 0 and minutes_offset > 0, treat total offset as negative (i.e., offset = -(abs(hours)*3600000 + minutes*60000)). Similarly for both negative parts.
+   - If hours_offset == 0, minutes_offset sign determines overall sign.
+
+   Concretely (pseudo-Python to insert after the range checks):
+     # reject impossible hour range as you already do
+     # minutes range fixed above
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Mixed signs: positive hours with negative minutes not allowed")
+     # compute total millis with correct sign
+     total_minutes = abs(hours_offset) * 60 + abs(minutes_offset)
+     sign = -1 if (hours_offset < 0 or (hours_offset == 0 and minutes_offset < 0)) else 1
+     total_millis = sign * total_minutes * 60000
+
+3. Run the test suite to confirm:
+   - Cases like (0, -15) and (-2, -15) no longer raise at the minutes check and compute negative offsets.
+   - (2, -15) still raises as intended by the sign-combination rule above.
+   - Out-of-range values (minutes < -59 or > 59) still raise.
+
+Why this fix is safe
+- It aligns minutes validation with the intended -59..+59 range.
+- It keeps strictness for disallowed mixed-sign combinations where the test expects ValueError (e.g., positive hours with negative minutes).
+- It makes computation of total offset explicit and deterministic for the cases tests rely on (negative hours with positive/negative minutes).
+
+If you want, I can draft the exact code patch to drop into for_offset_hours_minutes (showing the three checks and the total_millis computation).

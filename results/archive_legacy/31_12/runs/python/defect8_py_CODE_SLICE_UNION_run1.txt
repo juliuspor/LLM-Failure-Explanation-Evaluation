@@ -1,0 +1,54 @@
+What happens
+- The method raises for some valid strings (and is hard to reason about) because the length check on line 227 uses a confusing boolean expression:
+  if length != 2 and length != 5 and length < 7:
+  That expression is trying to allow three cases (length == 2, length == 5, or length >= 7) but is written in a way that is easy to misread and therefore easy to get wrong later. The ambiguity is the root cause of the failures you're seeing.
+
+Where it occurs (lines from your snippet)
+- to_locale (line 193)
+- length calculation (line 227)
+- early return for 2‑char locales (line 236)
+- country-letter checks (lines 242–245)
+- return for 5‑char locales (line 248)
+- variant branch and indexing (lines 250–252)
+
+Why that line is the problem
+- The intention is to accept only:
+  - language-only strings of length 2,
+  - language+country strings of length 5 (format "xx_YY"),
+  - or language+country+variant strings length >= 7 (format "xx_YY_variant").
+- The condition as written is logically equivalent to:
+    if not (length == 2 or length == 5 or length >= 7):
+  but it is written with multiple != and a <, which makes it hard to read and easy to misunderstand.
+- If that condition were ever changed or misread, it can allow execution to proceed into code that indexes characters that don't exist (eg. locale_str[3], locale_str[4], locale_str[5]) and cause IndexError, or reject valid inputs by mistake. Even though the current boolean operators happen to evaluate the accepted lengths correctly, the expression is fragile and error-prone.
+
+What exactly goes wrong in practice
+- If someone modifies the condition incorrectly (for example, by swapping operators or trying to fold checks differently) it will either:
+  - allow short strings to reach the later indexing lines and cause IndexError when you do locale_str[3] or locale_str[5], or
+  - reject valid inputs unexpectedly.
+- The later code (lines 242–252) indexes specific positions (3,4,5,6) without additional guards, so correctness of the original length check is critical. A single mistake there produces a hard-to-trace IndexError.
+
+How to fix it (concrete steps)
+1. Replace the confusing length check with a clear, easy-to-read condition. For example:
+     length = len(locale_str)
+     if not (length == 2 or length == 5 or length >= 7):
+         raise ValueError(f"Invalid locale format: {locale_str}")
+   This makes the intent explicit and prevents accidental logic errors.
+
+2. Make indexing safe and the logic explicit. After the length guard, structure branches clearly:
+   - if length == 2: return Locale(...)
+   - if length == 5:
+       - assert locale_str[2] == '_' else raise
+       - validate country letters at [3] and [4]
+       - return Locale(...)
+   - else:  # length >= 7
+       - assert locale_str[2] == '_' and locale_str[5] == '_' else raise
+       - validate country letters at [3] and [4]
+       - return Locale(...)
+
+3. (Optional) Validate input type up front if callers may pass None:
+   - Either change the signature to accept Optional[str] or raise TypeError if locale_str is None. The current code checks for None (line 194) but the type hint says str; pick one and make it consistent.
+
+4. Add unit tests for edge lengths: 0, 1, 2, 3, 4, 5, 6, 7, 8 and for malformed separators/letters so future edits won’t reintroduce the bug.
+
+Summary
+- The failure stems from a brittle, hard-to-read length check (line 227). Replace it with an explicit condition (not (length == 2 or length == 5 or length >= 7)) and keep the indexing branches clearly separated so you never index past the string length. This prevents IndexError and makes the code correct and maintainable.

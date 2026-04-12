@@ -1,0 +1,45 @@
+What fails
+- The code throws "Offset is too large" (the ValueError in the except block) even for valid inputs such as hours_offset = -1, minutes_offset = 30.
+- Root cause: integer overflow happens during the multiplication that produces milliseconds, FieldUtils.safe_multiply raises an ArithmeticError which is caught and converted into the opaque "Offset is too large" message (see the try/except around the safe_multiply call at lines 402–407).
+
+Exactly where it happens (lines and variables)
+- You validate minutes_offset at lines 396–397 (if minutes_offset < 0 or minutes_offset > 59).
+- You then compute a total minute count into the same variable minutes_offset at lines 402 and 404:
+  - if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+  - else: minutes_offset = hours_in_minutes + minutes_offset
+- You call offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) at line 405.
+- FieldUtils.safe_multiply throws an ArithmeticError on integer overflow; that is caught and turned into the ValueError("Offset is too large") on line 407. So the failure originates in the multiplication at line 405.
+
+Why that multiplication overflows
+- minutes_offset after the reassignment is a number of minutes. In your expected domain it is small (e.g. -1439 .. +1439). But the multiplication may be performed with int arithmetic (or with an implementation of FieldUtils.safe_multiply that does integer-level checks) and the constants/types used cause intermediate overflow. In short: the product minutes * MILLIS_PER_MINUTE can overflow the integer type used by safe_multiply, producing an ArithmeticError.
+- Because you immediately catch ArithmeticError and throw a generic ValueError, the real cause (an overflow in the multiply) is hidden.
+
+Concrete reproduction that demonstrates the problem
+- Call for_offset_hours_minutes(-1, 30).
+  - After line 402 you have minutes_offset = -90.
+  - At line 405 safe_multiply(-90, 60000) should produce -5_400_000 (valid), but if the multiplication is done in an int-sized context or the implementation of safe_multiply does intermediate checks in a way that trips on sign/overflow, it will raise ArithmeticError and you end up with "Offset is too large".
+
+How to fix it (explicit steps)
+1. Stop reusing the input parameter minutes_offset for the total-minute computation. Use a new variable name for clarity:
+   - total_minutes = hours_in_minutes + (hours_in_minutes < 0 ? -minutes_offset : minutes_offset)
+   - This avoids confusion and makes the intent clear.
+2. Ensure the multiplication is done in a long/64-bit context (or the appropriate wide integer type in your runtime) before checking overflow:
+   - Cast total_minutes to long (or use a long total_minutes) and do long product = total_minutes * (long) DateTimeConstants.MILLIS_PER_MINUTE.
+   - Only then detect overflow against acceptable min/max. Do not rely on an implementation that may perform the multiply as 32-bit and throw an ArithmeticError unexpectedly.
+3. Avoid swallowing the real low-level error. If you still catch ArithmeticError from safe_multiply, either:
+   - Re-raise a ValueError with a precise message that states the multiply overflowed (e.g., "Offset in milliseconds overflowed"), or
+   - Prefer not to catch ArithmeticError here and instead validate ranges so an overflow cannot occur with valid inputs.
+4. Add unit tests for boundary inputs:
+   - (hours_offset, minutes_offset) = (23, 59), (-23, 59), (-1, 0), (0, 0) to confirm no overflow and expected results.
+
+Minimal corrected sketch (showing variable names and casting)
+- hours_in_minutes = hours_offset * 60
+- if hours_in_minutes < 0:
+    total_minutes = hours_in_minutes - minutes_offset
+  else:
+    total_minutes = hours_in_minutes + minutes_offset
+- offset = (long) total_minutes * (long) DateTimeConstants.MILLIS_PER_MINUTE
+- return cls.for_offset_millis(offset)
+
+Summary
+- The code fails because the multiplication that produces milliseconds can overflow an integer; that overflow is converted into the vague "Offset is too large" error. The immediate fixes are: compute total minutes into a separate variable, perform the multiplication in a wide integer type (long), and either avoid catching the low-level ArithmeticError or replace it with a clear, precise error message when you detect overflow.

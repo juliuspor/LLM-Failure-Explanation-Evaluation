@@ -1,0 +1,58 @@
+What happened (root cause)
+- At lines 335–347 the code tries to choose a component type for the new array using a single variable inferred_type:
+  - Line 336: if array is not None: inferred_type = type(array)
+  - Line 337: elif element is not None: inferred_type = type(element)
+  - Line 340: otherwise inferred_type = object
+  - Line 346–347: if inferred_type == object and expected_type != object: raise TypeError(...)
+
+- The bug is that type(array) on line 336 returns the Python list type (i.e. type(array) == list), not the type of the elements stored in the list. That makes inferred_type wrong as soon as array is non-None. Later code compares inferred_type to expected_type (a user-supplied element type) and may raise a TypeError because list != str (or other element types). In short: you inferred the wrong thing (the container's type instead of the element type).
+
+- A second related failure is the handling when both array and element are None: inferred_type is set to object (line 340), and then the code raises TypeError at line 346 when expected_type is something else (e.g. str). That produces the observed failure when the call is ArrayUtils.add(None, None, expected_type=str): the method refuses to create a [None] of expected element type and raises instead.
+
+Where it occurs (exact lines)
+- Wrong inference: line 336 (inferred_type = type(array)) — you should not use type(array) to get element type.
+- Failing case for both None: line 340 sets inferred_type = object, and lines 346–347 raise TypeError when expected_type != object.
+
+Why that produces the runtime error described in the tests
+- Test calls: ArrayUtils.add(None, None, expected_type=str)
+- Because array is None and element is None, inferred_type becomes object (line 340). Then the code requires that inferred_type != object or that expected_type == object; since expected_type is str, it raises TypeError (line 346–347) instead of returning [None] as the caller expects. That matches the Java-class-cast-style symptom described in the test comment.
+
+Clear fixes (concrete steps)
+1. Infer element type from the array contents, not from the list object:
+   - Replace inferred_type = type(array) with logic that inspects array elements:
+     - If array is a sequence and non-empty, find the first non-None element and use type(array[i]).
+     - If all elements are None or array is empty, do not assume object; defer to expected_type if provided.
+
+2. Change the fallback when both array and element are None to prefer expected_type:
+   - If element is None and array gave no element type, and expected_type is provided, use expected_type as inferred_type.
+   - Only use object as a last resort, and do not raise TypeError simply because inferred_type == object while expected_type != object.
+
+3. Remove or relax the strict TypeError at lines 346–347:
+   - Instead of raising error whenever inferred_type == object and expected_type != object, allow creation of a new list of elements where the stored value can be None regardless of expected_type. If you must enforce type compatibility, compare element types (not list vs type) and only raise when there is a genuine mismatch.
+
+Concrete replacement sketch (pseudo-Python)
+- Replace the current block with something like:
+
+    inferred_type = None
+    if array is not None:
+        # try to infer from contents, not from the container type
+        for item in array:
+            if item is not None:
+                inferred_type = type(item)
+                break
+    if inferred_type is None and element is not None:
+        inferred_type = type(element)
+    if inferred_type is None:
+        # prefer caller's expected_type when provided
+        if expected_type is not None:
+            inferred_type = expected_type
+        else:
+            inferred_type = object
+    # do not raise TypeError merely because inferred_type == object and expected_type != object
+
+Why this fixes the tests
+- For ArrayUtils.add(None, None, expected_type=str) inferred_type becomes str (from expected_type) and the method will produce [None] without raising.
+- For existing arrays, the code will use the actual element type (from array contents) rather than list, avoiding incorrect comparisons and TypeErrors.
+- If types truly conflict (non-None element incompatible with inferred/expected type), you can still raise a clear TypeError comparing element types, not container type.
+
+If you want, I can produce a patch that replaces lines 335–347 with working code exactly matching your style.

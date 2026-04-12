@@ -1,0 +1,51 @@
+What happened (what failed)
+- The test input "\U0001F630A" becomes three UTF‑16 code units: [high_surrogate, low_surrogate, ord('A')] (length = 3).
+- The failure is an IndexError raised by code_point_at because it was called with index == len(code_units). The bounds check at lines 35–36 raises the exception:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- That call never should have happened — the loop driving translation advanced the index too far (past the last code unit) and then called code_point_at with the out‑of‑range index.
+
+Why it happened (root cause)
+- code_point_at (lines 38–44) correctly detects a surrogate pair when given the index of the high surrogate:
+  high = code_units[index]
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+      low = code_units[index + 1]
+      if 0xDC00 <= low <= 0xDFFF:
+          return combined_code_point
+  return high
+  (It returns the combined code point > 0xFFFF when a valid high+low pair is present.)
+- The translator loop that calls code_point_at then advances index. Because code_point_at returned a code point > 0xFFFF, the translator advanced the index by 2 to skip both UTF‑16 code units of the pair.
+- But the same loop also performed an extra increment (for example, a final increment at the end of the iteration, or a for-loop increment), so index was advanced 2 + 1 = 3 in total. That makes index == len(code_units).
+- On the next iteration the code calls code_point_at(index) with index == len(code_units). The bounds check at lines 35–36 detects this and raises IndexError.
+
+Where it occurred (variables / lines)
+- The exception comes from the bounds check in code_point_at (lines 35–36 in your slice).
+- The surrogate detection and combined value return are lines 38–44.
+- The incorrect behavior is due to how the translator increments index after using code_point_at (the loop that calls code_point_at is not shown in your slice, but it is the place doing the double increment).
+
+How to fix it (clear, specific steps)
+1. Fix the translator loop so it advances index exactly once per code unit consumed:
+   - Replace any loop that both increments index automatically (e.g., for i in range(...) or a final `index += 1` outside the branch) and also does `index += 2` when a surrogate pair is found. Use a single, explicit index update per iteration.
+   - Example pattern (pseudocode) to use inside translate_string:
+     index = 0
+     while index < len(code_units):
+         cp = code_point_at(code_units, index)
+         if cp > 0xFFFF:
+             # cp came from a surrogate pair
+             index += 2
+         else:
+             index += 1
+         # do translation work for cp
+2. Or make code_point_at return both the code point and the number of code units consumed (1 or 2), so the caller cannot accidentally increment an incorrect amount. For example:
+   def code_point_at(code_units, index):
+       ...  # same detection
+       return (code_point, 2)  # for pair
+       return (code_unit, 1)   # for BMP unit
+   Then use `cp, consumed = code_point_at(...); index += consumed`.
+3. Add a unit test for the loop boundary: strings whose last character is a surrogate pair and strings where a surrogate pair is followed by a BMP character (you already have those tests). After the fix, none of those should call code_point_at with index == len(code_units).
+
+Why these fixes work
+- They make the caller responsible for advancing index exactly by the number of UTF‑16 code units consumed (1 for BMP, 2 for surrogate pair). That prevents the out‑of‑range call to code_point_at and eliminates the IndexError.
+
+Summary
+- The translator advanced index twice when encountering a surrogate pair: once for the pair (index += 2) and once more by the loop control, producing index == len(code_units). The next call to code_point_at hit the bounds check (lines 35–36) and raised IndexError. Fix by making index increment deterministic: either use a single explicit index update based on how many code units code_point_at consumed, or change code_point_at to return the consumed count so the caller cannot accidentally over‑advance.

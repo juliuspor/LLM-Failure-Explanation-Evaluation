@@ -1,0 +1,63 @@
+What happened (where it fails)
+- The IndexError happens inside this loop:
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  specifically when code_point_at(code_units, pos) is called with pos == length (or > last index). That call reads code_units[pos] and raises "String index out of range: 2" for your 2-code-unit surrogate pair input.
+
+Why it fails (root cause)
+- The code mixes two different units of measurement and double-advances pos.
+  - code_units is a UTF-16 code-unit array (surrogate pairs take 2 entries).
+  - translate_codepoint(...) returns consumed. But the code behaves as if consumed counts "codepoints" (number of iterations), while the body advances pos by the number of UTF-16 code units in each codepoint (char_count(...), which is 1 or 2).
+  - For a surrogate pair (your test U+1F630), translate_codepoint returned consumed == 2 (two code units). The for-loop runs twice:
+    - 1st iteration: pos = 0 -> code_point_at returns the pair -> char_count returns 2 -> pos becomes 2
+    - 2nd iteration: pos = 2 -> code_point_at(code_units, 2) is called -> out-of-range -> IndexError
+- In short: translate_codepoint and the loop expect different meanings for consumed (code-units vs codepoints). That mismatch causes pos to be advanced incorrectly and then used beyond the array end.
+
+Exactly where to look in the snippet
+- The problematic lines are:
+
+      consumed = self.translate_codepoint(code_units, pos, out)
+      ...
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+What to change (concrete fixes, ordered)
+Pick one clear contract and enforce it everywhere. Two safe options:
+
+Option A — If translate_codepoint returns number of UTF-16 code units consumed (1 or 2):
+- Replace the for-loop with a single addition:
+
+      # consumed is number of code units consumed
+      pos += consumed
+
+  Rationale: consumed already counts code units, so no need to iterate and call code_point_at again.
+
+Option B — If translate_codepoint should return number of codepoints consumed (usually 1):
+- Change translate_codepoint implementation so it returns the number of codepoints it consumed (1 in the surrogate-pair case), not code units. Then keep the existing loop but ensure translate_codepoint never returns a value that causes the loop to run beyond the remaining input.
+
+Option C — Add defensive bounds checks (extra safe):
+- Before calling code_point_at inside the for-loop, check pos < length and break/raise with a clear error if not. Example:
+
+      for pt in range(consumed):
+          if pos >= length:
+              raise IndexError(f"pos {pos} >= length {length} while consuming {consumed}")
+          pos += char_count(code_point_at(code_units, pos))
+
+  This makes the failure explicit and helps catch contract violations in translate_codepoint during debugging.
+
+Which I recommend
+- Use Option A: make translate_codepoint return number of code units consumed (or confirm it already does) and change the loop to pos += consumed. That is the simplest and least error-prone for UTF-16 code-unit-based processing.
+
+Minimal code change (applies to your snippet)
+- Replace these lines:
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  with this single line:
+
+      pos += consumed
+
+After that change your test escaper.translate_string('\U0001F630') should no longer raise IndexError and will advance pos correctly over the surrogate pair.

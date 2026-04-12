@@ -1,0 +1,66 @@
+What happened (what fails)
+- The test (lines below) expects the "parent" period added first (SimpleTimePeriod(0,100) at index 1) to remain the recorded max-middle period after adding two child periods that split it:
+
+  1: s = TimePeriodValues('Test')
+  2: s.add(SimpleTimePeriod(0, 100), 1.0)
+  3: s.add(SimpleTimePeriod(100, 200), 2.0)
+  4: s.add(SimpleTimePeriod(0, 50), 3.0)
+  5: s.add(SimpleTimePeriod(50, 100), 4.0)
+  6: assert s.get_max_middle_index() == 1
+
+- The assertion fails because whatever code updates the recorded min/max indices when you call s.add(...) replaces the index for the (0,100) period with one of the later child indices (3 or 4). In other words, get_max_middle_index() no longer returns 1 after lines 4–5.
+
+Why it fails (root cause)
+- The docstring you pasted ("Update the index values for the maximum and minimum bounds. Args: period: the time period index: the index of the time period") shows the routine is supposed to update index bookkeeping for period bounds. The implementation that fails is comparing or matching the "period" argument against stored bounds incorrectly. Two concrete, common mistakes produce the observed behavior:
+
+  1) Comparing period objects by identity rather than by their start/end values
+     - If the code does something like "if period is stored_period:" or uses the period object as a dict key expecting equality, newly created SimpleTimePeriod(0,50) and SimpleTimePeriod(0,100) are distinct objects. A routine that tries to detect "this period contains the current min/max" by identity will not find the original parent (0,100) when later periods overlap it, and will instead update the stored max/min indices using the child period's index.
+     - Result: the stored "max middle" index is overwritten by the child index (3 or 4).
+
+  2) Wrong inclusive/exclusive comparison logic when deciding which period wins
+     - If the code uses comparisons like "<=" instead of "<" (or vice versa) on period boundaries (period.start and period.end), then when a new period shares a boundary with an existing period (e.g., child periods 0–50 and 50–100 together cover the parent's 0–100), the update rule can prefer the later-added child over the earlier parent. For example, using "if new.start <= current.start and new.end >= current.end: replace" will cause an exact-equal-boundary case to be handled incorrectly and overwrite the parent's index with the child's index.
+
+Where it occurs (which variables / methods)
+- The problem occurs inside the method that implements the docstring (the "Update the index values for the maximum and minimum bounds" routine). It receives the parameters named period and index and updates the stored fields that get_max_middle_index() reads.
+- The stored variables affected are the min/max bound indices (likely named something like min_index, max_index, min_period, max_period or max_middle_index). After calls on lines 4 and 5, those fields no longer point to the index 1 value added on line 2.
+
+How to reproduce quickly
+- Run the given test sequence (lines 1–6). Inspect the stored period and index values after each s.add(...). You will see the max/middle index is 1 after line 2, then becomes something else (3 or 4) after lines 4–5.
+
+Precise fixes (step-by-step)
+1) Compare period bounds by value, not by object identity
+   - Use period.getStart() and period.getEnd() (or attributes start/end) to compare ranges.
+   - Example decision: to detect whether an existing stored period contains the new period use numeric comparisons on starts/ends, not "is" or object-equality that relies on identity.
+
+2) Make the inclusion/exclusion rules explicit and stable
+   - Decide which period should win when bounds are equal (keep the earlier-added parent in this test).
+   - Implement comparisons with tiebreakers using the index (or the insertion order):
+     - If two periods have exactly the same start and end, keep the smaller index (earlier addition).
+     - When deciding containment, use strict vs. non-strict comparisons consistently. For this test we want parents to keep their index when children fill them, so:
+       - To detect that a new period should replace a stored period only when it strictly expands the stored range, use strict comparisons (e.g., new.start < stored.start or new.end > stored.end)
+       - If you must treat equal boundaries as non-expanding, do not replace when starts/ends are equal.
+
+3) Add explicit tests for boundary/equality cases
+   - Add unit tests that exercise equal-start, equal-end, and identical-range cases to ensure the chosen rule is enforced. Example tests:
+     - Add parent (0,100) then add child (0,50) then (50,100) and assert max_middle_index still 1.
+     - Add identical period again and assert index remains the original (or is updated as your rule specifies).
+
+4) Minimal code-change suggestion (pseudo-code)
+   - Replace identity or loose comparisons with:
+     if new.start < stored.start or new.end > stored.end:
+         # new strictly expands stored bounds -> update stored index/period
+         stored.start = new.start
+         stored.end = new.end
+         stored.index = index
+     elif new.start == stored.start and new.end == stored.end:
+         # identical-range: keep the earlier index
+         if index < stored.index:
+             stored.index = index
+
+What to inspect in your code right now
+- In the method that takes (period, index):
+  - Find any comparison that uses "is" or uses the period object as a key and replace it with comparisons on period.getStart()/getEnd().
+  - Find any comparisons using <= or >= and check whether equality should cause replacement; change to < or > if you want the earlier-added parent to win.
+  - Check where stored index variables (min_index, max_index, max_middle_index) are assigned and add the tie-breaker rule described above.
+
+If you want, paste the actual implementation of the update routine (the method whose docstring you showed). I can point to the exact lines to change and give a one-line patch.

@@ -1,0 +1,48 @@
+What happened (where it fails)
+- The mistake is in for_offset_hours_minutes (lines shown) where the code reuses and mutates the parameter minutes_offset to hold the total minutes before converting to milliseconds:
+  - lines 406–408:
+    - if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    - else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  - then at line 409 it multiplies minutes_offset by MILLIS_PER_MINUTE.
+
+Why it fails (root cause)
+- The arithmetic in the negative-hours branch is wrong because it treats the minutes part with the wrong sign when hours_offset is negative.
+  - Example: caller wants offset -1 hour 30 minutes (hours_offset = -1, minutes_offset = 30).
+  - hours_in_minutes = -1 * 60 = -60.
+  - The code computes minutes_offset = hours_in_minutes - minutes_offset = -60 - 30 = -90 (this is actually correct as total minutes).
+  - The root problem is not obvious in that example — the real defect is the mutation and reuse of the parameter minutes_offset and the sign-handling is fragile/unclear. When hours_offset is negative the code should subtract the minutes from the absolute hours and then make the whole result negative; by doing hours_in_minutes - minutes_offset directly it is easy to get sign errors or to confuse callers who might pass negative minute values. Reusing the input parameter makes reasoning and maintenance error-prone and can produce incorrect offsets in edge cases.
+
+What went wrong in plain terms
+- The method mutates the input parameter minutes_offset and uses the same name for both the input minutes and the computed total minutes (lines 406–408 and 409). That makes the sign math hard to follow and caused incorrect behavior for some inputs (negative-hour offsets combined with minute values). The mutation hides the difference between "minute part" and "total minutes" and is the reason the method returns wrong offsets or throws for inputs that should be valid.
+
+Where it occurred
+- Method: for_offset_hours_minutes
+- Problem lines: validation at lines 400–401 (minutes checked), then the reassignment and total calculation at lines 406–409, and final conversion at line 409–412.
+
+How to fix it (clear, actionable steps)
+1. Do not mutate the minutes_offset parameter. Introduce a new local variable, e.g. total_minutes.
+2. Compute total_minutes with an explicit sign rule:
+   - total_minutes = hours_offset * 60
+   - if hours_offset < 0:
+       total_minutes -= minutes_offset   # subtract minute part from the negative hours
+     else:
+       total_minutes += minutes_offset
+3. Use total_minutes in the multiply call:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing input validation (lines 400–401) that requires minutes_offset in 0..59.
+5. Optionally add a unit test pair for positive and negative offsets, for example:
+   - for_offset_hours_minutes(1, 30) -> +90 minutes -> +90 * MILLIS_PER_MINUTE
+   - for_offset_hours_minutes(-1, 30) -> -90 minutes -> -90 * MILLIS_PER_MINUTE
+
+Minimal corrected code sketch (replace lines 406–409)
+    total_minutes = hours_in_minutes
+    if hours_in_minutes < 0:
+        total_minutes -= minutes_offset
+    else:
+        total_minutes += minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix works
+- Using total_minutes avoids reusing/mutating the input name and makes the sign logic explicit. The subtraction for negative hours produces the intended negative total; the addition for non-negative hours produces the intended positive total. This removes the ambiguity and prevents the incorrect offset or exceptions you were seeing.

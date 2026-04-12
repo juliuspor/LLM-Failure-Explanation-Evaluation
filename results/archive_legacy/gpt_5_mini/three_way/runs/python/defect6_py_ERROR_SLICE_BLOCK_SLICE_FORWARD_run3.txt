@@ -1,0 +1,42 @@
+What happened (where it fails)
+- At line 176 you branch into the "integer float" handling when x == int(x). For x == -0.0 this is True because -0.0 == 0 and int(-0.0) == 0.
+- At line 177 you do value = int(x). That converts -0.0 to the integer 0 and loses the negative zero sign.
+- Later you call self.add(str(value)) (line 192) and that adds "0" (or "0" with no sign/decimal) rather than the expected "-0.0".
+- The test expected a negative zero representation, but the code path that formats integers collapses -0.0 to 0 and produces the wrong string.
+
+Root cause (why it happens)
+- Floating-point negative zero is a distinct value from +0.0 but compares equal to 0. The comparison x == int(x) and the conversion int(x) both discard the sign-of-zero information. That sign is never checked or preserved before you format/output the value, so -0.0 becomes 0.
+
+Exact places in code causing the problem
+- Line 176: the condition x == int(x) allows -0.0 into the integer branch.
+- Line 177: value = int(x) loses the negative zero sign.
+- Line 192 (or the branch that calls self.add(str(value))): you emit "0" instead of "-0.0".
+- Line 194 (the else branch) would have produced str(x) which does preserve "-0.0", but that branch is not taken because -0.0 enters the integer branch.
+
+Concrete fixes (step-by-step)
+Option A — Handle negative zero first (preferred, minimal change)
+1. Before the integer branch at line 176, add a check for signed zero:
+   - if x == 0.0 and math.copysign(1.0, x) < 0:
+         self.add(str(x))
+         return
+2. This preserves "-0.0" exactly as str(x) would output and keeps the rest of the integer formatting logic unchanged.
+
+Option B — Reject signed-zero from the integer branch
+1. Change the condition on line 176 so the integer branch excludes signed zero:
+   - if x == int(x) and not math.isinf(x) and not math.isnan(x) and not (x == 0.0 and math.copysign(1.0, x) < 0):
+2. Then negative zero will take the else branch and be formatted with str(x), preserving the sign.
+
+Option C — Preserve sign when converting
+1. After value = int(x) (line 177), detect signed zero and format accordingly:
+   - if value == 0 and math.copysign(1.0, x) < 0:
+         self.add(str(x))
+         return
+2. Otherwise continue with the integer formatting.
+
+Which to use
+- Option A or B are simplest and safest. They explicitly preserve -0.0 before you do any integer conversion that loses the sign.
+
+Why these fixes work
+- They check math.copysign(1.0, x) (or similar) to detect negative zero and avoid converting it to integer form that hides the sign. That way you produce "-0.0" when required rather than "0".
+
+No vague suggestions: inspect the top of the function, add the explicit negative-zero check using math.copysign before lines 176–177, or modify the integer-branch condition as shown.

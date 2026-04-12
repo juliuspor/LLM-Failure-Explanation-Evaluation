@@ -1,0 +1,44 @@
+What happened (what you saw)
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15) and expects '-02:15'.
+- The method returned the wrong offset because the minute arithmetic produced -105 minutes (-01:45) instead of -135 minutes (-02:15).
+
+Where it went wrong (exact place in your code)
+- Inside the try block:
+  - Line: hours_in_minutes = hours_offset * 60
+  - Then this branch runs for negative hours:
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+  - That subtracts the negative minutes_offset, turning -120 and -15 into -120 - (-15) = -105.
+  - You then multiply minutes_offset (now -105) by MILLIS_PER_MINUTE and build the zone.
+
+Why that is wrong (root cause)
+- For hours = -2 and minutes = -15 the correct total minutes is:
+  total_minutes = hours * 60 + minutes = -120 + (-15) = -135.
+- Your code uses hours_in_minutes - minutes_offset when hours_in_minutes < 0, which flips the sign of the minute term incorrectly whenever minutes_offset is negative.
+- In short: the sign-handling/combination logic is reversed for the (negative hours, negative minutes) case.
+
+Other issues to note
+- You mutate minutes_offset and then reuse it to build the millis value; that makes the code harder to reason about.
+- The method should also enforce the documented rule that positive hours with negative minutes is invalid; currently there is no explicit check for that.
+
+Concrete fix (step-by-step)
+1. Add a guard to reject the invalid documented combination: if hours_offset > 0 and minutes_offset < 0: raise ValueError(...).
+2. Compute total minutes with a single expression (avoids sign errors):
+     total_minutes = hours_offset * 60 + minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE (use a separate variable instead of reusing minutes_offset).
+4. Keep the existing overflow try/except around the multiplication.
+
+Minimal corrected code fragment (replace the try block and add the guard above it)
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes out of range when hours are positive")
+    try:
+        total_minutes = hours_offset * 60 + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Why this fixes the test
+- For (-2, -15): total_minutes = -120 + (-15) = -135, so offset corresponds to -02:15 as expected.
+- The explicit guard enforces the documented invalid combination (+hours, -minutes).
+
+That pinpoints the exact line causing the wrong result and gives a clear replacement and validation to prevent similar mistakes.

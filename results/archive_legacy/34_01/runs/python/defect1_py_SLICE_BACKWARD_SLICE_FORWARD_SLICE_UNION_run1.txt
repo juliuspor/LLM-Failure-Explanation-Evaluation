@@ -1,0 +1,44 @@
+What happened (where)
+- At lines 396–397 the code checks the minutes component:
+  - if minutes_offset < 0 or minutes_offset > 59:
+    raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later (lines 402 and 404) the same variable minutes_offset is reused to hold a combined total minutes value:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- At line 405 that combined value is multiplied and used as the offset:
+  - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The function then sometimes raises "Offset is too large" at line 407.
+
+Why it fails (root cause)
+- Variable reuse and wrong sign handling. minutes_offset is first validated as the minute-of-hour (0–59). That validation is correct for the component.
+- Immediately afterwards the code reassigns minutes_offset to mean "total minutes" (hours_in_minutes ± minutes_offset). Reusing the same name loses the original minute component and makes the arithmetic confusing and error-prone.
+- Worse, the +/- branches use subtraction in one branch (line 402) which produces a positive total when the sign should produce a negative total. Example: for -2 hours 30 minutes:
+  - hours_in_minutes = 2 * 60 = 120
+  - original minutes_offset = 30 (passed validation)
+  - line 402 computes 120 - 30 = 90 (positive), but the intended total minutes is -150 (i.e. -(120 + 30)). The sign got dropped and the magnitude became wrong.
+- Because the code sometimes computes a wrong total minutes (wrong sign or wrong magnitude), FieldUtils.safe_multiply yields a value that is outside the allowed offset range and the function hits the "Offset is too large" error at line 407 or otherwise behaves incorrectly.
+- In short: the minutes component is validated correctly, but reusing minutes_offset to mean “total minutes” and doing incorrect +/- arithmetic produces wrong offsets.
+
+How to fix it (exact steps)
+1. Stop reusing minutes_offset for two meanings. Introduce a new variable name for the minute component and a clear variable for the total minutes:
+   - rename the original minutes component to minutes_component (or minutes).
+   - compute total_minutes separately.
+2. Compute total_minutes as hours*60 + minutes_component, then apply the sign:
+   - if negative sign: total_minutes = -(hours_in_minutes + minutes_component)
+   - else: total_minutes = hours_in_minutes + minutes_component
+   This ensures correct sign and magnitude.
+3. Replace usages:
+   - multiply offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - keep the existing minutes range check but applied to minutes_component (0–59).
+4. (Optional) Add a clear bounds check for total_minutes before multiplying, if FieldUtils.safe_multiply can overflow.
+
+Concretely, change the code around those lines to something like:
+- before (lines ~396–397):
+  - validate minutes_component (same check you already have)
+- replace lines 402/404 with:
+  - total_minutes = hours_in_minutes + minutes_component
+  - if negative_flag:
+      total_minutes = -total_minutes
+- use total_minutes at line 405 for safe_multiply and bounds checks.
+
+By using distinct variable names and by computing total_minutes as hours+minutes then applying the sign, you eliminate the sign bug and the unintended “Offset is too large” error.

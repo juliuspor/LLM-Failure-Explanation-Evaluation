@@ -1,0 +1,52 @@
+What happened (where it fails)
+- The failure happens at lines 396–397:
+  - Line 396 checks: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397 raises ValueError("Minutes out of range: {minutes_offset}")
+- This check rejects any negative minutes_offset unconditionally.
+
+Why it fails (root cause)
+- The docstring explicitly allows negative minutes when the overall offset is negative (e.g. (-2, -15) → -02:15) and allows negative minutes for the zero-hour case (0, -15 → -00:15).
+- The code at lines 396–397 contradicts that: by forbidding minutes_offset < 0, it disallows valid inputs such as minutes_offset = -15.
+- Example that will incorrectly raise ValueError:
+  - hours_offset = -2, minutes_offset = -15
+  - The code hits line 396, sees minutes_offset < 0, and raises, even though (-2, -15) is permitted per the docstring.
+
+Exactly why this is wrong
+- The current check treats minutes_offset as if it must be non-negative in all cases. The correct rule is more nuanced:
+  - minutes_offset must be between -59 and +59 (inclusive), not strictly non-negative.
+  - minutes sign must be consistent with hours sign when hours are positive (minutes must not be negative when hours > 0).
+  - minutes sign can be negative when hours are zero or negative (per docstring examples).
+
+Concrete fixes (steps to implement)
+1. Change the range check so minutes can be negative up to -59:
+   - Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Enforce the sign rules required by the docstring:
+   - Immediately after validating minute range, add:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Negative minutes not allowed when hours_offset is positive")
+   - (Optionally) If you want to reject mixed-sign input when hours_offset == 0, follow the docstring: zero hours may have negative minutes (0, -15 is allowed), so do not block that.
+3. Ensure the combined offset does not exceed ±23:59:59.000:
+   - Compute total_seconds = hours_offset * 3600 + minutes_offset * 60
+   - If abs(total_seconds) > 23*3600 + 59*60 + 59 (or the intended max in your code), raise ValueError.
+
+Minimal corrected example
+- Replace the two-line block at 396–397 with:
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("Negative minutes not allowed when hours_offset is positive")
+  total_seconds = hours_offset * 3600 + minutes_offset * 60
+  if abs(total_seconds) > 23*3600 + 59*60 + 59:
+      raise ValueError("Resulting offset exceeds +/- 23:59:59.000")
+
+Why this fix resolves it
+- It allows valid negative minute values when permitted by the docstring (e.g. (-2, -15) and (0, -15)).
+- It still prevents invalid combinations (e.g. (2, -15) which the docstring marks as ValueError).
+- It enforces the overall magnitude limit so you don't accidentally create offsets outside ±23:59:59.
+
+If you want, I can produce a ready-to-insert patch showing the exact lines to change in context.

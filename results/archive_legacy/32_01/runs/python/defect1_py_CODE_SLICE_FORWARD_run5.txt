@@ -1,0 +1,41 @@
+What went wrong
+- The code mutates the input parameter minutes_offset and then reuses it to mean “total minutes”, which makes the intent hard to read and invites a sign error.
+- The calculation for total minutes is done differently depending on sign of hours:
+  - if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+  - else: minutes_offset = hours_in_minutes + minutes_offset
+  That is fragile and easy to get wrong (it’s hard to be sure which sign is being applied).
+- If the wrong sign is produced here, offset becomes wrong and you get the wrong millisecond offset (or in other contexts you may observe an exception downstream). The failure occurs in this method for_offset_hours_minutes, specifically in the try block around lines 406–409 where minutes_offset is recomputed and then multiplied:
+  - line 406 (hours_in_minutes - minutes_offset)
+  - line 408 (hours_in_minutes + minutes_offset)
+  - line 409 FieldUtils.safe_multiply(...)
+
+Root cause (concrete and exact)
+- The root cause is unclear code that reassigns minutes_offset and mixes up the sign logic. Reassigning the parameter makes it easy to confuse “the input minutes” with “total minutes”. If you accidentally reverse the sign or apply subtraction when you should add (or vice versa), the produced total minutes will be wrong and the later call at line 409 will produce an incorrect offset (or an overflow / error in FieldUtils.safe_multiply in extreme cases).
+- This happens specifically in for_offset_hours_minutes (the method shown) inside the try block (the lines you highlighted: 406–409).
+
+How to reproduce (quick)
+- Call for_offset_hours_minutes with an hour and minute combination where the intended sign handling matters, e.g. for_offset_hours_minutes(-1, 30). If your code expects -90 minutes but the function produced +30 or +90 because sign was handled incorrectly, you’ve reproduced the bug.
+
+Exact fix (step‑by‑step)
+1. Don’t mutate the input parameter. Use a separate local variable totalMinutes.
+2. Compute totalMinutes in one clear expression that encodes the sign correctly.
+3. Multiply totalMinutes by MILLIS_PER_MINUTE and pass that to for_offset_millis.
+
+Replace the try block with something like:
+- hours_in_minutes = hours_offset * 60
+- if hours_offset < 0:
+    total_minutes = hours_in_minutes - minutes_offset
+  else:
+    total_minutes = hours_in_minutes + minutes_offset
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+(or clearer and less error-prone:)
+- sign = -1 if hours_offset < 0 else 1
+- total_minutes = hours_offset * 60 + sign * minutes_offset
+
+Why this fix addresses the root cause
+- Using total_minutes makes the code’s intent explicit and stops accidental reuse of the input variable.
+- Computing the sign once and applying it to minutes removes ambiguity and reduces the chance of a sign mistake.
+- The multiplication (line 409) then receives a correctly computed totalMinutes, so the offset is correct and any ArithmeticError there truly reflects overflow rather than a logic bug.
+
+If you want, I can produce the exact corrected code for this method (with the minimal changes applied).

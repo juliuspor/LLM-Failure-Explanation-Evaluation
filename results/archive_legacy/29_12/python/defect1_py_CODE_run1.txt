@@ -1,0 +1,71 @@
+What fails
+- The failure is caused in the block that computes the total offset in minutes (lines where hours_in_minutes and minutes_offset are combined).
+- Specifically, the code mutates the input parameter minutes_offset and mixes signs in a way that produces the wrong total minutes for some inputs and makes the method fragile. This leads to incorrect offsets and can trigger the "Offset is too large" error path or produce a wrong result.
+
+Where it happens (by line / method)
+1. In for_offset_hours_minutes (start of method)
+2. At these lines (approximate):
+   - hours_in_minutes = hours_offset * 60
+   - if hours_in_minutes < 0:
+         minutes_offset = hours_in_minutes - minutes_offset
+     else:
+         minutes_offset = hours_in_minutes + minutes_offset
+   - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it is wrong (root cause, plain language)
+- You reuse the parameter minutes_offset to hold the total minutes. That alone is confusing but not fatal.
+- The real logical bug is the wrong sign handling and ambiguous naming. For negative hours you do hours_in_minutes - minutes_offset. That looks correct at first glance, but because minutes_offset was validated only as 0..59, mutating it makes the code harder to reason about and easy to get wrong.
+- As a consequence:
+  - The expression minutes_offset = hours_in_minutes - minutes_offset makes minutes_offset more negative for negative hours, which is intended, but because the same variable name is reused you can accidentally treat the wrong sign later or misunderstand results.
+  - If any overflow or error is raised by FieldUtils.safe_multiply it is caught as ArithmeticError, but depending on the runtime/library the actual exception thrown may be different, so the catch can miss the real error and the code will either crash or produce an unhelpful exception.
+
+What happened in practice (examples)
+- Example 1 (confusing mutation):
+  - Input: hours_offset = -1, minutes_offset = 30
+  - hours_in_minutes = -60
+  - minutes_offset becomes -60 - 30 = -90 (total minutes correct), but you lost the original minute component and the code is hard to follow and easy to get wrong later.
+- Example 2 (real risk with exception handling mismatch):
+  - If FieldUtils.safe_multiply signals overflow with some exception type other than ArithmeticError, the except clause won't catch it — you won't get the intended ValueError("Offset is too large") and the caller will see an unexpected exception type and stack trace.
+
+Concrete, actionable fixes (step-by-step)
+1. Stop mutating the input parameter. Compute a new local variable total_minutes so intent is explicit.
+   - Replace:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           minutes_offset = hours_in_minutes - minutes_offset
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+     with:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           total_minutes = hours_in_minutes - minutes_offset
+       else:
+           total_minutes = hours_in_minutes + minutes_offset
+
+2. Use a clear name total_minutes and then multiply that:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+3. Make the exception handling explicit for the library you call:
+   - Check what FieldUtils.safe_multiply throws in your environment (e.g., ArithmeticException in Java, OverflowError or ValueError in Python). Catch that specific exception and translate it to your ValueError("Offset is too large").
+   - Example (pseudo-Java):
+       try {
+           offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE);
+       } catch (ArithmeticException ex) {
+           throw new IllegalArgumentException("Offset is too large", ex);
+       }
+
+4. Add unit tests for boundary cases:
+   - (-23, 59) -> total minutes = -1439
+   - (23, 59)  -> total minutes = 1439
+   - (-1, 30), (1, 30), (0, 30), (0, 0)
+
+Why these fixes solve it
+- Using total_minutes prevents accidental reuse/misinterpretation of input values and makes the sign math explicit.
+- Catching the precise exception returned by FieldUtils.safe_multiply guarantees you translate overflow into the intended ValueError instead of letting a different exception blow up the caller.
+- Tests ensure the sign handling and edge values are correct.
+
+References to the exact methods/lines to change
+- for_offset_hours_minutes: replace the block that mutates minutes_offset (the lines with hours_in_minutes and the if/else) with a total_minutes computation.
+- Replace the try/catch to catch the exact exception type that FieldUtils.safe_multiply throws in your runtime.
+
+If you want, I can produce the corrected code snippet for your language (Java or Python) and show unit tests that cover the edge cases.

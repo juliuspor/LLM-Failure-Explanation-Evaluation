@@ -1,0 +1,57 @@
+What happened (where it fails)
+- The code at lines 402–405 reuses minutes_offset to compute the final offset minutes:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+  - line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because the code sometimes subtracts the raw minutes_offset and sometimes adds the raw minutes_offset, it mishandles the sign when minutes_offset itself is negative. That produces an incorrect total minutes value (wrong sign and magnitude) and later causes the "Offset is too large" validation to fail and raise ValueError.
+
+Concrete example (shows the root cause)
+- Input: hours_offset = -2, minutes_offset = -15
+  - hours_in_minutes = -120
+  - With the current code path that does line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - That computes -120 - (-15) = -105 (i.e. -1:45) but the correct result is -135 (i.e. -2:15).
+- The subtraction of a negative minutes_offset flipped the intended sign, producing the wrong offset and later failing validation.
+
+Why this is wrong (short, specific)
+- The intent from the docstring/table is:
+  - For positive hours: minutes must be >= 0 and total_minutes = hours*60 + minutes
+  - For negative hours: minutes can be positive or negative but both should contribute the same (negative) sign to the total, i.e. total_minutes = hours*60 - abs(minutes)
+  - For zero hours: total_minutes = minutes (signed)
+- The code subtracts or adds the raw minutes_offset value instead of applying abs() where appropriate and preserving the intended sign rules. Reusing minutes_offset for the final computed total makes the logic error-prone.
+
+Exactly where to change it and how to fix it
+1. Do not overwrite minutes_offset with the final total. Introduce a new variable total_minutes (or use hours_in_minutes_name + computed_minutes).
+2. Use explicit sign rules from the docstring:
+   - if hours_offset > 0:
+       - require minutes_offset >= 0 (else raise ValueError)
+       - total_minutes = hours_in_minutes + minutes_offset
+   - elif hours_offset < 0:
+       - total_minutes = hours_in_minutes - abs(minutes_offset)   # both (-2,15) and (-2,-15) -> -135
+   - else:  # hours == 0
+       - total_minutes = minutes_offset
+3. Convert to millis using total_minutes, not the reused minutes_offset:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Minimal corrected code sketch (replace lines 402–405)
+- compute hours_in_minutes = hours_offset * 60 earlier (already present)
+- then:
+
+  if hours_offset > 0:
+      if minutes_offset < 0:
+          raise ValueError("minutes must be non-negative when hours is positive")
+      total_minutes = hours_in_minutes + minutes_offset
+  elif hours_offset < 0:
+      total_minutes = hours_in_minutes - abs(minutes_offset)
+  else:  # hours_offset == 0
+      total_minutes = minutes_offset
+
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix works
+- It implements the sign rules spelled out in the docstring exactly.
+- It avoids subtracting a negative minutes_offset (the original bug) by using abs() and a dedicated total_minutes variable.
+- It prevents the wrong sign/magnitude that caused the "Offset is too large" ValueError.
+
+References to the original lines
+- Buggy lines: 402 (minutes_offset = hours_in_minutes - minutes_offset), 404 (minutes_offset = hours_in_minutes + minutes_offset), 405 (offset = FieldUtils.safe_multiply(...))
+- Fix: replace those three lines with the explicit branching above that sets total_minutes and then computes offset.

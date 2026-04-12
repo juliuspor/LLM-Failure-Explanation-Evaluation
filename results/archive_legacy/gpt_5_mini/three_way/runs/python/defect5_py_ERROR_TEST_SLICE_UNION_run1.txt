@@ -1,0 +1,45 @@
+What happened (root cause)
+- At lines 335–347 you try to infer the element type using these variables: array, element, inferred_type, expected_type.
+- The code currently does:
+  - if array is not None: inferred_type = type(array)  (line 336)
+  - elif element is not None: inferred_type = type(element) (line 337)
+  - else inferred_type = object (line 340)
+  - then if inferred_type == object and expected_type != object: raise TypeError (line 346–347)
+
+Why that is wrong / where it fails
+1. type(array) is the Python list type, not the element type. At line 336 you set inferred_type to type(array) (e.g. list), not the type of the items inside the array. That is the wrong thing to infer and later logic assumes inferred_type is the element type.
+2. When both array and element are None (the failing test: ArrayUtils.add(None, None, expected_type=str)), inferred_type becomes object (line 340), then the code raises a TypeError at lines 346–347 because inferred_type == object and expected_type != object. That produces the reported error path (the code does not honor expected_type properly).
+3. In environments that enforce array element types (the Java situation referenced by the ClassCastException), the function then returns a generic object[] (or Python list of generic objects) instead of a String[] (or a list with the declared element type). The caller expects String[] and the runtime tries to cast Object[] to String[] and fails with ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;. The immediate mistake is the wrong inference and not using expected_type to construct/convert the result.
+
+Exactly where to change (concrete steps)
+1. Infer element type from the array contents, not from type(array). Replace line 336 with:
+   - if array is not None:
+       - if len(array) > 0:
+           inferred_type = type(array[0])
+       - else:
+           inferred_type = object
+   This makes inferred_type the element type when array has elements.
+
+2. Respect expected_type earlier and prefer it when provided. For example:
+   - if expected_type is not None:
+       inferred_type = expected_type
+     elif array is not None:
+       ... (use element type if possible)
+     elif element is not None:
+       inferred_type = type(element)
+     else:
+       inferred_type = object
+
+   This ensures ArrayUtils.add(None, None, expected_type=str) uses str as the element type instead of falling through to object and raising an error.
+
+3. Do not use the test inferred_type == object to raise TypeError when expected_type is supplied; instead use expected_type to create/convert the returned array. If you must raise when you truly cannot infer and no expected_type was provided, raise a clear error at that point.
+
+Extra notes about typed-array environments (why the Java ClassCastException showed up)
+- The code returns a list/array whose runtime element type is generic/object because it never used expected_type when both array and element were None.
+- The caller (Java code or an interop layer) tried to cast that generic array to String[] and failed: you cannot cast Object[] to String[] in Java, hence the ClassCastException shown in the test error.
+
+Summary (what to do)
+- Change inference to look at array contents (type(array[0])) instead of type(array).
+- Prefer expected_type if it was passed in and use it to construct/convert the result.
+- Only raise a TypeError if you truly cannot determine any type (no array, no element, and no expected_type).
+These three changes will prevent returning an object-typed array when the caller expects a specific element type and will stop the ClassCastException.

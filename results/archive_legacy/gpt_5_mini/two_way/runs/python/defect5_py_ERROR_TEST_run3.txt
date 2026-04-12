@@ -1,0 +1,65 @@
+What happened (what failed)
+- The test that fails is test_add_null_to_null_with_expected_type(), which calls:
+  ArrayUtils.add(None, None, expected_type=str)
+- The code inside ArrayUtils.add created a new array of java.lang.Object (Object[]) when both the input array and the element were None. Later the caller — or the runtime expecting a String[] because expected_type=str — tried to cast that Object[] to a String[], and Java threw:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+  This surfaced in Python as TypeError: Cannot cast object list to str list.
+
+Where it happened (which method / condition)
+- The root occurs inside ArrayUtils.add when these conditions are true:
+  - arr is None
+  - elem is None
+  - expected_type was supplied (expected_type=str)
+- Under those conditions the implementation falls back to creating an Object[] (or returns a plain Python list whose elements are treated as Object[] on the Java side) rather than creating a String[] (or a java array with component type given by expected_type).
+- So the mismatch occurs when the returned array has component type Object but the caller (or later code) expects component type String.
+
+Why it happened (root cause)
+- The code that decides the array component type infers type from the existing array (arr) or from the element (elem). That logic looks like:
+  - if arr is not None: use arr's component type
+  - elif elem is not None: use type(elem)
+  - else: default to Object
+- When both arr and elem are None, that code never uses the supplied expected_type parameter (expected_type=str). As a result, it creates an Object-typed array which cannot be cast to String[] later. In Java terms: new Object[1] cannot be cast to String[].
+
+Exact place to change (what to edit)
+- In ArrayUtils.add(), at the branch where arr is None and elem is None (or wherever you compute the componentType), you must check expected_type before defaulting to Object. Concretely:
+  - After checking arr and elem, add:
+    if expected_type is not None:
+        component_type = expected_type
+    else:
+        component_type = object  # or java.lang.Object for Java interop
+- Then use component_type to construct the new array.
+
+Concrete fix steps
+1. Locate ArrayUtils.add implementation and the block that picks the array element/component type. It will be the code path taken when arr is None (or empty) and elem is None.
+2. Replace the defaulting-to-Object behavior with a check for expected_type:
+   - If expected_type is provided, use that to create the new array.
+   - If expected_type is not provided, then fall back to Object.
+3. If this code creates Java arrays (Array.newInstance, etc.), create the Java array with Array.newInstance(expected_type, newLength) so the component type is correct at the JVM level. Example (Java interop pseudocode):
+   - if expected_type is not None:
+         javaComponentClass = map_python_type_to_java_class(expected_type)
+         newArray = java.lang.reflect.Array.newInstance(javaComponentClass, size)
+     else:
+         newArray = java.lang.reflect.Array.newInstance(java.lang.Object, size)
+4. If this is pure-Python (no Java arrays), returning [None] is fine, but because your environment expects typed arrays (ClassCastException shows JVM involvement), you must create a JVM array with the correct component type.
+
+Why this exact change fixes the failure
+- Creating the array with component type equal to expected_type ensures the returned array is a String[] (or the equivalent JVM array type), so no cast from Object[] to String[] will be attempted and no ClassCastException will occur.
+
+Example spot to edit in code (pseudo)
+- Current (problematic) flow:
+    if arr is None:
+        if elem is None:
+            # currently: create Object[] or default Python list
+- Change to:
+    if arr is None:
+        if elem is None:
+            if expected_type is not None:
+                # create array whose component type is expected_type (String)
+            else:
+                # create Object[] as fallback
+
+Points to verify after fix
+- Run test_add_null_to_null_with_expected_type — it should now return a one-element String[] / list [None] without ClassCastException.
+- Also re-run other tests to ensure creating typed arrays doesn’t break adding non-null elements or mixed types.
+
+If you paste the current ArrayUtils.add source, I can show an exact patch (with the precise lines/expressions to change).

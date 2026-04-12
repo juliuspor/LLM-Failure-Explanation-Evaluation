@@ -1,0 +1,44 @@
+What happened (where it fails)
+- The code rejects any negative minutes at lines 396–397:
+  ```
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+  ```
+- That unconditional check causes a ValueError for valid inputs that the docstring explicitly allows, for example (hours_offset = 0, minutes_offset = -15) or (hours_offset = -2, minutes_offset = -15).
+- Later code (lines shown below) expects negative minute values to be allowed in certain sign combinations and performs arithmetic with a possibly-negative minutes_offset:
+  ```
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+  404 |                 minutes_offset = hours_in_minutes + minutes_offset
+  405 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  ```
+  But the code never reaches those lines for negative minutes because the earlier check already raised.
+
+Why that is the root cause
+- The docstring permits negative minutes when hours are zero or negative:
+  - (0, -15) should produce -00:15
+  - (-2, -15) should produce -02:15
+- The check at 396–397 treats any negative minutes as out of range, which contradicts the documented allowed sign combinations.
+- Because the guard is too strict, callers that follow the documented API get a ValueError immediately instead of the intended conversion logic at lines 402–405.
+
+Concrete fix (exact steps)
+1. Replace the unconditional negative-minute check with range and sign-aware checks. Example code to use instead of lines 396–397:
+   ```
+   # allow minutes in -59..+59, but do not allow negative minutes with positive hours
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError(f"Positive hours with negative minutes not allowed: hours={hours_offset}, minutes={minutes_offset}")
+   ```
+2. Keep the downstream arithmetic at lines 402/404 as-is; it will then receive the correctly signed minutes_offset values that the code expects.
+3. Add unit tests for the edge cases the docstring lists:
+   - (2, -15) -> should raise ValueError (positive hours with negative minutes)
+   - (0, -15) -> should yield -00:15
+   - (-2, -15) -> should yield -02:15
+   - boundary values: (23, 59), (-23, -59), and out-of-range minutes like 60 or -60
+
+Why this will fix it
+- The first change enforces the documented absolute range for minutes (-59..+59) while the second enforces the documented sign rule (minutes negative only when hours are zero or negative).
+- That allows the later code at lines 402/404 to perform the intended computations and produce the correct offset without premature ValueError.
+
+Where to change
+- Edit the validation block starting at line 396 and replace it with the two checks above. No other code paths need changes if the later arithmetic is correct and there are proper overflow checks (the code already has an "Offset is too large" raise at line 407).

@@ -1,0 +1,55 @@
+What happened
+- At lines 346–351 the code raises a TypeError when inferred_type == object but expected_type != object:
+  - 346: if inferred_type == object and expected_type != object:
+  - 347–351: raise TypeError("Cannot cast object list to {expected_type} list ...")
+
+Why this is wrong (root cause)
+- inferred_type becomes object in the common case where there is no concrete element type to infer. That happens for at least two scenarios:
+  1. The input list (array) is None and the new element is None. According to the docstring the function should return a one-element List[object] in that case — not throw.
+  2. The input list exists but all elements (and the new element) are None, so there is nothing to infer beyond object.
+- The current code treats "inferred_type == object" as an error any time expected_type is more specific. But object here is the absence of a concrete element type, not a real incompatible element type. Raising a cast error in that situation is incorrect: there is nothing concrete to cast, only an unknown / None element. The code therefore throws a TypeError at lines 346–351 even though the correct behaviour (per the docstring) would be to accept None as compatible with any expected_type or to return a List[object] when the element is None and no array type exists.
+
+Where it occurs
+- The exception is raised at lines 346–351, i.e. inside the block:
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+
+- The variables involved are inferred_type (the type the function inferred from array/element) and expected_type (the caller-provided expected element type). The function incorrectly uses inferred_type == object as evidence of an incompatible list instead of as "no information".
+
+How to fix it (concrete steps)
+1. Decide the correct policy for None elements:
+   - If element is None and array is None: return List[object] (per docstring) — do not raise.
+   - If element is None but an array with a concrete element type exists: None should be treated as compatible with that element type (no error).
+   - Only raise if there is a concrete type mismatch between inferred_type (derived from non-None elements) and expected_type.
+
+2. Implement a corrected condition. Replace the current check with one that only raises when there is a concrete mismatch, not when inferred_type is object due to lack of information. Example replacement logic (pseudo/actual code you can drop in):
+
+    # current variables: inferred_type, expected_type, array, element
+    # treat "object" as "no concrete type inferred" only if it came from all-None situation
+    has_concrete_inference = inferred_type is not object and inferred_type is not None
+
+    if has_concrete_inference and expected_type is not None and inferred_type != expected_type:
+        raise TypeError(
+            f"Cannot cast {inferred_type.__name__} list to {expected_type.__name__} list "
+            f"(ClassCastException: [Ljava.lang.{inferred_type.__name__}; cannot be cast to "
+            f"[Ljava.lang.{expected_type.__name__};)"
+        )
+
+    # separately: if inferred_type == object and element is None and array is None:
+    #   return [None] typed as List[object] (no exception)
+
+3. Simpler change if you prefer minimal edit:
+   - Change the raising condition to require that the object inference came from an actual concrete element:
+     if inferred_type == object and expected_type != object and (array is not None and any(el is not None for el in array) or element is not None):
+         raise TypeError(...)
+
+   That ensures you only raise when there actually exists some non-None element that forced inferred_type==object while expected_type differs.
+
+4. Add unit tests for the three cases:
+   - array=None, element=None, expected_type=None or expected_type=object -> should return [None] of type List[object]
+   - array=None, element=None, expected_type=SomeClass -> should either return [None] (compatible) or raise depending on intended policy; per your docstring it should return List[object], so do not raise
+   - array=[SomeClass(...)], element=None, expected_type=SomeClass -> should succeed
+   - array=[SomeClass(...)], element=None, expected_type=OtherClass -> should raise
+
+Summary
+- The code treats inferred_type == object as a hard incompatibility with expected_type, but inferred_type == object often means "no concrete type could be inferred" (for example because the element is None). Change the condition so the TypeError is raised only when there is an actual concrete type mismatch (a real inferred type that differs from expected_type), and allow object/no-type-inference cases to proceed per the docstring. This resolves the runtime TypeError thrown at lines 346–351.

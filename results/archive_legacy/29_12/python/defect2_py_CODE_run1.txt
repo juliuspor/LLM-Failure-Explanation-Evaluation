@@ -1,0 +1,48 @@
+What happened (root cause)
+- In get_paint you correctly clamp the input to v on lines 2–4:
+  v = max(value, self._lower_bound)
+  v = min(v, self._upper_bound)
+- But on the next line you compute g using the original value instead of the clamped v:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- If value is outside the [lower_bound, upper_bound] range, that computation can produce a number < 0 or > 255. The subsequent check
+  if g < 0 or g > 255:
+    raise ValueError(...)
+  then raises ValueError. So the code fails because the clamped value v is not actually used when computing g.
+
+Where it occurs
+- The bug is at the line that computes g (the third code line shown). The ValueError is raised immediately after that line if g is out of range.
+
+Why it happens (concrete example)
+- Suppose lower_bound = 0.0, upper_bound = 1.0 and value = 1.5.
+  - After clamping, v becomes 1.0.
+  - But the g computation uses value = 1.5, so g = int((1.5 - 0.0) / (1.0 - 0.0) * 255.0) = int(382.5) = 382.
+  - The range check sees 382 > 255 and raises ValueError even though clamped v would have produced 255.
+
+Also note a second possible failure
+- If self._upper_bound == self._lower_bound the divisor (self._upper_bound - self._lower_bound) becomes zero and you get a ZeroDivisionError on the g computation.
+
+Exact fixes (step-by-step)
+1. Use the clamped value v when computing g:
+   g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+2. Prevent division by zero by handling the equal-bounds case before the computation:
+   - If upper == lower, decide a sensible result (e.g., return (0,0,0) or (255,255,255) or a middle gray).
+3. Ensure g is safely constrained to [0,255] (use min/max or clamp after rounding) to avoid surprising off-by-one or float rounding behaviors.
+
+Corrected code example
+    def get_paint(self, value: float) -> Tuple[int, int, int]:
+        # Clamp value to bounds
+        v = max(value, self._lower_bound)
+        v = min(v, self._upper_bound)
+
+        # Guard against zero range
+        span = self._upper_bound - self._lower_bound
+        if span == 0.0:
+            return (0, 0, 0)  # or another defined behavior
+
+        # Use the clamped value v, compute and clamp to [0,255]
+        g = int(round((v - self._lower_bound) / span * 255.0))
+        g = max(0, min(255, g))
+
+        return (g, g, g)
+
+That fixes the root cause (use of the unclamped value) and prevents division-by-zero and out-of-range integers.

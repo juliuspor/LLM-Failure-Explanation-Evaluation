@@ -1,0 +1,60 @@
+What went wrong (root cause)
+- At line
+  if array is not None:
+      inferred_type = type(array)
+  you set inferred_type to type(array), i.e. the runtime class of the list object itself (usually list), not the class of the items that are supposed to be stored in the list.
+- The rest of the logic assumes inferred_type is the element type (it is later compared to expected_type and passed to ArrayUtils._copy_list_grow1), so using type(array) makes those checks and the new-list creation wrong.
+- Concrete example where this breaks:
+  - Suppose array is a list of strings: array = ["a", "b"]. type(array) is list, not str. inferred_type becomes list.
+  - If expected_type is str, the check if inferred_type == object and expected_type != object will not detect the mismatch, and any code in _copy_list_grow1 that expects an element type will get a wrong type argument (list instead of str).
+- Where it occurs:
+  - Wrong assignment happens at the first branch (if array is not None) — that is the precise location that causes the subsequent failures (new_list creation and the expected_type check are the symptom, not the root).
+- Additional related problems:
+  - If array is non-empty but you do not inspect array contents, you miss the actual element type.
+  - If array is empty, you need a clear policy: there is no element type to infer from array; falling back to object may be correct but must be explicit.
+
+Why this produces errors instead of working
+- The function likely relies on passing an element-type to ArrayUtils._copy_list_grow1 and on comparing that element-type to expected_type. Passing the list class (type(array)) causes mismatches or invalid casts inside that helper (or later uses) leading to runtime errors or incorrect behavior.
+- The expected_type check (if inferred_type == object and expected_type != object) is also invalid because inferred_type will almost never equal object (it will be list), so incorrect casts go unnoticed.
+
+How to fix it (concrete steps and exact edits)
+1. Infer the element type from the array contents, not from the list object:
+   - Replace
+       if array is not None:
+           inferred_type = type(array)
+     with
+       if array is not None and len(array) > 0:
+           inferred_type = type(array[0])
+2. Keep the existing fallback to the element's type when array is None (this line is fine):
+       elif element is not None:
+           inferred_type = type(element)
+3. Decide and document behavior for empty array:
+   - If array is empty and element is not None, use type(element):
+       elif array is not None and len(array) == 0 and element is not None:
+           inferred_type = type(element)
+   - If both array is empty/None and element is None, keep inferred_type = object (this is already present).
+4. Improve the expected_type check to compare types meaningfully:
+   - If expected_type is provided, check compatibility with inferred_type. For class objects use issubclass for classes:
+       if expected_type is not None:
+           # if inferred_type is object we may want to reject narrowing to expected_type
+           if inferred_type is object and expected_type is not object:
+               raise TypeError(...)
+           # or more generally:
+           if not issubclass(inferred_type, expected_type) and inferred_type is not object:
+               raise TypeError(...)
+   - Note: use issubclass(inferred_type, expected_type) only when inferred_type and expected_type are class types (not builtin primitives vs wrappers).
+5. Verify _copy_list_grow1 usage:
+   - Ensure ArrayUtils._copy_list_grow1 expects an element class, not the container class. Pass inferred_type (as corrected) or change the helper to accept a different kind of descriptor.
+
+Minimal corrected code sketch (replace the inference block):
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Why this resolves the failure
+- inferred_type will now reflect the element class (e.g. str), so ArrayUtils._copy_list_grow1 receives the correct type and the expected_type comparisons become meaningful. The mismatch that came from using type(array) (the list class) is removed.
+
+If you want, tell me what ArrayUtils._copy_list_grow1 expects (element-type or container-type) and whether you need strict type-checking for heterogeneous arrays; I can produce a drop-in patch for the rest of the function.

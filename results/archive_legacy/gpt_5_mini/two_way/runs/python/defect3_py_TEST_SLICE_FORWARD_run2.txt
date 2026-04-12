@@ -1,0 +1,49 @@
+What happened (what failed)
+- The translator crashes (IndexError or wrong output) when it sees a UTF-16 surrogate pair (an emoji) followed by another character. The problem is in how the code handles advancing the index after recognizing a surrogate pair.
+
+Where it happens (lines, variables, methods)
+- The shown code is from code_point_at (slice lines 38–44):
+  - line 38: high = code_units[index]
+  - line 39: if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+  - line 40: low = code_units[index + 1]
+  - line 41: if 0xDC00 <= low <= 0xDFFF:
+  - line 43: return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  - line 44: return high
+- The translator method that drives the loop is CsvEscaper.translate_string (or CharSequenceTranslator.translate). That loop calls code_point_at (or to_utf16_code_units) to get a code point from the UTF-16 code units array, then advances an index variable through the code_units array.
+
+Why it fails (root cause, in plain terms)
+- code_point_at combines a high+low surrogate and returns the full Unicode code point (a value >= 0x10000) when it finds a valid pair (lines 39–43).
+- But the calling translate loop keeps advancing index by 1 unconditionally (it treats every item as a single UTF-16 code unit). When code_point_at consumed two UTF-16 code units (high + low), the loop still moves index forward by only 1. That leaves the loop pointing at the low surrogate on the next iteration.
+- The loop then attempts to interpret that low surrogate as if it were a high surrogate or a standalone code unit. This can cause:
+  - Re-processing the low surrogate incorrectly; or
+  - If the low surrogate was the last code unit and the caller later does index + 1 access, an IndexError because the loop logic and bounds checks no longer match the unit consumption.
+- In short: code_point_at returns a code point that used two code units, but the caller thinks it consumed only one. The index advances incorrectly.
+
+Concrete reproduction in your tests
+- test_translate_surrogate_pair_with_suffix uses input_str = "\U0001F630A" (emoji then 'A'):
+  - code_point_at at index 0 returns the emoji code point (consumed 2 UTF-16 code units),
+  - caller advances index by 1 (wrong),
+  - next iteration index points to the low surrogate; the translator misreads it and either errors or mangles the output.
+
+Specific fixes you can apply (exact steps)
+1. Make the caller advance by the correct number of UTF-16 code units:
+   - After calling code_point_at (or a function that returns the code point), check whether the returned code point is >= 0x10000. If so, increment index by 2; otherwise increment by 1.
+   - Example change in the translate loop (pseudocode):
+     - cp = code_point_at(code_units, index)
+     - if cp >= 0x10000:
+         index += 2
+       else:
+         index += 1
+2. Or change code_point_at to report how many code units it consumed:
+   - Return a tuple (code_point, units_consumed) where units_consumed is 1 or 2. Then the caller does index += units_consumed.
+3. Or convert to iterating by Python code points (not UTF-16 code units) so loop logic cannot confuse surrogates — but that is a larger refactor.
+
+Which variables/methods to change
+- Update CsvEscaper.translate_string (or CharSequenceTranslator.translate) — the loop that advances index.
+- Optionally update code_point_at to return units consumed (change signature and callers accordingly).
+- Refer to lines 38–44 as the code that detects and returns a two-unit code point; ensure the caller knows that detection consumed two units.
+
+Why these fixes are correct
+- The bug is purely a mismatch between consumption (2 units) and index advancement (1 unit). Making the index move by the actual number of UTF-16 code units consumed removes the double-processing of low surrogates and prevents out-of-range accesses.
+
+Let me know which file you want me to edit (translate loop or code_point_at) and I can give a concrete patch.

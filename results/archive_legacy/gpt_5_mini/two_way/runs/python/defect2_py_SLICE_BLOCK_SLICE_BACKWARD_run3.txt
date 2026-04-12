@@ -1,0 +1,43 @@
+What happened (where it failed)
+- Failure happens inside ColorMap.get_paint at line 71–75.
+- Line 71 computes g:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Line 74 then checks g and raises the ValueError if g is outside 0..255:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+
+Why it failed (root cause)
+- The code assumes value lies within the configured bounds (self._lower_bound .. self._upper_bound). If the caller passes a value < self._lower_bound or > self._upper_bound, the formula on line 71 produces a g outside 0..255, so the test at line 74 is true and the ValueError is raised.
+- The error message ("Color parameter outside of expected range: Red Green Blue") is unhelpful: it doesn't say which channel or what value/bounds caused the failure. That makes debugging hard.
+- (Related potential bug) If self._upper_bound == self._lower_bound the division on line 71 will raise ZeroDivisionError before the g-range check; that is a separate failure condition to guard against.
+
+Exactly what to change (step-by-step fixes)
+1) Validate the input value explicitly at the start of get_paint (clear error message):
+   - Add a check after line 54 (start of get_paint):
+     if value < self._lower_bound or value > self._upper_bound:
+         raise ValueError(f"value {value} is outside configured bounds [{self._lower_bound}, {self._upper_bound}]")
+   This makes the failure explicit and prints the offending value and bounds.
+
+2) Protect against a zero span (upper == lower):
+   - At object construction or in get_paint, check:
+     if self._upper_bound == self._lower_bound:
+         raise ValueError(f"upper_bound ({self._upper_bound}) equals lower_bound ({self._lower_bound}); cannot normalize value")
+   If you expect equal bounds to be allowed you must handle that case differently (see step 3).
+
+3) Or: instead of raising, clamp the normalized channel values if you want robustness:
+   - Replace the range check at lines 71–75 by clamping:
+     normalized = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+     normalized = max(0.0, min(1.0, normalized))
+     g = int(normalized * 255.0)
+   This prevents the ValueError by mapping out-of-range inputs to the nearest endpoint color.
+
+4) Improve the error message at line 75 if you keep the ValueError:
+   - Use a message that includes the variable and numeric values:
+     raise ValueError(f"Computed green channel g={g} out of range 0..255 for value={value}, bounds=[{self._lower_bound},{self._upper_bound}]")
+
+Which change to pick
+- If out-of-range values are programmer errors, follow step 1 + step 2 (explicit checks and clear errors).
+- If out-of-range values can occur in normal use and you want graceful handling, follow step 3 (clamping).
+
+Summary in one sentence
+The ValueError at line 74 is raised because get_paint computed g outside 0..255 when value is outside the configured bounds (or because upper_bound equals lower_bound causes a different error); fix by validating inputs and bounds up-front, improving the error message, or clamping the normalized value before converting to 0–255.

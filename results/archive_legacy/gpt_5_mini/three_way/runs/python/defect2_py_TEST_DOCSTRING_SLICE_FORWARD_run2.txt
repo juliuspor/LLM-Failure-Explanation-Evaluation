@@ -1,0 +1,55 @@
+What happened (root cause)
+- The test failure is coming from GrayPaintScale.get_paint(value).
+- Inside get_paint the code checks the computed RGB components and raises ValueError when the computed gray falls outside 0–255. That check runs before any clamping and causes an exception for inputs outside the configured bounds (for example value = -0.5 or 1.5).
+- In other words, the implementation enforces that a raw input produce an RGB in range instead of first clamping the input to the [lower_bound, upper_bound] interval. Tests expect clamping, not an exception.
+
+Where it occurs (what to look for)
+- Look in hit02_grayscale.py in the GrayPaintScale.get_paint method.
+- Find the lines that compute the interpolation (something like fraction = (value - lower) / (upper - lower) and gray = int(fraction * 255)) and the lines that validate/raise ValueError when gray < 0 or gray > 255.
+- The failure happens for values outside the configured bounds (e.g. value = -0.5 or 1.5) because the code computes a gray outside 0–255 and then raises ValueError instead of clamping value to the bounds.
+
+Why that is wrong
+- The test suite (and the original Java behavior you’re emulating) expect the value to be clamped into the allowed domain before converting to RGB:
+  - values < lower_bound → treat as lower_bound (black)
+  - values > upper_bound → treat as upper_bound (white)
+- Raising ValueError for out-of-range inputs contradicts that expected behavior and thus causes the failing tests.
+
+Exact fixes (step-by-step)
+1. In GrayPaintScale.get_paint(value) clamp the incoming value to the instance bounds before computing the fraction:
+   - Use: value = max(self.lower_bound, min(value, self.upper_bound))
+   - This guarantees the fraction will be within 0.0–1.0.
+2. Compute the fraction and gray after clamping:
+   - fraction = (value - self.lower_bound) / (self.upper_bound - self.lower_bound)
+   - gray = int(fraction * 255)  # truncation matches test expectation (127.5 -> 127)
+3. Remove the ValueError raised for computed gray outside 0–255, because clamping prevents that case. If you keep a defensive check, do it after clamping and either correct the value or assert; but do not raise for normal out-of-range inputs.
+4. Update the docstring: remove or change the "Raises: ValueError: If value produces RGB outside 0-255 range" clause, since the method clamps rather than raising.
+
+Minimal example patch (replace the body of get_paint)
+- Suppose current code looks like (pseudocode):
+  def get_paint(self, value):
+      fraction = (value - self.lower_bound) / (self.upper_bound - self.lower_bound)
+      gray = int(fraction * 255)
+      if gray < 0 or gray > 255:
+          raise ValueError("RGB out of range")
+      return (gray, gray, gray)
+- Replace with:
+  def get_paint(self, value):
+      # clamp input to bounds
+      value = max(self.lower_bound, min(value, self.upper_bound))
+      # compute interpolation after clamping
+      fraction = (value - self.lower_bound) / (self.upper_bound - self.lower_bound)
+      gray = int(fraction * 255)
+      return (gray, gray, gray)
+
+Why this will fix the failing tests
+- For value = -0.5 and default bounds (0.0, 1.0): value is clamped to 0.0 → fraction 0.0 → gray 0 → (0, 0, 0).
+- For value = 1.5: value clamped to 1.0 → fraction 1.0 → gray 255 → (255, 255, 255).
+- For value = 0.5: fraction = 0.5 → fraction * 255 = 127.5 → int → 127 → (127,127,127), matching tests.
+- For custom bounds (10.0, 20.0) the same clamp + interpolation gives expected results.
+
+Notes and small considerations
+- If you prefer rounding to nearest instead of truncation, use round(fraction * 255) — tests expect truncation to 127 for 127.5, so keep int() or math.floor to match current tests.
+- Make sure self.lower_bound and self.upper_bound are set correctly (and not equal) so division is safe.
+- Update the method docstring to reflect clamping behavior.
+
+If you share the exact get_paint implementation I can give a one-line diff with exact line numbers; based on the tests the fix is the clamp-before-compute change shown above.

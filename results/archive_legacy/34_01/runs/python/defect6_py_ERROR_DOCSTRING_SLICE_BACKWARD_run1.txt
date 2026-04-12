@@ -1,0 +1,45 @@
+What happened (where)
+- The failing assertion arises when add(self, newcode) at line 126 calls self.append(newcode) at line 138.
+- The test expected the stored value to be the negative-zero float -0.0, but the value actually stored/reported was 0 (an unsigned zero / integer-like zero).
+- That means append(...) or some conversion inside append has removed the negative sign / converted -0.0 into plain 0 before the value was checked.
+
+Why it failed (root cause)
+- In Python the float -0.0 is a distinct bit pattern from +0.0 even though -0.0 == 0.0 compares as equal. Converting a float to an integer (int(-0.0)) or forcing it through some integer path will produce 0 and lose the negative-zero sign bit.
+- Your append implementation is coercing newcode in a way that strips the negative sign bit. Typical culprits:
+  - int(newcode) or an integer cast
+  - using integer arithmetic or an API that only stores ints
+  - serializing/deserializing through a type that normalizes zero to positive zero
+- Because add(newcode) simply forwards newcode to append(newcode) (line 126 → line 138), the negative-zero value provided by the caller never survives whatever conversion append does.
+
+How to confirm quickly
+1. Call add(-0.0) and trace/print the value inside append:
+   - Add a temporary print at the start of append:
+     print("append received:", newcode, type(newcode), repr(newcode))
+   - If you see repr(newcode) show '-0.0' at entry, but stored value becomes '0' later, the conversion happens inside append.
+2. Search the append implementation for int(...), round(..., 0), or any cast/serialization that would reduce a float to an int.
+
+Concrete fixes (pick the one appropriate to your intent)
+1. If you must preserve negative zero as a float:
+   - Remove the integer cast or conversion in append. Store the value without coercion.
+   - Example change inside append (at/near line 138):
+     - Replace: stored = int(newcode)   # losing negative sign
+     - With:    stored = float(newcode) # preserves -0.0
+   - Or explicitly preserve sign: stored = math.copysign(0.0, newcode) if you need a canonical negative zero when newcode is zero-like.
+2. If append must normalize to numeric zero but tests expect -0.0, change the test or the contract:
+   - Either update the test to accept 0 and -0.0 as equivalent, or change the function contract/documentation to say zeros are normalized to +0.0.
+3. If you need to store the sign bit separately (e.g., for serialization):
+   - Store floats as floats (no int cast). If your storage format cannot represent signed zero, store a flag: (value, is_negative_zero) where is_negative_zero = (value == 0.0 and math.copysign(1.0, value) < 0).
+
+Exact minimal code examples
+- To create/preserve negative zero:
+  - negative_zero = -0.0
+  - or negative_zero = math.copysign(0.0, -1.0)
+- To detect negative zero:
+  - is_neg_zero = (value == 0.0 and math.copysign(1.0, value) < 0)
+
+Summary action list
+1. Inspect append implementation (line ~138) for any int(...) or normalization of newcode. That conversion is the root cause.
+2. Remove or change that conversion so floats are stored as floats (use float(newcode) not int(newcode)), or explicitly preserve sign with math.copysign.
+3. Re-run the failing test. If the test still fails, add the debug print inside append to confirm what value and type arrive and what is stored.
+
+If you paste the append method here I can point to the exact line to change.

@@ -1,0 +1,48 @@
+What failed
+- Where: in the block shown around lines 406–412.
+- What: the computed minutes offset is wrong because line 408 overwrites the correct intermediate result from line 406. That wrong value then flows into FieldUtils.safe_multiply (line 409) and ultimately into cls.for_offset_millis (line 412) or into the "Offset is too large" ValueError at line 411.
+- Why: the code does two assignments in a row that conflict:
+
+  - Line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 408: minutes_offset = hours_in_minutes + minutes_offset
+
+  After line 406 the variable minutes_offset already contains the combined value; line 408 immediately replaces it using the (now-modified) minutes_offset on the right-hand side. That produces an incorrect result (not the intended signed hours+minutes combination). In short: the second assignment clobbers the correct value and uses the wrong operand, so the final minutes_offset is wrong.
+
+Concrete, step-by-step explanation of the root cause
+1. You compute hours_in_minutes earlier (hours * 60).
+2. You then intend to combine hours_in_minutes with the parsed minute component to form a final minutes_offset. That requires using the original minute component value (call it minute_part) and applying the sign once.
+3. Instead the code reuses minutes_offset as both the destination and as the right-hand operand after it was already mutated on line 406. This means the second assignment does not combine hours_in_minutes with the original minute part; it combines hours_in_minutes with the already-altered value, producing an incorrect number.
+
+Exact places to change (concrete fixes)
+Option A — use a separate variable for the minute component
+- Ensure the parsed minute component is stored in e.g. minute_part.
+- Replace the two conflicting lines with a single, correct combination. Example edits:
+
+  Replace lines 406 and 408 with:
+    minutes_offset = hours_in_minutes + minute_part
+    if sign_is_negative:
+        minutes_offset = -minutes_offset
+
+  (Adjust variable names to match your parser: use the original minute component variable instead of reusing minutes_offset.)
+
+Option B — compute signed offset in one expression
+- Compute the signed minutes offset in one line so there is no accidental overwrite:
+
+    minutes_offset = sign * (hours_in_minutes + minute_part)
+
+- Then proceed to safe_multiply and for_offset_millis as before.
+
+Why these fixes work
+- They avoid mutating the combining variable twice and ensure the original minute component is used exactly once with the correct sign.
+- They make the intent explicit (add hours and minutes, then apply sign), so the result given to FieldUtils.safe_multiply is correct and won’t unexpectedly trigger the overflow/error branch because of a bad intermediate value.
+
+Tests to add (practical steps)
+1. Unit tests for offsets:
+   - positive hour with minutes (e.g. "+02:30" => 2*60+30 -> 150 minutes)
+   - negative hour with minutes (e.g. "-02:30" => -150)
+   - zero minutes, only hours (e.g. "+03" => 180)
+2. A fuzz test around boundary values to ensure the "Offset is too large" ValueError is raised only when expected (when millis exceed permitted range).
+3. A regression test that captures the exact failing input that exposed the bug.
+
+Summary
+Line 408 overwrites the value computed on line 406 and uses a mutated variable on the right-hand side. Replace the two-step mutation with a single, correct computation that uses the original minute component (or apply sign in one expression). This fixes the wrong minutes_offset being passed to safe_multiply and eliminates the observed failure.

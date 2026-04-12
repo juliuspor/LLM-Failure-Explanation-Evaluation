@@ -1,0 +1,41 @@
+What happened (where)
+- The failure occurs inside LocaleUtils.to_locale when parsing the input string "fr__POSIX".
+- The guard that raises the ValueError is at lines 239–240:
+  239 |             if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+  240 |                 raise ValueError(f"Invalid locale format: {locale_str}")
+- The code expects a two-letter uppercase country at the positions represented by ch3 and ch4. For the input "fr__POSIX" one of those characters is '_' (because the format is language + "__" + variant), so the condition is true and the method raises the ValueError.
+
+Why it failed (root cause)
+- The code only allows three valid shapes: language, language_COUNTRY, language_COUNTRY_VARIANT. It assumes that when there is an underscore after the 2-letter language, the next two characters must be uppercase country letters.
+- The Java-style locale format also allows an empty country with a variant, written as language__variant (double underscore). In that case the country is intentionally empty and the variant follows the second underscore.
+- The implementation doesn't detect the double-underscore case. Instead it blindly checks ch3 and ch4 for uppercase letters, so when ch3 == '_' (the first of the two underscores) the uppercase check fails and the method raises the ValueError. In short: LocaleUtils.to_locale doesn't handle the language__variant pattern.
+
+Concrete steps to fix (what to change)
+1. Detect the double-underscore pattern before checking for a two-letter country. For example:
+   - Let language = locale_str[0:2].
+   - If locale_str[2:4] == "__":
+       - country = ""
+       - variant = locale_str[4:]  (ensure variant is non-empty)
+       - return Locale(language, country, variant)
+2. Only if the substring locale_str[2:4] is not "__" then validate ch3 and ch4 as uppercase country letters and parse the country (and optional variant) as the existing code does.
+3. Add unit tests covering:
+   - "fr__POSIX" -> Locale("fr", "", "POSIX")
+   - "en__UNIX", etc. (your test file already includes these)
+4. Be careful with bounds: ensure locale_str has sufficient length before slicing.
+
+Minimal illustrative code patch (conceptual)
+- Before the current uppercase-country check, insert:
+
+    # handle empty country + variant: language__variant
+    if len(locale_str) >= 4 and locale_str[2:4] == "__":
+        language = locale_str[0:2]
+        country = ""
+        variant = locale_str[4:]
+        if not variant:
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(language, country, variant)
+
+- Then proceed with the existing checks for language_country and language only.
+
+Why this solves it
+- It explicitly recognizes the legal pattern language__variant and sets country to the empty string instead of expecting two uppercase letters at those positions. The ch3/ch4 uppercase check will no longer be hit for double-underscore inputs, preventing the false Invalid locale format error for strings like "fr__POSIX".

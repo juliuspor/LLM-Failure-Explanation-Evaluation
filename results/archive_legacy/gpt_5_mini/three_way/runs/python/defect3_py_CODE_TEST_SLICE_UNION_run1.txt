@@ -1,0 +1,49 @@
+What went wrong (short answer)
+- The loop that advances pos after a successful translate_codepoint call mixes two different units (UTF-16 code units vs. Unicode code points). As a result pos is advanced by the wrong amount and code_point_at(...) is sometimes called with an index past the end of code_units, raising IndexError.
+
+Where it happens (exact lines / variables)
+- In the loop body:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  The variables involved are:
+  - consumed: value returned by self.translate_codepoint(code_units, pos, out)
+  - pos: current index into code_units (UTF-16 code units)
+  - code_unit list: code_units, length stored in length
+
+Why that causes the failure (concrete sequence)
+- translate_codepoint reports how many code units/units it consumed (the contract in the comment says "they have to understand codepoints and they just took care of a surrogate pair"). The caller must then advance pos by the correct number of UTF-16 code units that were consumed.
+- Instead of advancing pos by consumed, the code runs a loop range(consumed) and inside each iteration calls code_point_at(code_units, pos) then char_count(...) to decide how many code units to advance.
+- This is a mismatch:
+  - If consumed is already counting UTF-16 code units, looping consumed times and then using char_count(code_point_at(...)) will double-count surrogate pairs (or otherwise miscount), causing pos to jump incorrectly.
+  - If consumed is counting codepoints, the inner code still inspects code_point_at at changing pos and advances by char_count of each codepoint — that behavior is fragile and inconsistent with the translator contract and leads to calling code_point_at with pos == length (out of range) when the increments don't line up.
+- Concrete example (your failing test input "\U0001F630A"):
+  - UTF-16 code_units = [high_surrogate, low_surrogate, 'A'] (length = 3).
+  - translate_codepoint returns a consumed value (1 or 2 depending on the translator contract). Because the caller then runs the for-loop and advances pos based on char_count(code_point_at(...)), the sequence of pos updates can end up calling code_point_at with pos == length (3), causing the IndexError you see from code_point_at's bounds check.
+
+Where exactly the IndexError originates
+- In code_point_at(code_units, pos) when pos >= len(code_units). The slice_union excerpt shows that code_point_at raises IndexError if index >= len(code_units). The erroneous pos values are produced by the miscounting in the for loop above.
+
+How to fix it (clear steps)
+1. Decide the contract for translate_codepoint:
+   - Option A (recommended): translate_codepoint should return the number of UTF-16 code units consumed (1 for BMP char, 2 for surrogate pair).
+2. Update the post-translation advance to match that contract exactly. Replace the entire for loop with a single increment:
+   pos += consumed
+   This uses the same unit (UTF-16 code units) as code_units and avoids mixing code_point_at/char_count.
+3. If you prefer the translator to return number of code points consumed, instead:
+   - Have translate_codepoint return the number of code points consumed, and then compute units explicitly by walking those code points (but do that deterministically and without calling code_point_at at an index that might be past the end). Example: for i in range(consumed): advance by char_count(code_point_at(code_units, pos)) but only if consumed was strictly code points and you know there are enough code units remaining. This is more complex and error-prone; prefer step 2.
+4. Add unit tests (you already have them). After fixing to pos += consumed, all the tests in your suite (surrogate followed by char, surrogate at end, multi-surrogates, mixed content) should pass.
+
+One-line fix
+- Replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  With:
+    pos += consumed
+
+Why this is the right fix
+- It stops mixing up UTF-16 code units vs. code points.
+- It matches the intended translator contract described in your comment (translators "understand codepoints and they just took care of a surrogate pair"), and avoids calling code_point_at on invalid indexes.
+
+If you want, I can:
+- Show the exact patched function body,
+- Or audit translate_codepoint implementations to confirm which unit (code units vs code points) they return so you can choose the right fix.

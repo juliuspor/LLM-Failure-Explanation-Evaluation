@@ -1,0 +1,55 @@
+What happened (where it fails)
+- Failure happens inside translate(), in the for loop beginning at the end of your snippet:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The IndexError shown comes from code_point_at (lines 35–44 in your slice). That method immediately raises IndexError if index < 0 or index >= len(code_units) (line 36).
+- The exception occurs because code_point_at was called with index == len(code_units). In other words pos advanced past the end of code_units, and the next call to code_point_at(pos) triggers the IndexError.
+
+Why it happened (root cause)
+- translate_codepoint returns a number called consumed. The code treats consumed as "how many codepoints were consumed" and tries to advance pos by the number of UTF-16 code units that those consumed codepoints occupy.
+- The loop uses pos as the index passed to code_point_at on each iteration. But there is no check that consumed is less than or equal to the number of codepoints remaining from pos to length. If consumed is larger than the remaining codepoints, the loop will advance pos until it equals length, then attempt another iteration and call code_point_at(len) → IndexError (line 36).
+- Practically this can happen two ways:
+  1. translate_codepoint returned a consumed value larger than the actual remaining codepoints (translator bug or difference in contract: returned codepoints vs code units).
+  2. The code assumes translate_codepoint's return is always safe and doesn't validate bounds before calling code_point_at repeatedly.
+
+Exactly where to look
+- translate(): after consumed = self.translate_codepoint(code_units, pos, out)
+- The for pt in range(consumed): pos += char_count(code_point_at(code_units, pos)) loop (the call to code_point_at is what raises at line 36 when pos == len(code_units))
+- code_point_at: lines 35–44 (the index check at line 36 causes the IndexError)
+
+Concrete fixes (specific steps and code-level changes)
+Option A — Validate consumed immediately and reject bad translator results
+1. After consumed = self.translate_codepoint(...), add checks:
+   - if consumed < 0: raise ValueError(f"translate_codepoint returned negative consumed: {consumed}")
+   - Compute remaining_codepoints (or remaining_codepoint_count) before advancing and ensure consumed <= remaining_codepoints; if not, raise ValueError explaining the translator returned too large a value.
+2. This makes the failure explicit and avoids calling code_point_at out of bounds.
+
+Example (insert after consumed = ...):
+   if consumed < 0:
+       raise ValueError(f"translate_codepoint returned negative value: {consumed}")
+   remaining = 0
+   temp_pos = pos
+   while temp_pos < length:
+       remaining += 1
+       temp_pos += char_count(code_point_at(code_units, temp_pos))
+   if consumed > remaining:
+       raise ValueError(f"translate_codepoint returned {consumed} but only {remaining} codepoints remain starting at pos {pos}")
+
+Option B — Advance safely and stop at end (tolerant approach)
+1. Replace the for-loop with a loop that stops if pos >= length, so you never call code_point_at(pos) with pos == length:
+   for pt in range(consumed):
+       if pos >= length:
+           raise ValueError(f"translate_codepoint attempted to consume beyond input at pos {pos}")
+       pos += char_count(code_point_at(code_units, pos))
+2. This still signals an error, but avoids the IndexError and reports a clearer ValueError with context.
+
+Option C — Change the translator contract (if possible)
+1. Make translate_codepoint return the number of UTF-16 code units consumed rather than codepoints. Then you can advance pos by pos += consumed safely (still validate bounds: ensure pos + consumed <= length).
+2. If you adopt this, update translator implementations and checks accordingly.
+
+Which to choose
+- If translator implementations are under your control and easier to change, Option C (return code units) is simplest and fastest to reason about.
+- If translator implementations must stay as-is, use Option A (validate) or B (safe advance + explicit error). Always validate the return of translate_codepoint before using it to index into code_units.
+
+Bottom line
+The code calls code_point_at(pos) with pos == len(code_units) because it blindly trusts the integer returned by translate_codepoint. Add explicit validation of consumed (or change the translator contract) so you never call code_point_at with an out-of-range index.

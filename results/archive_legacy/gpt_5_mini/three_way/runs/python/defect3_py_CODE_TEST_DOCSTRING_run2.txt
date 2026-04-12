@@ -1,0 +1,54 @@
+What happens (root cause)
+- The bug is in the while loop after a translator returns a positive consumed value:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+- translate_codepoint(...) returned a positive consumed value meaning "the translator consumed X UTF-16 code units (it already handled surrogate pairs)". But the loop then calls code_point_at(code_units, pos) and char_count(...) while also advancing pos inside the loop. That double-counts surrogate pairs and can move pos past the end of code_units or into a half of a surrogate pair.
+
+Why that causes the IndexError seen in the tests
+- Example from the tests: the input starts with a surrogate pair (a supplementary codepoint encoded as two UTF-16 code units). Suppose translate_codepoint consumes the surrogate pair and returns consumed == 2.
+- The for loop runs twice (range(2)). On the first iteration, code_point_at(code_units, pos) sees the surrogate pair and char_count returns 2, so pos is incremented by 2. pos now points past the surrogate pair (pos == old_pos + 2).
+- On the second iteration the loop still runs, but now it calls code_point_at(code_units, pos) with pos pointing at the next character (or possibly past the end). If the surrogate pair was followed by another character (the common bug case in your tests) code_point_at will try to parse a surrogate pair at the new pos and can raise IndexError or otherwise mis-handle the boundaries. If the pair was at the end, code_point_at will be called out-of-range and crash.
+- In short: the loop both assumed consumed counted loop iterations and also used char_count which advances again. That double-advances pos and walks off the end.
+
+Where in the code this occurs
+- In translate(self, input_seq, out), inside the while pos < length loop, in the block handling consumed != 0. The problematic code is the for pt in range(consumed): pos += char_count(code_point_at(code_units, pos)) loop (lines immediately after "# Contract with translators ...").
+
+What you should change (concrete fixes)
+You have two clear options depending on what translate_codepoint is supposed to return:
+
+1) If translate_codepoint returns the number of UTF-16 code units it consumed (which matches your comment "they just took care of a surrogate pair" and the tests):
+   Replace the whole for-loop with a single advance:
+       pos += consumed
+   This simply moves pos forward by the number of UTF-16 code units the translator already consumed.
+
+   Example replacement:
+       # translator consumed `consumed` UTF-16 code units already
+       pos += consumed
+
+2) If instead translate_codepoint returns the number of codepoints (not code units), and you must advance pos by the UTF-16 length of each codepoint, do not call code_point_at on a moving pos inside the loop. Compute each codepoint from the original sequence or update carefully:
+   Option A (compute using a temporary index):
+       tmp = pos
+       for _ in range(consumed):
+           cp = code_point_at(code_units, tmp)
+           tmp += char_count(cp)
+       pos = tmp
+
+   But this is more complicated and unnecessary if translate_codepoint already expresses consumed in UTF-16 code units.
+
+Which fix I recommend
+- Implement option (1): replace the loop with pos += consumed. That matches the comment and avoids the double-advance bug.
+
+Small concrete patch (replace lines after the comment):
+    # Contract with translators is that they have to understand codepoints
+    # and they just took care of a surrogate pair
+    pos += consumed
+
+Why this is safe and simple
+- It matches the translator contract you documented in the code comment.
+- It avoids calling code_point_at/char_count while mutating pos, so there is no accidental double-advance or out-of-bounds access.
+
+Summary
+- Root cause: double-advancing pos inside the for-loop (consumed loop + char_count advance) leading to reading past the input buffer (IndexError).
+- Where: translate(), inside the while loop, in the for pt in range(consumed) block.
+- Fix: advance pos by consumed (pos += consumed) or else compute advances with a temporary index; recommended: pos += consumed.

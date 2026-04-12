@@ -1,0 +1,42 @@
+What fails
+- The check on minutes (the line
+  if minutes_offset < 0 or minutes_offset > 59:
+  ) rejects negative minute offsets. That makes it impossible to represent negative offsets whose hour part is zero (for example -0:30). If a caller calls for_offset_hours_minutes(0, -30) you get "Minutes out of range" even though a -0:30 zone is valid.
+
+Why it happens (root cause, where it occurs)
+- The code assumes minutes_offset is always non‑negative and that the sign of the whole offset comes only from hours_offset. That assumption is enforced at the minutes validation line above and breaks when the desired offset has hours_offset == 0 but minutes should be negative.
+- The failure therefore occurs at the minutes validation (the third if) and then prevents correct downstream computation (the branch that combines hours_in_minutes and minutes_offset never gets a chance to produce the correct total).
+
+What specifically goes wrong with example inputs
+- Example: caller intends -0:30 and calls for_offset_hours_minutes(0, -30).
+  - The code hits if minutes_offset < 0 ... and raises ValueError("Minutes out of range").
+  - The code never reaches the combining logic that would produce -30 * MILLIS_PER_MINUTE.
+
+How to fix it (concrete steps and exact code changes)
+Option A — accept signed minutes and compute total minutes using minutes' sign:
+1. Change the minutes validation to allow negative minutes in range -59..59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total minutes directly from hours and minutes (do not reuse minutes_offset for both meaning):
+   hours_in_minutes = hours_offset * 60
+   total_minutes = hours_in_minutes + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+This works because minutes_offset may be negative when the caller wants -0:30.
+
+Option B — keep minutes non‑negative but specify sign by hours and handle hours==0:
+1. Keep minutes validation as 0..59.
+2. For combining, when hours_offset == 0 you must require an explicit sign (e.g. add an extra parameter) or define how to indicate negative zero hours (not recommended). Better: document and require callers to pass hours_offset negative to indicate a negative offset (e.g. pass hours_offset=-0 and minutes_offset=30 — but Python/Java can't have -0 for int). So Option B is fragile; prefer Option A.
+
+Minimal recommended replacement (concrete code snippet)
+Replace the minutes validation and combining block with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why that fixes it
+- It allows minutes_offset to carry its own sign when hours_offset is 0, so -0:30 becomes hours_in_minutes = 0, total_minutes = 0 + (-30) = -30, then multiplied into milliseconds correctly.
+- It keeps the rest of the function intact and avoids ambiguous handling of sign.
+
+If you prefer stricter API semantics (always non-negative minutes, sign supplied only by hours), make sure to document that callers must pass a negative hours_offset for negative offsets and reject minutes when hours_offset == 0 and minutes_offset == 0 only for UTC — but the safest, least surprising change is Option A above.

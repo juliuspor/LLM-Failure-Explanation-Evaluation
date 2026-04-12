@@ -1,0 +1,48 @@
+What happened (where it failed)
+- The function rejects negative minute values at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The test passed minutes_offset = -15 (for a negative offset like -1 hour 15 minutes). That triggers the above check and raises ValueError("Minutes out of range: -15") before any further processing. The exception is raised at that validation, so the later code that combines hours and minutes (lines 402–405) is never reached.
+
+Why it happened (root cause)
+- The code assumes minutes_offset must be non‑negative (0..59) but also allows negative hours_offset. Later logic expects minutes_offset possibly to be negative (it does arithmetic differently when hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset). In other words, the function is inconsistent about the allowed sign of minutes_offset:
+  - It rejects negative minutes at lines 396–397.
+  - Later it treats minutes_offset as if it can be negative when hours_offset is negative (lines 402–404).
+- For input hours_offset = -1 and minutes_offset = -15, the initial validation fails even though the intent is to represent -1 hour 15 minutes.
+
+Exactly where to change and how (concrete fixes)
+You have three clear options; pick one per the intended API:
+
+1) Require minutes_offset to be non‑negative (0..59) and apply the sign from hours_offset
+   - Change callers to pass minutes as positive and use hours_offset sign.
+   - Implementation change: keep the current validation (0..59) but when hours_offset < 0 compute:
+       total_minutes = hours_offset * 60 - minutes_offset
+     (which is already attempted), but callers must not pass negative minutes.
+   - Pros: simple; keeps minutes parameter as magnitude.
+   - Steps:
+     - Update docs/tests to pass minutes_offset = 15 when hours_offset = -1.
+     - No further code changes needed.
+
+2) Allow minutes_offset to be negative and validate absolute range
+   - Replace the current minutes validation (lines 396–397) with:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+     and ensure combination logic uses the minute sign correctly.
+   - Pros: callers may pass signed minutes directly.
+   - Steps:
+     - Change the validation to the -59..59 range.
+     - Confirm combination logic produces the expected total_minutes (watch sign handling when hours_offset is negative).
+
+3) Validate minutes after combining hours and minutes
+   - Move the current minutes check to after computing the combined minutes (lines 402–405), or validate absolute minutes before combining with the intended sign rules.
+   - Pros: centralizes validation of the final offset value.
+   - Steps:
+     - Remove the early negative check.
+     - After computing total_minutes (a single value), validate that the magnitude is within allowed bounds and then compute millis.
+
+Recommended minimal change (if callers already pass signed minutes)
+- Replace the validation at lines 396–397 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+This fixes the immediate failure for inputs like hours_offset = -1, minutes_offset = -15 while keeping the rest of the logic intact.

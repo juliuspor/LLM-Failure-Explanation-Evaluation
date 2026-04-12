@@ -1,0 +1,50 @@
+What happened (what fails)
+- The code raises IndexError at code_point_at(...), specifically at line 36 ("if index < 0 or index >= len(code_units): raise IndexError(...)"), because code_point_at is called with index == len(code_units).
+- That happens inside this block (lines shown in your slice):
+
+      consumed = self.translate_codepoint(code_units, pos, out)
+      ...
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+Why it fails (root cause)
+- translate_codepoint returns a positive integer consumed that means "this translator handled N code units / codepoints" (the comment says translators deal with codepoints and may have handled a surrogate pair).
+- The for-loop uses range(consumed) and inside each iteration calls code_point_at(code_units, pos), then advances pos by char_count(...).
+- If consumed > 1 (for example, a translator consumed a surrogate pair or multiple code units), the loop runs multiple iterations. On the first iteration pos is advanced (often by 2 when a surrogate pair was present). On a later iteration pos can become equal to length (end of array). The next call to code_point_at(code_units, pos) is therefore invoked with index == len(code_units), which triggers the IndexError at line 36.
+- In short: the loop calls code_point_at with an out-of-range index because it updates pos inside the loop and then still tries to read at that new pos in subsequent iterations.
+
+Exactly where it broke
+- The exception is raised at code_point_at(code_units, pos) (line 36 in the slice you showed).
+- The loop that caused this is the for pt in range(consumed): ... block that updates pos based on char_count of the codepoint at the current pos.
+
+How to fix it (clear, specific steps)
+Choose one of the fixes below depending on the intended contract of translate_codepoint:
+
+1) If translate_codepoint returns the number of code units consumed (e.g., 1 for BMP, 2 for surrogate pair):
+   - Replace the loop with a single advance by consumed code units:
+     - Change:
+         for pt in range(consumed):
+             pos += char_count(code_point_at(code_units, pos))
+       To:
+         pos += consumed
+   - Rationale: consumed already counts code units, so incrementing pos by consumed moves past the consumed units without repeatedly calling code_point_at and risking an out-of-range read.
+
+2) If translate_codepoint returns the number of codepoints consumed and you must advance by the char_count of each codepoint:
+   - Compute the total advance without calling code_point_at beyond bounds:
+     - Use a local variable advance = 0
+     - For i in range(consumed):
+           cp = code_point_at(code_units, pos + advance)
+           advance += char_count(cp)
+     - After the loop do pos += advance
+   - Rationale: this ensures each call to code_point_at is inside bounds (pos + advance < length) and you only call it when you have not yet moved pos past the array end.
+
+3) (Safer) Add bounds checks before calling code_point_at inside the loop:
+   - Before calling code_point_at(code_units, pos) check if pos >= length and break or raise a clear error.
+   - This is defensive but not preferable unless you want explicit runtime safety.
+
+Which to pick
+- If your comment "they just took care of a surrogate pair" means translate_codepoint reports the number of code units it consumed, use fix (1).
+- If it actually reports number of codepoints, use fix (2).
+
+One-line summary
+The loop calls code_point_at after advancing pos, which can make pos equal to length and cause code_point_at to read past the end. Replace the loop with a single pos += consumed (if consumed is code units) or compute advance safely before changing pos.

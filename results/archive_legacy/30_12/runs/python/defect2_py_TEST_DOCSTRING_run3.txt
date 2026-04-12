@@ -1,0 +1,55 @@
+What happened (root cause)
+- The test calls GrayPaintScale.get_paint(-0.5) expecting the darkest gray (0, 0, 0).
+- GrayPaintScale.get_paint currently computes RGB from the input value and then raises ValueError when any channel is outside 0–255.
+- A negative value like -0.5 produces negative channel(s) (for example r = int(255 * -0.5) → -127), so the method’s validation rejects that and raises ValueError instead of returning (0,0,0). In short: the negative input creates out-of-range RGB and the method’s range check causes the test to fail.
+
+Where it occurred
+- In GrayPaintScale.get_paint: in the code path that converts value → r,g,b and then performs the range check/raise (the "if r < 0 or r > 255: raise ValueError" style check).
+
+Why it happened (clear, concrete)
+- The docstring promises "Returns a paint (RGB tuple) for the specified value" but also documents raising ValueError when RGB are outside 0–255.
+- The test expects the implementation to treat values below the valid range as the boundary (clamped to 0) and return (0,0,0). The implementation instead enforces a strict range and raises an exception.
+- There is therefore a mismatch between test expectations and the current behavior: the implementation validates raw computed channels rather than normalizing/clamping the input first.
+
+Exact fixes (pick one; each step is actionable)
+1) If you want get_paint to clamp inputs and return nearest legal color (recommended for a paint/scale):
+   - Before computing RGB, clamp the input:
+     value = max(0.0, min(1.0, value))
+   - Compute channels, then ensure final ints are clamped 0–255 (defensive):
+     r = int(round(255 * value))
+     r = max(0, min(255, r))
+   - Repeat for g, b and return (r, g, b).
+   - Where to change: inside GrayPaintScale.get_paint, add the clamp as the first lines of the method, and replace the strict range-raise with the clamping shown above.
+
+   Minimal patch example:
+   - At the start of get_paint(value):
+       value = max(0.0, min(1.0, value))
+       r = int(round(255 * value))
+       r = max(0, min(255, r))
+       ... (same for g, b)
+       return (r, g, b)
+
+2) If you want get_paint to be strict and keep raising on out-of-range values:
+   - Update the docstring/tests to match: either document that negative inputs raise ValueError, or change the test to expect a ValueError for -0.5.
+   - Where to change: modify the docstring of GrayPaintScale.get_paint to say ValueError is raised for values outside acceptable domain (e.g., less than 0 or greater than 1), and update tests accordingly.
+
+3) If you want both behaviors available:
+   - Add an argument clamp=False to get_paint, default behavior explicit:
+       def get_paint(self, value, clamp=False):
+           if clamp:
+               value = max(0.0, min(1.0, value))
+           else:
+               if value < 0.0 or value > 1.0:
+                   raise ValueError("value out of range")
+           ...
+   - Update callers/tests to pass clamp=True where clamping is required.
+
+What to change in tests
+- If you choose fix (1), your existing test remains valid and will pass.
+- If you choose fix (2), change the test to expect a ValueError:
+     with pytest.raises(ValueError):
+         gps.get_paint(-0.5)
+
+Summary
+- The failure is caused by negative input producing negative RGB and the method raising ValueError during range validation.
+- Fix by either clamping the input channels inside GrayPaintScale.get_paint (recommended for a paint scale) or by updating docstring + tests to require that callers supply only in-range values and expect a ValueError otherwise.

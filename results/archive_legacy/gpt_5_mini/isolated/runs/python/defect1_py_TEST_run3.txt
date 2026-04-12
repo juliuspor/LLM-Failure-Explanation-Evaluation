@@ -1,0 +1,48 @@
+What fails
+- The first failing assertion is in test_zero_offset, at this line:
+  line ~23: self.assertEqual(zone, DateTimeZone.UTC)
+  where zone = DateTimeZone.for_offset_hours_minutes(0, 0).
+
+Why it fails (root cause)
+- DateTimeZone.for_offset_hours_minutes(0, 0) returns a DateTimeZone instance that represents UTC, but it is not the same Python object as DateTimeZone.UTC.
+- The test uses unittest.TestCase.assertEqual(obj1, obj2), which in turn calls obj1 == obj2. The DateTimeZone class in hit01_timezone.py does not implement equality (__eq__) to compare zones by identity fields (id, offset, or similar). Because __eq__ is not defined, Python falls back to object identity comparison, which returns False for two distinct instances even if they represent the same timezone.
+- Concretely:
+  - variable names: zone (the returned instance), DateTimeZone.UTC (the canonical UTC instance).
+  - method: DateTimeZone.for_offset_hours_minutes(0, 0) produces an instance whose get_id() returns "UTC" but is a different object identity from DateTimeZone.UTC.
+  - the assertion expects equality but the class lacks a meaningful equality operator.
+
+Where it occurs in the code
+- Test file: the failing assertion is at "self.assertEqual(zone, DateTimeZone.UTC)" inside test_zero_offset.
+- Class file: hit01_timezone.py defines DateTimeZone but does not implement __eq__ (and likely __ne__) to compare time zone identity fields.
+
+Why other checks pass (and why the test author probably added multiple asserts)
+- The subsequent assertions in test_zero_offset check zone.get_id() == "UTC" and zone.get_offset(0) == 0; those work because get_id() and get_offset() are implemented and return the expected values. The single failing assertion is purely due to object equality semantics.
+
+How to fix it (concrete steps)
+Option A — change the test (simplest and least invasive)
+1. Replace the identity equality assertion with a content check:
+   - Change line:
+     self.assertEqual(zone, DateTimeZone.UTC)
+   - To either:
+     self.assertEqual(zone.get_id(), DateTimeZone.UTC.get_id())
+     or
+     self.assertIs(zone, DateTimeZone.UTC) only if you expect the factory to return the exact singleton object (see Option B).
+2. Rerun tests.
+
+Option B — implement meaningful equality in hit01_timezone.DateTimeZone (preferred if you want object equality semantics)
+1. Open hit01_timezone.py.
+2. Add an __eq__ method that compares the canonical identifying properties (for example, the ID string and/or fixed offset in milliseconds). Example logic:
+   def __eq__(self, other):
+       if not isinstance(other, DateTimeZone):
+           return NotImplemented
+       return self.get_id() == other.get_id()
+   (Or compare offsets: return self.get_offset(0) == other.get_offset(0), or both.)
+3. Optionally add __ne__ (or rely on Python 3's inversion). If instances are intended to be hashable and equality changed, also implement __hash__ consistently.
+4. Run tests again.
+
+Which option to choose
+- If DateTimeZone objects are meant to be compared by value (id/offset) in client code, implement __eq__ in hit01_timezone.py.
+- If the codebase expects a singleton DateTimeZone.UTC object to be returned by the factory, change the factory so for_offset_hours_minutes(0, 0) returns DateTimeZone.UTC (and then you can use assertIs in tests). But that requires altering factory behavior.
+
+Summary
+- The test fails because assertEqual is checking equality between two different DateTimeZone instances while DateTimeZone does not define value equality; Python falls back to identity and the comparison fails. Fix either the test (compare IDs or offsets) or add a proper __eq__ to DateTimeZone (or make the factory return the singleton DateTimeZone.UTC for zero offset).

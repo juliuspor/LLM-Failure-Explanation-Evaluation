@@ -1,0 +1,46 @@
+What happened (where and why)
+- At line 340 the code enters a block because self._min_start_index >= 0.
+- At lines 341–345 the code only sets min_start when min_start_period is a SimpleTimePeriod:
+  - If min_start_period is a SimpleTimePeriod, min_start gets set at line 343 (or 345).
+  - If min_start_period is not a SimpleTimePeriod, min_start is never defined.
+- At line 346 the code tests if start < min_start. If min_start was never defined, that raises an UnboundLocalError (NameError in some runtimes). This is a direct runtime failure source.
+- Separately, at line 347 the code conditionally sets self._min_start_index = index when start < min_start, but immediately after (line 349) the code unconditionally sets self._min_start_index = index. That unconditional assignment overrides the conditional update and makes the comparison pointless; even if the code does not crash, the logic is wrong because _min_start_index will always be set to index.
+
+Concrete lines referenced
+- start is set at lines 331–335 (two different approaches are used; pick one).
+- min_start_period and the conditional min_start assignment are at lines 341–345.
+- The comparison is at line 346.
+- Conditional assignment: line 347.
+- Unconditional (buggy) assignment that overrides the conditional: line 349.
+- Getter returns _min_start_index at lines 437–439.
+
+Root causes
+1. Uninitialized local variable min_start: if min_start_period is not a SimpleTimePeriod, min_start is not defined, so the test at line 346 fails with an UnboundLocalError.
+2. Logic bug / always-override assignment: line 349 unconditionally sets self._min_start_index = index, nullifying the conditional update at line 347 and breaking the intended behavior.
+
+Clear, actionable fixes (step-by-step)
+1. Decide and use a single, consistent way to compute start and min_start (remove duplicated approaches at lines 332–335 and 343–345). Keep either get_start_millis() or convert timestamp to milliseconds, not both.
+2. Ensure min_start is always defined before the comparison:
+   - Option A (preferred): If you want to compare only when min_start_period is a SimpleTimePeriod, move the comparison and conditional assignment inside that if-block so min_start is always defined when used.
+   - Option B: Initialize min_start to a sentinel numeric value (e.g., float('inf')) before the if so the comparison is safe even when min_start_period is not SimpleTimePeriod.
+3. Remove the unconditional assignment at line 349, or make sure it is executed only when you actually want to override (for example, in an else branch).
+4. Add a comment or unit test that covers the case where min_start_period is not a SimpleTimePeriod so you don’t regress.
+
+Minimal code-change example (one clear fix)
+- Replace the block from 340–349 with:
+
+  if self._min_start_index >= 0:
+      min_start_period = self.get_data_item(self._min_start_index).get_period()
+      if isinstance(min_start_period, SimpleTimePeriod):
+          min_start = min_start_period.get_start_millis()   # or use timestamp * 1000 consistently
+          if start < min_start:
+              self._min_start_index = index
+      else:
+          # handle non-SimpleTimePeriod case explicitly, or skip comparison
+          pass
+
+Why this fixes it
+- min_start is defined in the same branch where it’s used, so no UnboundLocalError.
+- There is no unconditional assignment overriding the conditional, so _min_start_index only changes when the new period actually has an earlier start.
+
+If you want, tell me which timestamp method you prefer (get_start_millis() or int(...timestamp() * 1000)) and I’ll produce a minimal patch showing the exact lines to change.

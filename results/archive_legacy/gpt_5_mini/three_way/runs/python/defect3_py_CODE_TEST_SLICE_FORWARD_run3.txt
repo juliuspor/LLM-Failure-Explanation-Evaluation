@@ -1,0 +1,50 @@
+What went wrong (short answer)
+- The code double-counts surrogate pairs when advancing the index pos after a translator consumes characters. The offending statement is the for-loop that updates pos:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (this is the code that fails at runtime).
+- Because code_point_at(...) (lines 38–44 in your slice) already combines a UTF-16 surrogate pair into a single code point and char_count(...) returns 2 for that code point, the loop can advance pos too far or run off the end of code_units. That produces the IndexError seen when a surrogate pair is followed by another character (e.g. "😰A").
+
+Why it fails (step‑by‑step, referencing variables/lines)
+1. You convert the input to UTF‑16 code units: code_units, and you iterate with pos (pos = 0; length = len(code_units)).
+2. A translator consumes some amount and returns consumed (the code assumes a contract about what consumed means).
+3. The code then runs:
+   for pt in range(consumed):
+       pos += char_count(code_point_at(code_units, pos))
+   - code_point_at(code_units, pos) (slice lines 38–44) checks code_units[pos] (high surrogate) and, if a valid low surrogate exists at pos+1, returns the combined Unicode code point (>= 0x10000).
+   - char_count(that_codepoint) returns 2 for a surrogate pair.
+4. If consumed > 0 and the codepoint at pos is a surrogate pair, the loop iteration will add 2 to pos. But the loop runs consumed times. If consumed > 1, or if consumed represents code units rather than codepoints (mismatch of contract), pos can be advanced by 2 multiple times and quickly run past length — causing IndexError or skipping characters.
+
+Root cause (concise)
+- There is a contract mismatch / misuse: the code treats consumed and char_count/code_point_at together in a way that double-counts surrogate pairs. In plain terms: the index pos is advanced incorrectly when a translator handled a surrogate pair, because you call code_point_at which already spans two code units and then add char_count (2), and you do that inside a loop whose iteration count interpretation is unclear. The loop therefore moves pos farther than intended.
+
+Where exactly (lines)
+- The bug is in the while loop after consumed is obtained. The problematic lines are the for-loop that advances pos (shown above). The code_point_at implementation (slice lines 38–44) returns a combined code point for a surrogate pair; that behavior is a key part of why char_count(...) returns 2 and causes the over‑advance.
+
+Concrete fixes (clear steps you can apply)
+Choose one consistent contract and implement it. Two straightforward fixes:
+
+Option A — Make translate_codepoint return the number of UTF-16 code units consumed (1 or 2), and advance pos directly by that many units:
+- Replace the for-loop with:
+    pos += consumed
+- Rationale: consumed already tells you how many code_units were consumed; no need to call code_point_at/char_count again.
+
+Option B — Make translate_codepoint return the number of Unicode code points consumed (not code units), and advance pos by examining code_units per code point (correctly handling surrogate pairs):
+- Replace the loop with a loop that steps over code_units explicitly, but only advance once per code point using code_point_at to decide whether to add 1 or 2:
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+  Important: consumed must be the number of Unicode code points, not the number of code units. (This keeps the "per-codepoint" semantics, but be explicit about the return value.)
+
+Option A is the simplest and less error-prone. Example minimal patch (Option A):
+- After you get consumed:
+    if consumed == 0:
+        ...
+        continue
+    pos += consumed
+
+Verify tests:
+- With Option A, translating an emoji (surrogate pair) followed by 'A' will advance pos by 2 for the emoji and then handle 'A' normally, avoiding IndexError.
+
+Summary
+- The bug is an index-advance mismatch: the code calls code_point_at which consumes both surrogates, then uses char_count inside a loop that causes over-advancing. Fix by making the meaning of consumed unambiguous and advancing pos in a matching way (preferably pos += consumed, where consumed is the number of UTF‑16 code units).

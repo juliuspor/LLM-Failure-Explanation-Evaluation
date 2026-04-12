@@ -1,0 +1,70 @@
+What went wrong (root cause)
+
+- On these lines you set inferred_type from the container object itself:
+  - if array is not None:
+      inferred_type = type(array)
+  type(array) returns the class of the list object (e.g. builtins.list), not the element type held inside the list. So inferred_type is the list class, not the element class you need.
+
+- Later you call:
+  new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+  and then you perform the type check:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+
+  Because inferred_type was calculated incorrectly, the code flow and the value passed into _copy_list_grow1 are wrong. That makes ArrayUtils produce (or treat) the result as an object-typed list while expected_type is str, which triggers the TypeError you saw:
+  "Cannot cast object list to str list..."
+
+A concrete example that reproduces the bug
+- Call add([], "hello", expected_type=str)
+  - array is an empty list, so type(array) is list → inferred_type = list (wrong; you wanted the element type)
+  - you never inspect the elements (there are none) and you don't use expected_type to infer element type
+  - downstream logic misinterprets the element type and raises the TypeError about casting object[] to str[]
+
+Why this is the root cause (no guessing)
+- The purpose of inferred_type is to identify the element type for the new list. type(array) gives you the container type (list), not the element type.
+- If the array is empty you must fall back to a different source of truth (expected_type or element), otherwise you cannot know the intended element type.
+- Because the wrong type value is passed into _copy_list_grow1 and the later check, the code detects a mismatch and throws the TypeError you saw.
+
+Where it occurs (specific lines)
+- inferred_type assignment: the block starting with "if array is not None: inferred_type = type(array)"
+- list creation: "new_list = ArrayUtils._copy_list_grow1(array, inferred_type)"
+- the exception check and raise: the if block comparing inferred_type == object and raising TypeError
+
+How to fix it (step-by-step, actionable)
+1. Decide what inferred_type is supposed to represent: the element type (not the list class). Use that definition going forward.
+
+2. Change the inference order and logic so you infer element type, not container type. For example:
+   - If array is not None and len(array) > 0:
+       inferred_type = type(array[0])   # infer from first element
+   - elif expected_type is not None:
+       inferred_type = expected_type    # use the caller's expected_type if provided
+   - elif element is not None:
+       inferred_type = type(element)    # fall back to the element
+   - else:
+       inferred_type = object
+
+3. Use the inferred element type when calling your copy/grow helper:
+   new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+
+4. Keep the existing sanity check, but compare element-type values consistently (use 'is' for object identity if appropriate):
+   if inferred_type is object and expected_type is not object:
+       raise TypeError(...)
+
+5. Optional: If array can contain mixed element types, either:
+   - detect the dominant/common element type before choosing inferred_type, or
+   - always prefer expected_type (if provided) over inferring from array contents, because expected_type is the caller intent.
+
+Minimal corrected sketch (replace the current inference block)
+   if array is not None and len(array) > 0:
+       inferred_type = type(array[0])
+   elif expected_type is not None:
+       inferred_type = expected_type
+   elif element is not None:
+       inferred_type = type(element)
+   else:
+       inferred_type = object
+
+Why these steps fix it
+- They ensure inferred_type represents the element's class instead of the list class, handle empty arrays by falling back to expected_type or element type, and prevent the erroneous cast/check that produced the TypeError.
+
+If you want, paste the exact call (parameters) that produced the error and I will show the specific values for array, element, inferred_type, expected_type, and the exact branch the code took.

@@ -1,0 +1,53 @@
+What happened (root cause)
+- At lines 81–84 the code assumes every entry in replacement_list is a string and calls len(replacement_list[i]) (line 82).
+- The tests pass None as a replacement element (e.g. replacement_list = [None] or ["c", None]).
+- Calling len(None) raises TypeError: object of type 'NoneType' has no len(), so the function crashes before performing replacements.
+
+Where it occurs
+- Exact location: the loop starting at line 81 in the shown slice:
+  - line 82: greater = len(replacement_list[i]) - len(search_list[i])
+  - If replacement_list[i] is None, len(...) throws the exception.
+
+Why that causes failure
+- The code intends to compute the difference in length between replacement and search strings to estimate buffer growth, but it never checks for None entries in replacement_list.
+- Java's StringUtils.replaceEach treats null replacements specially (often as no-op or empty); this Python port must do the same. Instead it tries to measure len(None).
+
+Concrete fixes (step-by-step)
+1. Decide desired semantics for None in replacement_list:
+   - Treat None as an empty string ("") so replacements remove the search token, or
+   - Treat None as "no replacement" (skip), or
+   - Raise a TypeError explicitly if non-string types are not allowed.
+
+2. Implement a clear guard before using len(...) and before using the replacement value. Example minimal change (insert before line 82):
+   - repl = replacement_list[i]
+   - if repl is None:
+       repl_len = 0
+     else:
+       if not isinstance(repl, str):
+           raise TypeError("replacement_list elements must be str or None")
+       repl_len = len(repl)
+   - greater = repl_len - len(search_list[i])
+
+3. If you want to treat None as "no replacement" (the tests expect that: replacement None leaves original text unchanged), ensure the code also avoids applying the replacement later — either use "" as replacement or skip applying that pair when processing replacements.
+
+4. Also add similar guards wherever replacement_list[i] is used later (not only when computing length). Converting None to "" at the start (replacement_list = [r if r is not None else "" for r in replacement_list]) can simplify the rest of the function.
+
+Suggested patch (conceptual; apply where the loop starts at line 81):
+- Before the loop or at loop entry, normalize replacement_list:
+    for i in range(search_length):
+        if replacement_list[i] is None:
+            replacement_list[i] = ""            # or continue/skip based on chosen semantics
+        elif not isinstance(replacement_list[i], str):
+            raise TypeError("replacement_list items must be str or None")
+    # then proceed with:
+    for i in range(search_length):
+        greater = len(replacement_list[i]) - len(search_list[i])
+        ...
+
+Why this fix solves it
+- It prevents calling len(None), eliminating the TypeError.
+- It makes the behavior explicit and consistent (tests expect treating None as no replacement), and it prevents the function from crashing at the size-estimation step (lines 81–84).
+
+Summary
+- Cause: len(replacement_list[i]) is called when replacement_list[i] can be None (line 82), raising TypeError.
+- Fix: check for None and non-str types before taking len(), and normalize or skip None replacements so later code can safely use replacement_list entries.

@@ -1,0 +1,42 @@
+What happened (where it fails)
+- At line 396 the code unconditionally rejects any negative minutes:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - This causes a ValueError for callers that the doc explicitly permits, e.g. (0, -15) or (-2, -15).
+- Later, at lines 402 and 404 the method reuses the variable minutes_offset to form the total minutes:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  - Reusing minutes_offset here is confusing and error-prone: the variable that originally held the minutes component is overwritten with "total minutes", and the sign logic is fragile.
+- Because of the two problems above the method both rejects valid inputs and computes the total offset incorrectly in some sign combinations. The caller therefore gets a ValueError or the wrong offset.
+
+Why it happens (root cause)
+- The code enforces minutes >= 0 unconditionally (line 396) even though the doc allows negative minutes when hours == 0 or hours < 0. That validation is too strict and inconsistent with the documented allowed combinations.
+- The arithmetic that computes the final minutes uses the same variable minutes_offset to mean two different things (component minutes vs. total minutes). That makes the sign handling ambiguous and leads to incorrect results when mixing positive/negative hours and minutes.
+
+Exactly where to change it (concrete steps)
+1. Fix the minutes validation at line 396:
+   - Allow negative minutes when hours_offset <= 0 (hours zero or negative).
+   - Enforce minutes in [-59, 59] when allowed. Example check:
+     - if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+     - if hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes must not be negative when hours is positive")
+2. Stop overwriting the minutes component variable. Introduce a new variable total_minutes for the combined offset and compute it deterministically:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_offset < 0 or (hours_offset == 0 and minutes_offset < 0):
+       total_minutes = hours_in_minutes - abs(minutes_offset)
+     else:
+       total_minutes = hours_in_minutes + abs(minutes_offset)
+   - Or clearer: apply sign of the overall offset explicitly rather than inferring it by mixing adds/subtracts.
+3. Validate the resulting total_minutes against the maximum allowed offset before converting to milliseconds (the existing "Offset is too large" check at line 407):
+   - if abs(total_minutes) > (23 * 60 + 59): raise ValueError("Offset is too large")
+4. Use total_minutes when creating the millisecond offset:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Why these changes fix it
+- Allowing negative minutes only when hours <= 0 matches the documented valid sign combinations, preventing false ValueErrors for allowed inputs.
+- Using a dedicated total_minutes variable removes the ambiguity from reusing minutes_offset and makes sign handling explicit, preventing incorrect offsets.
+- Validating the final total_minutes ensures you still reject offsets exceeding +/-23:59 as intended.
+
+Minimal example of the bug you can reproduce
+- Call the factory with (0, -15). With the current code you get ValueError at line 396, but the doc shows this should produce +00:15 or -00:15? (doc shows (0, -15) => -00:15) The code should accept it and compute -15 minutes total.
+
+If you want, I can provide a corrected code snippet implementing the three changes above.

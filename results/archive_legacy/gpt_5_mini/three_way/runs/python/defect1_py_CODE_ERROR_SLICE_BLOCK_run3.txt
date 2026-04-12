@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The failure occurred at the validation at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  The method raised ValueError: Minutes out of range: -15 because minutes_offset was -15 when the method started.
+
+Why it failed (root cause)
+- The method assumes minutes_offset is always in 0..59 and rejects negative minutes right away. But callers sometimes pass a negative minutes_offset (for example -15) to indicate a negative offset and that triggers the early range check.
+- The method also mixes sign handling into the minutes calculation later (lines where hours_in_minutes < 0 branch), but that happens after the range check. So the code rejects valid inputs that express the sign on minutes instead of on hours.
+
+Concretely:
+- Input: hours_offset = -1, minutes_offset = -15 (caller intended -1 hour and -15 minutes → total -75 minutes).
+- The code immediately fails the minutes-range check because it expects minutes_offset ≥ 0.
+- The later code attempts to combine hours and minutes with sign logic, but that code is never reached because of the earlier check.
+
+How to fix it (clear steps and exact changes)
+Option A — require callers to supply non-negative minutes and validate accordingly:
+1. Document the API: minutes_offset must be between 0 and 59; sign comes only from hours_offset.
+2. Keep the current check, and change callers so they never pass negative minutes.
+
+Option B — accept a signed minutes_offset and compute total correctly (recommended if callers already pass signed minutes):
+1. Change the validation to allow negative minutes when appropriate (or validate using absolute value).
+2. Compute total_minutes as a separate variable instead of mutating minutes_offset, with explicit sign handling.
+3. Use total_minutes to produce offset millis.
+
+Example corrected implementation (Option B):
+    def for_offset_hours_minutes(cls, hours_offset: int, minutes_offset: int) -> 'DateTimeZone':
+        if hours_offset == 0 and minutes_offset == 0:
+            return cls.UTC
+        if hours_offset < -23 or hours_offset > 23:
+            raise ValueError(f"Hours out of range: {hours_offset}")
+        # allow minutes_offset to be signed; validate absolute value
+        abs_minutes = abs(minutes_offset)
+        if abs_minutes > 59:
+            raise ValueError(f"Minutes out of range: {minutes_offset}")
+        try:
+            total_minutes = hours_offset * 60
+            # apply minutes sign consistently: if hours is negative or minutes is negative, subtract minutes
+            if hours_offset < 0 or minutes_offset < 0:
+                total_minutes -= abs_minutes
+            else:
+                total_minutes += abs_minutes
+            offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+        except ArithmeticError:
+            raise ValueError("Offset is too large")
+        return cls.for_offset_millis(offset)
+
+Why this fixed code works
+- It accepts inputs where the minutes carry their own sign (e.g., -15) or where the sign is only on hours (e.g., hours=-1, minutes=15).
+- It validates that minutes magnitude is ≤ 59 (line with abs_minutes) so inputs like -75 still fail (correct).
+- It computes total_minutes in one place (no mutation of minutes_offset), making the logic clear and preventing the earlier erroneous rejection.
+
+Choose Option A if you want to enforce non-negative minutes on callers, or Option B to be robust to signed minutes inputs.

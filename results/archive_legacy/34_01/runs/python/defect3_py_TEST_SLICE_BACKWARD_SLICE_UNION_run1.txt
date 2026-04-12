@@ -1,0 +1,50 @@
+What happened
+- The failing code path is inside to_utf16_code_units(s). At line 12 the function builds code_units from the input string s, but it builds those units as Python code points (ord(c) for each Python character) rather than true UTF‑16 code units.
+- Later, at lines 38–43 the function treats code_units as if it contains UTF‑16 16‑bit units and tries to detect a high surrogate at index and then read the low surrogate at index + 1:
+  - Line 35–36 check the index, then line 38 reads high = code_units[index].
+  - Lines 39–41 check for a high surrogate and, if present, read low = code_units[index + 1].
+- For a non‑BMP character like '\U0001F630' (U+1F630) a Python str contains a single code point 0x1F630, not two UTF‑16 surrogate code units. So code_units contains a single integer 0x1F630. The code sees that value is not in the high‑surrogate range (0xD800–0xDBFF) and returns high (line 44). That part by itself is inconsistent but not the root crash.
+- The real failure is that elsewhere the rest of the code expects to iterate over UTF‑16 code units. Because to_utf16_code_units produced code points instead of 16‑bit units, any code that tries to access index+1 for what it thinks is the low surrogate can run beyond the list bounds and trigger the IndexError raised at line 36: "String index out of range: {index}".
+
+Why this is the root cause (concise)
+- The function mixes two different views of the string: Python's code points vs. UTF‑16 code units. For characters above 0xFFFF you must represent them as two UTF‑16 code units (a high and low surrogate). The current implementation does not split non‑BMP code points into surrogate halves, so code that treats the list as UTF‑16 units may try to read a low surrogate that isn't there and index past the end of the list.
+
+Exactly where it occurs
+- to_utf16_code_units(s) (start shown at line 10).
+- The index bounds check and attempted surrogate handling are at lines 35–44 (index check, reading high, checking surrogate ranges, reading low, composing code point).
+- The test fails when escaper.translate_string('\U0001F630') runs code that relies on to_utf16_code_units producing actual UTF‑16 16‑bit units; the missing low surrogate causes either a wrong result or an IndexError at the check at line 36.
+
+How to fix it (concrete steps)
+1. Decide whether to operate in Python code points or in UTF‑16 code units. Do not mix them.
+2. If you need true UTF‑16 code units, change to_utf16_code_units to produce 16‑bit units explicitly. Two safe options:
+
+   Option A — encode and unpack:
+   - bytes_le = s.encode('utf-16-le')  # little-endian without BOM
+   - code_units = [bytes_le[i] | (bytes_le[i+1] << 8) for i in range(0, len(bytes_le), 2)]
+
+   Option B — compute surrogates from code points:
+   - For each ch in s:
+       cp = ord(ch)
+       if cp <= 0xFFFF:
+           code_units.append(cp)
+       else:
+           cp' = cp - 0x10000
+           high = 0xD800 + (cp' >> 10)
+           low  = 0xDC00 + (cp' & 0x3FF)
+           code_units.extend([high, low])
+
+3. After making code_units truly UTF‑16 16‑bit units, keep the rest of the surrogate handling code (lines 38–44) consistent: reading index and index+1 will then be correct and won't run off the end for valid surrogate pairs.
+
+Minimal example fix (Option B) to replace the code that builds code_units:
+- Replace the current loop that appends ord(c) with:
+  for ch in s:
+      cp = ord(ch)
+      if cp <= 0xFFFF:
+          code_units.append(cp)
+      else:
+          cp_prime = cp - 0x10000
+          code_units.append(0xD800 + (cp_prime >> 10))
+          code_units.append(0xDC00 + (cp_prime & 0x3FF))
+
+Why this will fix your test
+- The emoji '\U0001F630' becomes two UTF‑16 code units (a high and a low surrogate) in code_units. The surrogate‑pair logic (lines 39–43) can then find the low surrogate at index + 1 safely, compose the code point correctly, and leave translate_string with the expected behavior so the assertion result == '\U0001F630' will pass.

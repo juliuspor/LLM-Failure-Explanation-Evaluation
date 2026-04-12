@@ -1,0 +1,45 @@
+What happened (in plain terms)
+- The translator code expects to work with UTF‑16 code units (16‑bit units). It builds a list called code_units (line 12) and later (lines 35–44) treats entries in that list as UTF‑16 code units (it checks for a UTF‑16 high surrogate 0xD800–0xDBFF and looks at code_units[index+1] as the low surrogate).
+- But to_utf16_code_units currently puts a single integer into code_units for a non‑BMP character (an emoji). In other words, for U+1F630 it appends the full code point value 0x1F630 as one element instead of two UTF‑16 code units (a high surrogate and a low surrogate).
+- Later code (code_point_at and the translator loop) advances the index by 2 when it thinks it handled a surrogate pair. Because code_units contains only one item for that emoji, advancing by 2 makes the caller try to access beyond the end of code_units and an IndexError is raised (this is where the tests fail).
+
+Where it goes wrong (exact lines and variables)
+- to_utf16_code_units defines code_units (line 12) but does not split astral code points into two 16‑bit units. The logic that expects surrogate pairs is at lines 38–44:
+  - high = code_units[index]
+  - if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+      low = code_units[index + 1]
+      ...
+- Because code_units[index] can be e.g. 0x1F630 (not a high surrogate), that check fails; the translator still increments index as if a surrogate pair had been consumed, causing the out‑of‑range access and the IndexError at the check at line 35: if index < 0 or index >= len(code_units): raise IndexError(...).
+
+Why this happens in Python specifically
+- Python str uses Unicode code points; ord(ch) for an emoji returns the full code point (> 0xFFFF). If to_utf16_code_units simply appends ord(ch), the list contains code points, not UTF‑16 code units. The rest of the translator assumes UTF‑16 code units (two items for astral characters), so the sizes and indexing differ.
+
+Concrete fix (step‑by‑step)
+1. Change to_utf16_code_units so that:
+   - For code points <= 0xFFFF, append that value (a single UTF‑16 unit).
+   - For code points > 0xFFFF, convert into a surrogate pair and append two 16‑bit values: the high surrogate (0xD800 + ((cp - 0x10000) >> 10)) and the low surrogate (0xDC00 + ((cp - 0x10000) & 0x3FF)).
+2. After this change, code_units will contain proper UTF‑16 code units and the existing checks at lines 35–44 will work: index arithmetic that assumes two units for a surrogate pair will no longer go out of range.
+
+Exact replacement for to_utf16_code_units (drop into your file)
+- Replace the body of to_utf16_code_units with:
+
+  def to_utf16_code_units(s: str) -> List[int]:
+      code_units: List[int] = []
+      for ch in s:
+          cp = ord(ch)
+          if cp <= 0xFFFF:
+              code_units.append(cp)
+          else:
+              cp -= 0x10000
+              high = 0xD800 + (cp >> 10)
+              low = 0xDC00 + (cp & 0x3FF)
+              code_units.append(high)
+              code_units.append(low)
+      return code_units
+
+Why this fix works
+- It produces the exact UTF‑16 16‑bit units the rest of the translator expects. For an emoji like U+1F630 the list now contains two items (the high and low surrogate), so any code that advances the index by 2 will remain in bounds and surrogate detection at lines 38–44 will behave correctly.
+
+Summary
+- Root cause: to_utf16_code_units returned code points instead of UTF‑16 code units, so the caller’s logic for surrogate pairs used wrong length assumptions and indexed past the end of the list.
+- Fix: split astral code points into the correct high/low surrogate values and append both to code_units (code provided). After that, the tests you showed should stop raising IndexError.

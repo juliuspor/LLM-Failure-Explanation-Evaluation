@@ -1,0 +1,58 @@
+What happened (what failed)
+- The tests trigger an IndexError raised at the bounds check in your slice block:
+  - Lines shown: 35–36
+    - 35: if index < 0 or index >= len(code_units):
+    - 36:     raise IndexError(f"String index out of range: {index)")
+- That IndexError happens while translating strings that include a Unicode scalar outside the BMP (a code point >= U+10000, e.g. emoji like U+1F630). Those are represented in UTF‑16 as a surrogate pair (two 16‑bit code units). Your translate loop advances the index incorrectly after encountering a surrogate pair, so a subsequent access attempts to read code_units[index] where index == len(code_units), triggering the check on line 35.
+
+Why it failed (root cause)
+- The translator works on UTF‑16 code units (variable name: code_units).
+- You use code_point_at(...) or similar to read a code point starting at index. When that code point is a surrogate pair, code_point_at correctly returns a single code point value but the underlying data consumed two code units.
+- After handling that code point you increment index by only 1 (or otherwise fail to account for the second code unit). That leaves index pointing at the second (low) surrogate or beyond the end of the array depending on the sequence of increments.
+- Later the loop tries to read code_units[index] (or call code_point_at(index) again). If the earlier mis‑increment left index == len(code_units), the bounds check at lines 35–36 fails and raises IndexError.
+- Evidence in your tests: input_str = "\U0001F630A" is a 3‑code‑unit UTF‑16 sequence (high-surrogate, low-surrogate, then 'A'). The incorrect index arithmetic ends up trying to read past the array end when advancing after the surrogate pair.
+
+Where it occurred (specific variables / methods / lines)
+- Methods: translate (the main loop using code_units and index), code_point_at (used to get the code point), to_utf16_code_units (which produces code_units).
+- Variables: index, code_units, code_point (returned by code_point_at).
+- Exact failing check: the guard at lines 35–36 (index >= len(code_units)) raises the IndexError when index has been advanced incorrectly.
+
+Concrete, step-by-step fix (explicit changes to make)
+1. When you detect that code_point_at returned a code point > 0xFFFF (i.e. it consumed a surrogate pair), advance index by 2, not by 1.
+   - Example change inside your loop:
+     - Currently (incorrect):
+       - index += 1
+     - Replace with:
+       - if code_point > 0xFFFF:
+           index += 2
+         else:
+           index += 1
+2. Ensure code_point_at does its own bounds checks safely:
+   - Before reading the low surrogate, verify index + 1 < len(code_units). If not, treat as a malformed surrogate (handle as you do elsewhere) instead of reading out of bounds.
+   - That prevents reading code_units[index + 1] when the high surrogate is the last code unit.
+3. Alternatively, rewrite the loop to always check bounds before accessing code_units[index]:
+   - Use while index < len(code_units): and inside the loop only access code_units[index] after confirming index < len(code_units).
+4. Add unit tests that exercise:
+   - Surrogate pair at the end of the string (you already have test_translate_surrogate_at_end).
+   - Surrogate pair followed by ASCII (the failing test test_translate_surrogate_pair_with_suffix).
+   - Malformed lone high/low surrogates.
+
+Why these steps fix it
+- Advancing index by 2 after consuming a surrogate pair ensures the next loop iteration starts at the right code unit (the next real character), so you never try to access past the end.
+- Explicit bounds checks around reading the low surrogate prevent any attempt to read code_units[index + 1] when it doesn't exist.
+- Using while index < len(code_units) makes the loop invariant explicit and prevents off‑by‑one reads.
+
+Minimal example patch (pseudocode)
+- Inside your translate loop where you call code_point_at:
+  - cp = code_point_at(code_units, index)
+  - if cp > 0xFFFF:
+      # consumed two UTF-16 units (surrogate pair)
+      ... (append/translate cp) ...
+      index += 2
+    else:
+      ... (append/translate cp) ...
+      index += 1
+
+Summary
+- Root cause: index advanced incorrectly after consuming a surrogate pair (didn't skip 2 UTF‑16 code units), causing subsequent access to index == len(code_units) and the IndexError at the bounds check (lines 35–36).
+- Fix: after processing a code point that came from a surrogate pair (code_point > 0xFFFF), advance index by 2, and add/verify bounds checks around reading the low surrogate.

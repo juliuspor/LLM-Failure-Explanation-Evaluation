@@ -1,0 +1,52 @@
+What happened (root cause)
+- The updating logic in TimePeriodValues._update_bounds is overwriting the computed min/max index with the current index unconditionally. In the slice you provided the min_start update shows this clearly:
+  - Line 346: if start < min_start: self._min_start_index = index
+  - Line 349: self._min_start_index = index
+- That unconditional assignment on line 349 makes _min_start_index always become the most recently added index, ignoring the earlier comparison. The same pattern (a wrong variable used or an unconditional assignment) exists for the "middle" bounds code path, causing get_max_middle_index() to return the wrong index (the last added index or some other wrong index) instead of the index selected by the comparison.
+
+Why that causes the test failure
+- In your test_max_middle_index_simple() the correct max middle should be at index 1 (mid=150). Because the code overwrites the index with the current index regardless of the comparison result, the stored max_middle_index ends up wrong (for the Java case you referenced it became 3). The update routine never preserves the earlier winner because of the unconditional assignment after the comparison block.
+
+Exactly where it occurs
+- In the slice you provided:
+  - The comparison that should update _min_start_index happens at line 346.
+  - Immediately afterwards line 349 unconditionally assigns self._min_start_index = index, wiping out the intended effect.
+- The same pattern is present for the middle bounds code path (the code that computes start/middle/end and updates _max_middle_index / _min_middle_index). There either:
+  - A wrong variable is used in the comparison (e.g. comparing against max_middle instead of the index), or
+  - An unconditional assignment resets the index after the comparison, just like the lines shown for min_start.
+
+What to change (step-by-step, unambiguous)
+1. Open TimePeriodValues._update_bounds and locate each bounds update block:
+   - min_start (_min_start_index)
+   - max_start (_max_start_index)
+   - min_end (_min_end_index)
+   - max_end (_max_end_index)
+   - min_middle (_min_middle_index)
+   - max_middle (_max_middle_index)
+2. For each block ensure you only assign the index in two cases:
+   - If this is the first element processed (index == 0 or stored index == -1), set the index to the current index.
+   - Otherwise, only set the stored index when the comparison shows the current period is smaller/larger than the stored value (e.g., if start < min_start: self._min_start_index = index).
+3. Remove any unconditional assignments that follow the comparison (like the line 349 shown). Those lines are the bug.
+4. Check that comparisons use the numeric values (start, end, middle) and compare to the numeric min/max values, not accidentally comparing or assigning index variables to the numeric extremes. E.g. do not compare middle to _max_middle_index (an index); compare middle to max_middle (a numeric middle value).
+5. Run the test suite (your provided tests). Expected results:
+   - get_max_middle_index() returns 1 for the simple test
+   - min/max start/end/middle tests pass
+   - generic MockTimePeriod branch is exercised and passes
+
+Minimal pseudo-fix example (pattern)
+- Wrong:
+    if self._min_start_index >= 0:
+        if start < min_start:
+            self._min_start_index = index
+    self._min_start_index = index  # <-- BUG: unconditional overwrite
+- Correct:
+    if self._min_start_index < 0:
+        self._min_start_index = index
+    else:
+        if start < min_start:
+            self._min_start_index = index
+
+Why this will fix it
+- Removing the unconditional overwrite ensures the stored index is only changed when the new element is actually the new min/max, or when there was no prior value. That preserves the previously found extremum and fixes max_middle_index being set to the wrong index.
+
+If you want, paste the relevant _update_bounds method here and I will show the exact lines to change and produce a small patch.

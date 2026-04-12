@@ -1,0 +1,49 @@
+What happened (where and what raised):
+- At line 35 the code does this bounds check:
+  if index < 0 or index >= len(code_units):
+  and then at line 38 immediately reads:
+  high = code_units[index]
+- An IndexError ("String index out of range: 2") was raised because index (2 in your case) is not a valid index into the list code_units. The bounds check used len(code_units) but the index value being checked is coming from a different domain (the original string index), so the check does not correctly protect the subsequent access.
+
+Why it happened (root cause):
+- The code mixes two different concepts: the original string positions and the derived list of UTF-16 code units (code_units). The variable index is a string index (position in the input string), but the bounds check uses len(code_units). Since code_units and the input string can have different lengths (surrogate pairs expand to two code units, so code_units can be longer than the string, or some processing could make them shorter), comparing index against len(code_units) is incorrect. As a result, index can be outside the valid range for code_units and code_units[index] raises IndexError at line 38.
+
+Exactly where to change (concrete fixes):
+Choose one of these based on your intent and apply only that fix.
+
+1) If index is meant to be an index into the original string s:
+- Replace the check at line 35 to compare against the string length (s or input_seq), not code_units:
+  if index < 0 or index >= len(s):
+      raise IndexError(f"String index out of range: {index}")
+- Then convert the string position to UTF-16 code-unit lookup before using code_units[index]. For example, derive the corresponding code-unit index, or operate directly on s (use ord(s[index]) and handle surrogate pairs in s), not on code_units[index].
+
+2) If index is supposed to be an index into code_units:
+- Make sure callers pass an index relative to code_units, or rename the parameter to make that clear.
+- Keep the existing bounds check but ensure index is computed in the code-unit space. If callers currently pass string indices, update the call sites to convert string index -> code_unit index before calling this function.
+- Optionally update the docstring to state which index domain is expected.
+
+Suggested code patch for option 1 (most likely fix if method is translating string):
+- At top of function have access to the input string variable (s). Replace the faulty check:
+
+  # wrong:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+
+  # correct (if index is a string index):
+  if index < 0 or index >= len(s):
+      raise IndexError(f"String index out of range: {index}")
+
+  # then, to get the code point from s safely:
+  high = ord(s[index])
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(s):
+      low = ord(s[index + 1])
+      if 0xDC00 <= low <= 0xDFFF:
+          return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  return high
+
+Why this fix works:
+- It checks the same domain as index (the string) so the bounds check is correct and you never read past the end of s.
+- It then uses ord(s[index]) and ord(s[index+1]) to handle surrogate pairs based on the string contents instead of indexing the separate code_units list.
+
+Summary:
+The error comes from checking index against len(code_units) while index is actually a string index. Fix by making the bounds check and subsequent reads operate on the same object (string s or code_units), and update callers or docstring so index meaning is unambiguous.

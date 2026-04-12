@@ -1,0 +1,61 @@
+What happens
+- The bug is a unit mismatch between what translate_codepoint(...) returns (stored in consumed) and how translate(...) advances pos afterward.
+- translate_codepoint(...) is treated as if it returns a count of code units (char-sized entries in code_units) in one place but treated as a count of codepoints in another place. That makes translate(...) advance pos incorrectly and skip or over-run input.
+
+Where it occurs (specific lines / variables)
+- consumed = self.translate_codepoint(code_units, pos, out) — the value returned is stored in consumed.
+- The loop that advances pos is:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (this loop runs consumed times and each iteration advances pos by the number of code units that make up the codepoint at the current pos)
+- The helper used to inspect codepoints is code_point_at(code_units, pos) (shown in the slice) and char_count(...) returns 1 for BMP codepoints or 2 for supplementary codepoints.
+
+Why that fails (concrete example)
+- Suppose the translator handled a surrogate pair and returned consumed == 2 (meaning “I consumed 2 code units”).
+  - The for-loop runs twice.
+  - On the first iteration it reads the surrogate pair at pos and char_count(...) returns 2, so pos += 2 (correctly skips the pair).
+  - On the second iteration it reads the next codepoint at the new pos and advances again — so the code skips one extra codepoint. You lose one codepoint of input and can also read past the end of code_units.
+- Suppose instead the translator returned consumed == 1 (meaning “I consumed 1 codepoint”).
+  - The loop runs once and adds char_count(...) for that codepoint (1 for BMP, 2 for supplementary). That case is correct.
+- So the behavior is inconsistent: if translate_codepoint returns code-unit counts (1 or 2), the loop double-counts; if it returns codepoint counts (1,2,3...), the loop is fine. The code fails when the translator uses the other convention.
+
+Root cause summary
+- The contract for what translate_codepoint returns (codepoints vs. code units) is ambiguous or violated. translate(...) assumes consumed is a codepoint count (it iterates consumed times and uses char_count to convert each codepoint to code units), but some translators apparently return code unit counts. The mismatch causes incorrect pos advancement and lost or out-of-range reads.
+
+Concrete fixes (choose one and apply consistently)
+1) If translate_codepoint should return number of code units consumed:
+   - Replace the for-loop with a single increment:
+     pos += consumed
+   - Remove the char_count / code_point_at work there. This makes pos advance by code units, matching translate_codepoint.
+   - Add an assertion or docstring on translate_codepoint that it returns code unit count.
+
+2) If translate_codepoint should return number of codepoints consumed:
+   - Keep the loop but make sure every translator implementation returns codepoint counts (1 per logical codepoint handled), not code-unit counts.
+   - Document the contract clearly and add unit tests to enforce it.
+   - Consider renaming consumed to consumed_codepoints to avoid confusion.
+
+3) Defensive safety (recommended in addition to one of the above)
+   - After translate_codepoint returns, validate consumed:
+     if consumed < 0: raise ValueError(...)
+     if consumed == 0: ... (already handled)
+     if pos + consumed > length: raise IndexError("translator claimed too many code units")
+   - Or check that consumed is in {0,1} if that is expected.
+
+Minimal patch examples
+- If translator returns code units:
+  replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with
+    pos += consumed
+
+- If translator returns codepoints:
+  document translate_codepoint to return codepoints and add an assertion at the call site:
+    if consumed < 0:
+        raise ValueError("invalid consumed value")
+    # consumed is number of codepoints handled
+    for _ in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+Why this explanation is definitive
+- The only place pos is advanced after a non-zero consumed is the for-loop. The loop's behavior depends directly on the meaning of consumed. The observed failures (skipped characters, index errors) match the exact symptom when a translator returns code-unit counts while the loop treats consumed as codepoint counts.

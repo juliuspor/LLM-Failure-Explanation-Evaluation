@@ -1,0 +1,44 @@
+What happened (symptom)
+- The code raises IndexError at lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- That check fails even though the caller passed an index that was valid for the original Python string. The code then crashes before it can read code_units[index] at line 38.
+
+Why it failed (root cause)
+- to_utf16_code_units builds code_units as a list of UTF‑16 code units (variable name code_units, constructed earlier in that function).
+- The index variable being checked at line 35 is not guaranteed to be an index into that code_units list. The caller (or other code) appears to be using index as an index into the original Python str (a sequence of Unicode code points / code points), but len(code_units) is the number of UTF‑16 code units, which can be different from len(s):
+  - For BMP characters each character becomes one UTF‑16 code unit.
+  - For characters outside the BMP each character becomes a surrogate pair (two UTF‑16 code units).
+- Because of that mismatch, an index that is valid for the original string (e.g. index < len(s)) can be >= len(code_units) (or vice versa). The check at lines 35–36 therefore rejects an index that was meant for a different representation and raises IndexError.
+
+Where it occurs
+- In to_utf16_code_units (s: str) at the index boundary check (lines 35–36) just before reading code_units[index] (line 38). The variable names involved: index, code_units, and the function to_utf16_code_units.
+
+How to fix it (concrete steps)
+Choose one of these, depending on what index is supposed to represent:
+
+1) If index is meant to be an index into the original Python string s (code points):
+   - Do not compare index against len(code_units). Instead check against len(s).
+   - When you need to read the corresponding UTF‑16 code unit(s), convert the character at s[index] into UTF‑16 code units and operate on that. For example:
+     - Replace the check at lines 35–36 with: if index < 0 or index >= len(s): raise IndexError(...)
+     - When you later need high/low units, first obtain the UTF‑16 units for s[index] (and s[index+1] only if you mean the next code point, not the next code unit).
+   - This makes the check match the index's intended domain.
+
+2) If index is meant to be an index into the UTF‑16 code_units list:
+   - Ensure the caller supplies an index measured in UTF‑16 code units, not code points.
+   - Keep the check against len(code_units) but make callers convert their string index to a code_unit index before calling. Provide a helper that maps a code point index to a code_unit index by encoding the prefix to UTF‑16 and taking its length.
+
+3) Alternatively, normalize the code path so everything uses one consistent representation:
+   - Either always work in code points (Python str indices) and do UTF‑16 conversion only where necessary, or always expose/accept UTF‑16 indexes and document that clearly.
+   - Add unit tests that exercise BMP and non‑BMP characters (e.g. "a" vs "😊") to ensure indices behave consistently.
+
+Concrete minimal code change for case (1)
+- Change the boundary check to use len(s) instead of len(code_units):
+  35 |     if index < 0 or index >= len(s):
+  36 |         raise IndexError(f"String index out of range: {index}")
+
+Why this fixes it
+- The IndexError will now be raised only when index is outside the domain it actually refers to (the source string s). That removes the mismatch between index and the list length that caused the incorrect rejection.
+
+Summary
+- The code mixes two different index domains (string code point indices vs. UTF‑16 code unit indices). The boundary check at lines 35–36 compares index against len(code_units) when index was a string index, causing false IndexError. Fix by making the checked length match what index represents (len(s)) or by converting indices to the same representation before checking.

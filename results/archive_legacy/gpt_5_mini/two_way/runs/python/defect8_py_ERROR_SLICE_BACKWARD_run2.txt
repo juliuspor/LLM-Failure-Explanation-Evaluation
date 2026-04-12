@@ -1,0 +1,39 @@
+What happened (where and which variables)
+- The exception is raised inside Locale.to_locale (method name shown on line 188) while parsing the input string stored in locale_str.
+- length = len(locale_str) is computed on line 222.
+- The code then later reads ch3 = locale_str[3] and ch4 = locale_str[4] on lines 237–238 and raises ValueError on line 240 if those characters are not uppercase A–Z.
+- For the failing input "fr__POSIX", locale_str[3] is '_' (not an uppercase letter), so the check fails and you get "Invalid locale format: fr__POSIX".
+
+Why this is the root cause (exact bug)
+- The parser is using the wrong length/format branch when it tries to read characters at indexes 3 and 4.
+- From the slice: the branch guard immediately before those index reads is wrong. The code that should ensure the string is the expected length (so accessing [3] and [4] is safe and meaningful) does not do so — instead it reaches that code for the "fr__POSIX" input.
+- Concretely: the code reads ch3/ch4 assuming locale_str has the form "xx_YY" (length 5, language + underscore + 2-letter region), but the branch that precedes it does not guarantee length==5. As a result, you either index the wrong characters for longer formats (like "fr__POSIX") or you index out-of-range for shorter ones.
+
+Why "fr__POSIX" fails specifically
+- "fr__POSIX" has the form language + "_" + "" + "_" + variant; the characters at positions 3 and 4 are '_' and 'P'. The code expects positions 3 and 4 to be uppercase letters (region code). ch3 == '_' fails the A–Z check, so the parser treats the whole string as invalid instead of recognizing it as language + empty region + variant.
+
+What to change (concrete steps)
+1. Fix the length/branch condition around line 231 so the region-check code runs only when locale_str actually has the region format:
+   - If the code currently says "if length == 2:" (or any incorrect test), change it so the region-checking block runs when length == 5 (the "xx_YY" case).
+   - Example: replace "if length == 2:" with "if length == 5:" for the branch that reads ch3 = locale_str[3] and ch4 = locale_str[4].
+
+2. Add explicit handling for variants and empty-region cases:
+   - Recognize "xx__VARIANT" (two underscores) patterns and parse variant starting at index 3 (or use split).
+   - Or use a small state machine / regex to accept these forms:
+     - "ll" (2-letter language)
+     - "ll_CC" (language + underscore + 2-letter region)
+     - "ll__VARIANT" (language + empty region + underscore + variant)
+     - "ll_CC_VARIANT" (language + region + variant)
+   - Concretely: before accessing locale_str[3] and [4], check len(locale_str) >= 5; and test locale_str[2] == '_' to distinguish "ll_CC" vs other shapes.
+
+3. Add unit tests for these examples:
+   - "fr" (language only)
+   - "fr_FR" (language+region)
+   - "fr__POSIX" (language + empty region + variant)
+   - "fr_FR_POSIX" (language + region + variant)
+
+Why these steps fix the problem
+- They ensure the code only reads ch3/ch4 when the string layout actually has a region at those positions, preventing false failures on inputs like "fr__POSIX".
+- They explicitly support the variant syntax that caused this test failure instead of treating it as invalid.
+
+If you want, paste the surrounding lines 220–245 and I will show the exact one-line edit to change the branch condition and a small regex-based replacement you can drop in to cover all the formats.

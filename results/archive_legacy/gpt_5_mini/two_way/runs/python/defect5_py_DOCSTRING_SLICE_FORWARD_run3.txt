@@ -1,0 +1,89 @@
+I can’t point to the exact failing line without the source, but from your docstring and the typical mistakes that produce the symptoms you describe, the bug is almost certainly in one of these three places:
+
+1) deciding the element type when element is None  
+2) doing runtime type checks against a typing.* object (like typing.List or Optional)  
+3) making the “copy + append” in a way that mutates the original instead of returning a new list
+
+Below I list the concrete things to check in your code, what will go wrong at each place, the specific variables/expressions to inspect, and exact step-by-step fixes you can apply.
+
+What to inspect (look for these exact names/expressions in your code)
+- Any use of element.__class__ or type(element) when element can be None.
+  - Problem: element.__class__ raises AttributeError when element is None.
+  - Where to look: code path that starts with “if array is None” or creating a new one-element list.
+
+- Any runtime call like isinstance(element, expected_type) or issubclass(..., expected_type) where expected_type may be a typing object (typing.List, typing.Optional, Union, etc.).
+  - Problem: isinstance(..., typing.List) raises TypeError: "Subscripted generics cannot be used with class and instance checks" (Python 3.8+). Using a typing.* object directly in isinstance/issubclass will fail.
+  - Where to look: the branch that raises TypeError for mismatched types.
+
+- Any code that does new_list = array; new_list.append(element) (or similar) instead of making a real copy.
+  - Problem: that mutates the caller’s list instead of returning a new one as the docstring promises.
+  - Where to look: the lines that construct and return the new list.
+
+Why each of those causes failure (concrete examples)
+- element is None → element.__class__ will throw:
+  - Example code: if array is None: return [element.__class__()]  # will fail when element is None
+  - Real symptom: AttributeError: 'NoneType' object has no attribute '__class__' (or code that uses element.__class__ as a type will misbehave)
+
+- expected_type from typing → isinstance raises TypeError:
+  - Example code: if expected_type and not isinstance(element, expected_type): raise TypeError(...)
+  - Real symptom: TypeError: Subscripted generics cannot be used with class and instance checks
+  - This will happen when expected_type is a typing construct like List[int], Optional[str], Union[...], etc.
+
+- Shallow “copy” mistake mutates original:
+  - Example code: new_list = array; new_list.append(element); return new_list
+  - Real symptom: caller’s array now contains the new element (violates docstring), and concurrent callers see mutated list.
+
+How to reproduce quickly (use these exact checks in a REPL)
+- Check element None path:
+  - Call function with array=None, element=None. If you get AttributeError or the return type is wrong, it’s the element.__class__ handling.
+- Check typing guard:
+  - Call with expected_type=typing.List[int] and element=1. If you get TypeError from isinstance, you hit the typing-isinstance bug.
+- Check mutation:
+  - a = [1,2]; b = your_add(a, 3); assert a == [1,2]  (if that fails, you mutated a)
+
+Exact fixes (copy-pasteable patterns you can apply)
+1) Safely choose the element type when element may be None
+- If you need a concrete element type and the element may be None:
+  - safe_type = object if element is None else type(element)
+
+2) Do runtime type checks safely (don’t pass typing.* objects to isinstance)
+- If expected_type can be a typing object, convert it to a real class before isinstance, or only accept real classes:
+  - If expected_type is supposed to be a class, ensure callers pass a class. Validate:
+    - if expected_type is not None and not isinstance(expected_type, type): raise TypeError("expected_type must be a class")
+  - If you must accept typing constructs, use typing.get_origin / get_args or the typing_inspect package and write explicit checks for supported forms (Union, Optional, etc.). Simpler: restrict expected_type to real classes.
+- Example safe check:
+  - if expected_type is not None:
+      if not isinstance(expected_type, type):
+          raise TypeError("expected_type must be a class, not a typing object")
+      if element is not None and not isinstance(element, expected_type):
+          raise TypeError(...)
+
+3) Make a true copy, then append
+- Use a.copy() or list(array) to avoid mutating the original:
+  - if array is None:
+      return [element]
+    else:
+      new_list = array.copy()   # or list(array)
+      new_list.append(element)
+      return new_list
+
+Minimum corrected implementation (behavior matches your docstring)
+- In prose (apply to your code using the exact variable names):
+  - If array is None:
+      - if element is None: return [None] with element type logically being object
+      - else: return [element]
+  - Else (array not None):
+      - If expected_type is provided, ensure expected_type is a class (not a typing object) and, if element is not None, check isinstance(element, expected_type) and raise TypeError on mismatch.
+      - Make new_list = array.copy() (do not assign array itself), append the element, return new_list.
+
+What to change at which lines (be explicit)
+- Find the "if array is None" branch (line X). Replace any use of element.__class__ with type(element) guarded by element is not None; if element is None, use object.
+- Find the type-checking line(s) using isinstance(..., expected_type) (line Y). Replace them with:
+  - if expected_type is not None:
+      if not isinstance(expected_type, type):
+          raise TypeError("expected_type must be a concrete class")
+      if element is not None and not isinstance(element, expected_type):
+          raise TypeError("type mismatch")
+- Find the list construction/append lines (line Z). Replace any in-place append on the original list with new_list = array.copy(); new_list.append(element); return new_list
+
+If you want, paste the failing function (or the 20 lines around the failure) and I will point exactly to the failing line and provide a one-line patch.

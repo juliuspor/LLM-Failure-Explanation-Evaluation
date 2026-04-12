@@ -1,0 +1,55 @@
+What happened (what failed)
+- For inputs where lower > len(text) (example: abbreviate("0123456789", 15, 20, None)) the function raises IndexError when calling StringUtils.index_of(text, " ", lower).
+- index_of (and substring_java) rely on slicing with start positions (see slice implementation at line 34: return s[start:end]). Passing a start greater than the string length causes an IndexError in that slicing helper.
+
+Why it happens (root cause, exact spot)
+1. After these lines:
+   - you clamp upper to len(text) with:
+     if upper == -1 or upper > len(text):
+         upper = len(text)
+   - then you do:
+     if upper < lower:
+         upper = lower
+   If lower > len(text), now upper becomes lower (still > len(text)).
+2. Next you call:
+     index = StringUtils.index_of(text, " ", lower)
+   Because lower > len(text), StringUtils.index_of receives a start value outside the string bounds and uses slicing/indexing internally (see slice implementation at line 34), which raises IndexError. That is the direct point of failure.
+
+Where it occurs
+- The failure is triggered at the index_of call (the line with index = StringUtils.index_of(text, " ", lower)), after you set upper = lower when lower > len(text).
+- The underlying slicing helper (substring_java / the slice implementation at line 34) does not tolerate start > len(text), so the out-of-range lower propagates into an IndexError.
+
+Concrete fixes (step-by-step, choose one)
+Option A — clamp lower before using it
+- Add a guard that ensures lower is at most len(text) before you call index_of and before any slicing:
+  - Insert before the index_of call:
+      if lower >= len(text):
+          lower = len(text)
+  - This guarantees StringUtils.index_of never receives a start > len(text), and prevents the IndexError.
+
+Option B — return early if lower is beyond the text
+- If you intend that a lower beyond the text means "no abbreviation needed", return the (possibly appended) text right away:
+  - Insert before index_of:
+      if lower >= len(text):
+          return text + StringUtils.default_string(append_to_end)
+  - This avoids calling index_of or doing any slicing with an out-of-range start.
+
+Option C — check bounds before setting upper = lower
+- If the logic requires upper to track lower but only within the text bounds, change the ordering/logic so you never set upper to a value > len(text). For example:
+  - After clamping upper to len(text) (the first if), check:
+      if lower > len(text):
+          lower = len(text)   # or return as in Option B
+      if upper < lower:
+          upper = lower
+
+Pick the option that matches intended behavior:
+- If you want abbreviate("0123456789", 15, 20, None) to return the original string (with append_to_end) use Option B.
+- If you want to treat lower values > len(text) as equal to len(text) then use Option A or C.
+
+Minimal patch example (Option A):
+  # before: index = StringUtils.index_of(text, " ", lower)
+  if lower >= len(text):
+      lower = len(text)
+  index = StringUtils.index_of(text, " ", lower)
+
+This fixes the IndexError by ensuring no helper is called with start > len(text).

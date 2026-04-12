@@ -1,0 +1,51 @@
+What happened (root cause)
+- In GrayPaintScale.get_paint the grayscale component g is computed from the input value without first clamping the normalized fraction into [0,1].
+- For example, in your failing test call gps.get_paint(-0.5):
+  - lower is 0.0 and upper is 1.0 (defaults).
+  - fraction = (value - lower) / (upper - lower) = (-0.5 - 0.0) / 1.0 = -0.5.
+  - g is then computed as int(fraction * 255) (or similar), producing g = -127 (roughly).
+  - The code then hits the check at lines 74–75:
+    74 |         if g < 0 or g > 255:
+    75 |             raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+  - Because g is negative, that condition is true and a ValueError is raised. The test expects the negative input to be clamped to black (0,0,0), not to raise an exception.
+
+Where it occurred
+- Method: GrayPaintScale.get_paint
+- Variables: value (input), fraction (normalized), g (grayscale byte)
+- Exact check that raises: lines 74–75 (the g range test).
+
+Why this is wrong
+- The code validates g after computing it, but it never clamps values outside the allowed input range into the [0,1] interval. Tests (and the original Java behaviour) require inputs below lower to map to black and above upper to map to white.
+- The check on lines 74–75 is a symptom, not the intended behaviour: instead of raising for out-of-range inputs, the method should clamp them and return a valid color tuple.
+
+Exact fixes (step-by-step)
+1. Normalize, then clamp the fraction into [0.0, 1.0] before multiplying by 255, or clamp g into [0,255] after computing it. Either approach is fine, but clamping the fraction is clearer.
+2. Remove the unconditional ValueError for out-of-range g, or keep the check only as a sanity assert (not as user-visible exception), because valid clamping should prevent it.
+
+Patch examples
+
+Option A — clamp the fraction (recommended)
+- Find where fraction is computed, then add:
+    fraction = (value - self.lower) / (self.upper - self.lower)
+    if fraction < 0.0:
+        fraction = 0.0
+    elif fraction > 1.0:
+        fraction = 1.0
+    g = int(fraction * 255.0)
+- Then the existing check at lines 74–75 will never trigger for normal numeric inputs.
+
+Option B — clamp g directly
+- After computing g, replace the raise with:
+    if g < 0:
+        g = 0
+    elif g > 255:
+        g = 255
+
+Which lines to change
+- Add the clamping lines immediately after the fraction calculation (before g is computed) or immediately after g is computed, and remove or convert the raise on lines 74–75 to a clamp. The problematic raise is at lines 74–75.
+
+Small note about the error message
+- The message "Color parameter outside of expected range: Red Green Blue" is generic and doesn’t show the offending values. After fixing clamping, you can remove this raise entirely or change it to an assert with a helpful debug message if you still want an internal sanity check.
+
+Summary
+- The test fails because get_paint computes a negative g for input -0.5 and raises on lines 74–75 instead of clamping the input to 0 and returning (0,0,0). Fix by clamping the normalized fraction to [0,1] (or clamping g to [0,255]) before the range check.

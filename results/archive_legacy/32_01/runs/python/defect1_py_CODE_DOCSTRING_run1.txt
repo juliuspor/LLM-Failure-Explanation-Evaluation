@@ -1,0 +1,58 @@
+What happened (root cause)
+- In for_offset_hours_minutes the code tries to convert hours + minutes into a single total minute count, but it gets the sign handling wrong. The mistake is in the block that starts with:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+- On the negative-hours branch the code subtracts minutes_offset instead of subtracting the absolute minutes. That flips the sign when minutes_offset itself is negative. Example:
+  - Input: hours_offset = -2, minutes_offset = -15
+  - hours_in_minutes = -120
+  - Code computes minutes_offset = -120 - (-15) = -105
+  - Correct total minutes should be -120 - 15 = -135
+
+- The bug therefore produces the wrong total minute offset whenever hours_offset < 0 and minutes_offset is negative (and also mutates the input variable minutes_offset which makes the code harder to follow). That incorrect total then gets multiplied and passed to for_offset_millis, so the resulting zone is wrong.
+
+Where it occurs (lines)
+- In the try block, the lines that compute hours_in_minutes and then replace minutes_offset are where the error occurs:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset   <- wrong
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+Why that is wrong (simple explanation)
+- For negative hours you must subtract the absolute value of the minutes portion (so both (-2, 15) and (-2, -15) become -135 minutes). The code instead subtracts minutes_offset directly; when minutes_offset is negative that becomes an addition and yields the wrong magnitude and sign.
+
+Fix (concrete steps)
+1. Validate the sign combination the docstring requires:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes must be non-negative when hours are positive")
+   (The current code does not enforce this.)
+
+2. Compute total minutes without mutating minutes_offset and with correct sign handling:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - abs(minutes_offset)
+     else:
+         total_minutes = hours_in_minutes + minutes_offset
+
+3. Multiply total_minutes by MILLIS_PER_MINUTE (via FieldUtils.safe_multiply) and pass that to for_offset_millis.
+
+Minimal corrected code fragment
+Replace the problematic portion with:
+
+    hours_in_minutes = hours_offset * 60
+    # enforce sign rule from docstring
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours are positive")
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix works
+- It always combines hours and minutes into a single integer minute count with the correct sign. Using abs() for the negative-hours branch ensures both (-2,15) and (-2,-15) map to -135 minutes, matching the docstring examples. Not reusing minutes_offset keeps the logic clear and avoids accidental sign flips.
+
+If you want, I can provide a few failing unit-test inputs and the corrected expected outputs so you can verify behavior quickly.

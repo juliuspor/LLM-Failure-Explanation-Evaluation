@@ -1,0 +1,46 @@
+What happened
+- The IndexError happens on line 38 where slice_forward does this: high = code_units[index].
+- The exception message "String index out of range: 2" means index == 2 but len(code_units) == 2, so code_units[index] is out of range.
+- In other words, the caller called slice_forward with index equal to the length of code_units; slice_forward never checked that index < len(code_units) before doing code_units[index].
+
+Why it happened (root cause)
+- slice_forward assumes the caller will only call it with a valid index. It only checks index+1 < len(code_units) before accessing the next unit (low), but it does not check index < len(code_units) before accessing the current unit (high).
+- Because the caller increments index elsewhere (likely to skip a surrogate pair) and then calls slice_forward again, the caller can pass index == len(code_units). When that happens, line 38 tries to read code_units[index] and triggers the IndexError.
+- The failure occurs for the test input '\U0001F630' because the implementation deals with UTF-16 code units / surrogate pairs (lines 39–43). That processing causes the caller to advance the index and eventually call slice_forward at the exact end of the code_units array (index == len), producing the out-of-range read.
+
+Where it occurred
+- In slice_forward, at line 38: high = code_units[index] — there is no boundary check for index < len(code_units).
+
+Concrete fixes (exact steps)
+Pick one of these (both are explicit):
+
+Option A — Add a guard at the start of slice_forward
+1. At the top of slice_forward (before line 38), add:
+   if index >= len(code_units):
+       raise IndexError(f"index out of range: {index}")
+   (or return a sentinel value if your API prefers)
+2. This makes the error explicit and prevents an attempt to read code_units[index].
+
+Option B — Fix the caller so it never calls with index == len(code_units)
+1. Find the loop or code that increments index and calls slice_forward. Make sure it uses a loop condition like:
+   while index < len(code_units):
+       ...
+       value = slice_forward(code_units, index)
+2. When you advance index to skip a surrogate pair, ensure you only do index += 2 when index+1 < len(code_units). If index is advanced to len(code_units), don’t call slice_forward again.
+
+Option C — Combine both for safety
+1. Add the guard in slice_forward (Option A).
+2. Also fix the caller to maintain the invariant index < len(code_units) before calling slice_forward.
+
+Why these fixes fix it
+- Option A prevents an out-of-range read inside slice_forward by checking the index first.
+- Option B keeps the caller from passing an invalid index in the first place, preserving the function’s original assumption.
+- Doing both is defensive and avoids both the root cause and silent misuse.
+
+Minimal suggested change (if you want one-line edit)
+- Insert before line 38:
+  if index >= len(code_units): raise IndexError(f"index out of range: {index}")
+
+This directly prevents the crash and will point you back to the caller to decide whether passing that index was a bug.
+
+If you want, paste the caller loop that calls slice_forward and I will point the exact place to change it.

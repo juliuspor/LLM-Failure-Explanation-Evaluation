@@ -1,0 +1,57 @@
+What happened (root cause)
+- The bug is inside TimePeriodValues._update_bounds when it updates the "maximum middle" tracking.
+- The code computes the current period's middle value (mid) but, when deciding whether to update self._max_middle_index, it compares/assigns the wrong variable: it uses an index variable where it should use the middle-value variable (or vice versa). In short, the comparison is made between mid and an index variable (or the stored index is compared/used as if it were the stored middle value).
+- As a result, the update logic can pick the wrong index. In your failing test (mid values: index 0→50, 1→150, 2→25, 3→75) the logic ends up treating the numeric index as if it were a middle value and chooses index 3 instead of index 1.
+
+Exactly where it occurs
+- The problem is in method _update_bounds (the code block that updates max/min middle indices). Look for the section that:
+  - computes mid (the period's middle),
+  - checks if self._max_middle_index >= 0,
+  - then reads the previous middle value for that stored index,
+  - and compares mid to that previous middle to decide whether to set self._max_middle_index = index.
+- In the buggy implementation the conditional compares mid against the stored index (self._max_middle_index) or uses the wrong variable name (for example comparing mid > max_middle_index instead of mid > max_middle), or assigns the index into the middle-value variable. That mismatch of "index vs value" causes wrong behavior.
+
+Why that produces your observed failure
+- Suppose the code wrongly does: if mid > self._max_middle_index: self._max_middle_index = index
+  - Here mid (e.g. 150) is compared against an index (e.g. 0, 1, 2). mid will almost always be larger than those small indices, so the branch becomes true in many cases and overwrites the stored max index with the latest index that triggered the condition. That explains why your test expected index 1 (middle=150) but got index 3 — later items with smaller middles still satisfied the wrong comparison because you were comparing a value to an index.
+- Conversely, if the code accidentally used a value-holder variable where an index was needed, the wrong assignment/compare will similarly break logic.
+
+Where to fix it (concrete steps)
+1. In _update_bounds, find the block that handles "max middle" updates.
+2. Ensure you have two distinct variables:
+   - mid (the computed middle value of the new period)
+   - max_middle (the stored maximum middle value for the currently best index)
+   - self._max_middle_index (the stored index)
+3. Correct comparison/assignment sequence to something like:
+   - If self._max_middle_index >= 0:
+       - prev_period = self.get_data_item(self._max_middle_index).get_period()
+       - prev_mid = compute middle value of prev_period
+       - if mid > prev_mid:
+           - self._max_middle_index = index
+   - else:
+       - self._max_middle_index = index
+4. Make sure you never compare mid to self._max_middle_index (an index) or assign a value (mid) into self._max_middle_index (an index) except when setting the index to index.
+
+Minimal corrected example for that block (replace and adapt to your code style):
+- mid = ...  # compute current middle in millis
+- if self._max_middle_index >= 0:
+    prev_period = self.get_data_item(self._max_middle_index).get_period()
+    if isinstance(prev_period, SimpleTimePeriod):
+        prev_mid = prev_period.get_middle_millis()   # or compute with timestamps
+    else:
+        prev_mid = int((prev_period.get_start().timestamp() * 1000 + prev_period.get_end().timestamp() * 1000) / 2)
+    if mid > prev_mid:
+        self._max_middle_index = index
+  else:
+    self._max_middle_index = index
+
+What to test after the fix
+- Re-run the provided test suite, especially:
+  - test_max_middle_index_simple (your original failing case)
+  - test_generic_time_period_support (to ensure the else-branch with MockTimePeriod uses the same correct logic)
+- Also test additions in different orders to ensure the index/value separation holds.
+
+Summary
+- The code mixed up an index variable and a middle-value variable inside _update_bounds when updating self._max_middle_index.
+- Fix by explicitly comparing middle values (mid vs prev_mid) and only assigning indices to self._max_middle_index.
+- The three-step fix and minimal code snippet above fully describe where and how to correct the logic.

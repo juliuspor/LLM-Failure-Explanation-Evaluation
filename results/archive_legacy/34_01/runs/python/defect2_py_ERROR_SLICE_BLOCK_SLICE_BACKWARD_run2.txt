@@ -1,0 +1,44 @@
+What happened (where & when)
+- The exception is raised in get_paint at lines 71–75. Specifically line 71 computes
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  and lines 74–75 immediately raise a ValueError if g is outside 0..255:
+
+    74 |         if g < 0 or g > 255:
+    75 |             raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+
+Why it failed (root cause)
+- The computed g can be < 0 or > 255 whenever the numerator (value - self._lower_bound) and denominator (self._upper_bound - self._lower_bound) produce a ratio outside 0..1.
+  That happens for any of these concrete problems:
+  1) value is less than self._lower_bound or greater than self._upper_bound — that directly makes the ratio < 0 or > 1, so g falls outside 0..255. (This is the most common cause.)
+  2) self._lower_bound is greater than self._upper_bound (bounds reversed) — the denominator becomes negative, so the ratio sign flips and g becomes out of range even for values you expect to be inside.
+  3) self._upper_bound == self._lower_bound — that would cause a ZeroDivisionError at line 71 (different exception), not the shown ValueError, but it is another bound-related bug to check.
+- The code raises a generic ValueError at line 74 instead of giving the actual failing values. The message "Red Green Blue" is unhelpful and does not include the offending value, g, or the bounds, so you cannot see which of the above situations occurred.
+
+What to do (concrete fixes and steps)
+1) Validate and normalize bounds as soon as they are set (constructor or setter).
+   - Ensure lower < upper and raise a clear exception if not:
+     Example: if self._lower_bound >= self._upper_bound: raise ValueError(f"lower_bound ({self._lower_bound}) must be < upper_bound ({self._upper_bound})")
+2) Validate the input value in get_paint and produce a clear error if it is outside the expected range:
+   - For example, at start of get_paint:
+     if not (self._lower_bound <= value <= self._upper_bound):
+         raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+3) Or, if you want to allow values outside and clamp them into 0..255, compute ratio and clamp g:
+   - ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+   - ratio = max(0.0, min(1.0, ratio))
+   - g = int(ratio * 255.0)
+   - This prevents the ValueError and keeps g in 0..255.
+4) Make the error message informative (include value, g, lower_bound, upper_bound) so future failures show the root cause:
+   - raise ValueError(f"computed green {g} from value {value} outside 0..255 for bounds [{self._lower_bound}, {self._upper_bound}]")
+
+Minimal concrete patch (replace lines 71–75)
+- If you choose to clamp:
+  ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+  ratio = max(0.0, min(1.0, ratio))
+  g = int(ratio * 255.0)
+- If you choose to error on out-of-range input:
+  if not (self._lower_bound <= value <= self._upper_bound):
+      raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+Summary
+- The code fails because g computed at line 71 can fall outside 0..255 when value is outside [self._lower_bound, self._upper_bound] or when bounds are reversed. The ValueError at lines 74–75 is triggered by that condition and uses a non-informative message. Fix by validating bounds, validating or clamping value before computing g, and replacing the error message with one that includes the offending numbers.

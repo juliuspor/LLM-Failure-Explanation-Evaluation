@@ -1,0 +1,52 @@
+What happened
+- The function is parsing locale_str at lines 239–247 and expects a two-letter language, then an underscore, then a two-letter country (positions 3–4), optionally another underscore and a variant.
+- The failing input is "fr__POSIX". That string has two underscores in a row: language "fr", empty country, and variant "POSIX".
+- At line 239 the code reads ch3 and ch4 (the characters at locale_str[3] and locale_str[4]) and checks
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+which rejects any character that is not an uppercase A–Z.
+- For "fr__POSIX", locale_str[3] == '_' so the condition is true and the code raises ValueError("Invalid locale format: fr__POSIX"). That is exactly the error you see.
+
+Why this is the root cause (no guessing)
+- The code assumes a non-empty uppercase 2-letter country code at positions 3 and 4. It does not handle an empty country (double underscore) or lowercase letters.
+- The branch that would parse a variant (lines 245–247) is never reached because the earlier check already raised the ValueError for the underscore at position 3.
+
+Where it occurs (line references)
+- The check that causes the raise is at line 239–240:
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+- The code that would return a Locale for language+variant is later at lines 245–247, but it never executes because of the previous raise.
+
+Concrete fixes (step-by-step, exact places to change)
+1) Accept empty country (double underscore) and treat it as "no country, variant follows":
+   - Immediately after verifying locale_str length and the underscore at index 2, add a branch to detect double underscore:
+     if locale_str[3] == '_':
+         # empty country, variant starts at index 4
+         return Locale(locale_str[0:2], variant=locale_str[4:])
+   - Place this before the check at line 239 so you don't raise on the underscore.
+
+2) Accept lowercase letters and non-ASCII checks robustly:
+   - Replace the ASCII-range check (ch < 'A' or ch > 'Z') with a character-class test that is clearer and handles lowercase:
+     if not (ch3.isalpha() and ch4.isalpha()):
+         raise ValueError(...)
+   - Or normalize to uppercase first:
+     ch3, ch4 = ch3.upper(), ch4.upper()
+     if not ('A' <= ch3 <= 'Z' and 'A' <= ch4 <= 'Z'):
+         raise ValueError(...)
+
+3) Ensure variant slicing indices match the chosen branch:
+   - If country is present: return Locale(locale_str[0:2], locale_str[3:5])
+   - If country is empty and variant present: return Locale(locale_str[0:2], locale_str[4:]) (as in step 1)
+   - If you want to allow both lowercase and uppercase country codes, store the normalized uppercase country when constructing Locale.
+
+Minimal patch sketch (place before line 239)
+- After confirming locale_str[2] == '_':
+    # Handle empty country with variant, e.g. "fr__POSIX"
+    if len(locale_str) > 3 and locale_str[3] == '_':
+        # variant starts at index 4
+        return Locale(locale_str[0:2], variant=locale_str[4:])
+    # then continue with existing country checks (but replace ASCII-range test with isalpha()/upper())
+
+Why this will fix it
+- Detecting the double underscore explicitly prevents the premature ValueError raise for the '_' at position 3.
+- Using isalpha() or upper() avoids rejecting valid lowercase country codes.
+- Returning Locale with the correct slice for the variant (index 4 onward) produces the intended Locale("fr", variant="POSIX") for "fr__POSIX".

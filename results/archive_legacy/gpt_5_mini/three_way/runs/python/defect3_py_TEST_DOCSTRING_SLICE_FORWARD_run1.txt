@@ -1,0 +1,48 @@
+What went wrong (root cause)
+- The translator works over a list of UTF-16 code units and uses code_point_at(...) (lines shown in SLICE_FORWARD) to read a Unicode code point starting at code_units[index].
+- code_point_at correctly recognizes a high surrogate + low surrogate pair and returns a single code point (lines 38–44).
+- The bug is that the calling loop in translate_string advances the index by exactly 1 every iteration regardless of whether code_point_at consumed 1 UTF‑16 code unit (a BMP character) or 2 UTF‑16 code units (a surrogate pair).
+- When a surrogate pair is present the first call to code_point_at returns the combined code point but the loop still only increments index by 1. The next loop iteration starts at the low surrogate code unit.
+- That leads to two failure modes:
+  - If the low surrogate was the last code unit, the next code_point_at call attempts to read index+1 (see line 39) which is out of range and raises IndexError.
+  - Even if it doesn’t crash immediately, the translator will process the low surrogate as a separate code unit, producing incorrect output.
+
+Where it happens
+- The relevant check and return are in code_point_at: lines 38–44 in your SLICE_FORWARD. code_point_at itself is fine: it checks for a high surrogate (line 39), looks up the low surrogate (line 40), validates it (line 41) and returns the combined code point (line 43).
+- The problem is how translate_string (the caller) uses the returned code point but keeps advancing the index by 1 unconditionally. I don’t have the exact translate_string lines printed here, but the variable names are index (or i) and code_units; the bug is “index += 1” when a surrogate pair was consumed.
+
+Concrete, actionable fixes (choose one)
+1) Advance the index by the number of UTF‑16 code units consumed
+   - After you call cp = code_point_at(code_units, index), detect whether cp is a supplementary code point and advance accordingly:
+     - if cp >= 0x10000: index += 2
+     - else: index += 1
+   - This keeps the caller in sync with code_point_at’s consumption.
+
+2) Return units consumed from code_point_at
+   - Change code_point_at to return a tuple (code_point, units_consumed) so the caller does:
+       cp, consumed = code_point_at(code_units, index)
+       index += consumed
+
+3) Avoid manual UTF‑16 unit handling
+   - Work at Python’s native code-point level (iterating the string or using ord on each character) or encode to UTF-32/iterate the Unicode string rather than dealing with surrogate pairs yourself. This removes the whole surrogate bookkeeping.
+
+Minimal example fix (conceptual)
+- If translate_string currently does:
+    while index < len(code_units):
+        cp = code_point_at(code_units, index)
+        index += 1
+  change it to:
+    while index < len(code_units):
+        cp = code_point_at(code_units, index)
+        if cp >= 0x10000:
+            index += 2
+        else:
+            index += 1
+
+Why this will fix your tests
+- For the test input "\U0001F630A" the UTF‑16 code_units look like [high, low, 'A']. code_point_at called at index 0 returns the emoji code point and then index will be advanced by 2 (high+low). The loop next starts at index 2 (the 'A'), so no out-of-bounds reads and the output preserves both characters.
+
+Summary
+- Root cause: caller advances index by 1 even when code_point_at consumed 2 UTF‑16 units (surrogate pair).
+- Where: the mismatch is between code_point_at (lines 38–44) and the translate_string loop’s index update.
+- Fix: advance index by the number of UTF‑16 units consumed (or change code_point_at to report units consumed, or operate at Python code-point level).

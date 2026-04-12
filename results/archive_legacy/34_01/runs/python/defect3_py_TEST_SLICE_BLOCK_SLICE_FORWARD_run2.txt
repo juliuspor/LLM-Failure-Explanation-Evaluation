@@ -1,0 +1,38 @@
+What happened (root cause)
+- The function is written to read UTF‑16 code units and detect surrogate pairs (lines 38–44). It expects each entry in code_units to be a 16‑bit value (0x0000–0xFFFF).
+- Your test string '\U0001F630' is a single Unicode code point U+1F630. Depending on how code_units was built, that value can appear as a single integer 0x1F630 (a full code point > 0xFFFF) instead of two 16‑bit UTF‑16 code units (a high surrogate + low surrogate).
+- When high = code_units[index] is 0x1F630, the surrogate‑pair checks (lines 39–41) fail because high is not in 0xD800–0xDBFF. The function then returns high (line 44) as if it were a 16‑bit unit.
+- That mismatch (treating a full code point as a 16‑bit code unit) breaks assumptions elsewhere (indexes and length expectations), so translate_string does not preserve the input and the assert fails.
+
+Where it happened
+- At line 38 you set high = code_units[index].
+- At lines 39–41 the code assumes high is a 16‑bit UTF‑16 high surrogate. For U+1F630 high is 0x1F630, so those checks are meaningless.
+- At line 44 the function returns high (0x1F630) as if it were a single 16‑bit unit, which is the wrong interpretation and causes the subsequent processing to produce the wrong output.
+
+Why it’s wrong (clear, concrete)
+- The code mixes two different string representations:
+  - “UTF‑16 code units” logic (surrogate detection) requires that code_units contain 16‑bit values.
+  - But the data actually contains full Unicode code points (values > 0xFFFF) when Python is using full code points.
+- You must not run UTF‑16 surrogate logic on values that are already full code points.
+
+Exact fixes (concrete steps)
+Choose one of these two, depending on what you want:
+
+A) If you want to operate on UTF‑16 code units (surrogate logic)
+1. Build code_units as actual 16‑bit units. Replace whatever created code_units with:
+   - bytes = s.encode('utf-16-le') (or 'utf-16-be' depending on endianness you expect)
+   - then interpret every 2 bytes as a uint16 (e.g. use array('H', bytes) or struct.unpack on chunks)
+2. Then the existing surrogate checks (lines 39–43) will see proper 0xD800–0xDBFF high surrogates and 0xDC00–0xDFFF low surrogates and will work correctly.
+
+B) If you want to operate on Python code points (no surrogate handling)
+1. Stop treating code_units as UTF‑16. Make code_units a list of ord(c) for each character c in the Python string.
+2. Remove surrogate detection entirely. A code point > 0xFFFF (like 0x1F630) is already a single character; return it directly.
+   - Replace lines 38–44 with simply: return ord(code_units[index]) (or if code_units is already a list of ints, return code_units[index]).
+3. Adjust any other code that assumed two code units per supplementary character.
+
+Which to pick
+- If your code later needs to index into UTF‑16 code unit positions (e.g., to interoperate with APIs that use UTF‑16 offsets), use option A.
+- If you only need to work with Python strings and Unicode code points, option B is simpler and less error‑prone.
+
+Summary
+The function treats values as 16‑bit UTF‑16 units but was given full Unicode code points (0x1F630). That mismatch causes the surrogate checks and indexing to fail. Fix by making code_units actually contain 16‑bit units (encode to UTF‑16) or stop doing surrogate logic and work with Python code points instead.

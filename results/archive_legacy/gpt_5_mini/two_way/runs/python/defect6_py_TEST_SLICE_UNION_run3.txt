@@ -1,0 +1,36 @@
+What happened
+- Root cause: the code treats -0.0 as an integer because the test at line 176 uses x == int(x). For x == -0.0 this is True, so the integer path runs and the sign is lost by value = int(x) on line 177 (int(-0.0) == 0). Later that integer value (value) is converted to a string and emitted (see line 192), so "-0.0" becomes "0" (or "0" instead of "-0.0"), which fails the negative-zero test.
+
+Where it occurs (exact places)
+- Line 176: the conditional if x == int(x) and not math.isinf(x) and not math.isnan(x): treats -0.0 as an integer.
+- Line 177: value = int(x) converts -0.0 to 0 and removes the sign bit.
+- Line 192: self.add(str(value)) (or the branch that eventually emits the integer form) outputs "0" instead of preserving "-0.0".
+- The negative-zero-preservation should happen before converting to int or emitting value; the code reaches the integer branch and never preserves the negative sign.
+
+Why that causes the failing test
+- Python floats compare equal to their int conversion for exact integral values, and -0.0 == 0 is True. The code assumes equality => safe to use int(x), but int(x) erases the negative sign of -0.0. The test expects "-0.0" (to preserve IEEE sign), but the code emitted "0" (or maybe "0" or "0.0"), so the assertion fails.
+
+Concrete, minimal fixes (step-by-step)
+1. Detect negative zero before the integer branch (i.e., before line 176).
+   - Use a helper like:
+     - def is_negative_zero(x): return x == 0.0 and math.copysign(1.0, x) < 0
+   - Or: use struct.unpack to inspect the sign bit.
+2. If is_negative_zero(x) is True:
+   - Emit "-0.0" immediately (self.add("-0.0")) and return/skip the integer-path logic.
+   - This preserves the sign and matches the test expectation.
+3. Otherwise proceed with the existing integer-path logic.
+
+Where to place the fix
+- Insert the negative-zero check directly before line 176 (i.e., before the integer conversion check). That guarantees you never call int(x) on -0.0 and lose the sign.
+
+Why this fix is safe
+- It only changes handling for the single edge case -0.0, leaving all other number formatting unchanged.
+- It matches the test intent: preserve IEEE negative-zero sign while emitting integers and floats normally.
+
+Example pseudo-change (very small patch)
+- Before the block starting at line 176:
+  if x == 0.0 and math.copysign(1.0, x) < 0:
+      self.add("-0.0")
+      return
+
+This directly addresses the observed failure: it prevents conversion to int (line 177) for -0.0 and ensures "-0.0" is output.

@@ -1,0 +1,31 @@
+What happened (root cause)
+- The loop that advances pos after a translator handled some input assumes translate_codepoint(...) returns the number of UTF-16 code points (not code units) consumed. But at least one translator implementation is returning the number of UTF-16 code units consumed for a surrogate pair (2), not the number of code points (1).
+- Because consumed is 2, the for pt in range(consumed): loop runs twice. On the first iteration pos moves from 0 to 2 (char_count(...) == 2 for the supplementary code point). On the second iteration the code calls code_point_at(code_units, pos) with pos == 2, but len(code_units) == 2, so code_point_at raises IndexError("String index out of range: 2").
+- The exception therefore occurs inside code_point_at (the check at the top of to_utf16_code_units / code_point_at), not inside the while condition. The offending code is the for pt in range(consumed): ... loop (the block with the comment "Contract with translators...").
+
+Why that exact index (2) appears
+- The test string U+1F630 is encoded as two UTF-16 code units (length == 2). The translator returned consumed == 2 (code units) instead of consumed == 1 (code point). The first loop iteration advanced pos by 2; the next iteration attempted to read at index 2, which is out of range, causing the IndexError with index 2.
+
+Where to look and what to change (concrete steps)
+1. Check the contract of translate_codepoint:
+   - It must return the number of code points consumed (1 for a single BMP code point, 1 for a surrogate pair representing one supplementary code point). If your concrete translator returns number of UTF-16 code units (2 for a surrogate pair), that is wrong.
+2. Fix the translator(s):
+   - If a translator returns code units consumed, change it to return code points consumed. For a surrogate pair it should return 1, not 2.
+   - Alternatively, make the translator return both values or document a different contract, but prefer keeping the current contract (code points) because the loop here expects that.
+3. (Optional defensive improvement) Add an assertion or validation right after consumed is returned:
+   - assert consumed >= 0
+   - If you expect consumed to mean code points, optionally check that consumed * 1 <= remaining code points (or do a bounds check before looping) and raise a clear ValueError if translators violate the contract. Example check:
+     if consumed < 0 or consumed > length - pos:
+         raise ValueError(f"translate_codepoint returned invalid consumed={consumed} at pos={pos}")
+   - This will fail earlier and with a clearer error than IndexError: String index out of range: 2.
+4. If you cannot change all translator implementations, change the advancement loop to be robust to a translator returning code units by mistake:
+   - Convert consumed from code units to code points before using it (but this requires knowing what translator returned — better to fix the translator implementations).
+
+Direct reference to lines/variables
+- The failing call chain leads to code_point_at(code_units, pos) raising the IndexError in the to_utf16_code_units/code_point_at function (see the slice block that checks if index >= len(code_units) and raises the error).
+- The problematic logic is the for pt in range(consumed): pos += char_count(code_point_at(code_units, pos)) block (the loop immediately after the comment "Contract with translators...").
+- The variables involved: consumed (returned by self.translate_codepoint), pos, length, code_units.
+
+Summary
+- The translator returned 2 (UTF-16 code units) for a surrogate pair while the caller expected 1 (code point). The for loop iterates too many times and on the second iteration tries to read past the end of code_units, causing IndexError: String index out of range: 2.
+- Fix: make translate_codepoint return number of code points consumed (1 for supplementary code point), or else add validation and defensive checks to detect/handle the incorrect return value.

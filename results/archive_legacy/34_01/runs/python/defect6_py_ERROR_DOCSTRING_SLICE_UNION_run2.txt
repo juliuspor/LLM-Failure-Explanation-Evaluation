@@ -1,0 +1,55 @@
+What happened (short): a negative zero float (-0.0) was created in add() (line 126) as newcode, but append() (called on line 138) converted or normalized that value to a plain positive zero (0.0). The test expected a negative zero string/representation ("-0.0") but got "0" instead, so the assertion failed.
+
+Why that happens (root cause, precisely):
+- Floating point negative zero is distinct in sign bit but compares equal to 0.0. Any code that coerces, normalizes, or branches on equality with zero will silently lose the negative sign bit.
+- In your file Slice_Union:
+  - At line 126, add(self, newcode) receives/creates newcode that has the negative sign bit (i.e. -0.0).
+  - At line 138 you call self.append(newcode). The append method contains logic that converts or normalizes numeric values (for example: converting to int/float, testing "if value == 0" and replacing it with 0, or otherwise reconstructing the value). That logic turns -0.0 into 0.0 (or into an integer 0). Because -0.0 == 0.0, the normalization branch is triggered and the sign is lost.
+- The test asserts the sign or string representation (Expected "-0.0"), so losing the sign causes the failure "Expected -0.0, got 0".
+
+Where exactly (file/lines):
+- add(self, newcode) at Slice_Union: line 126 — this is where the negative zero value exists before appending.
+- append(...) at Slice_Union: called on line 138 — this is where the negative zero is being normalized to positive zero.
+
+Concrete likely code patterns that cause this:
+- Converting to int or int-like: newcode = int(newcode) or newcode = float(newcode) after a check.
+- Normalization conditional: if newcode == 0: newcode = 0
+- Reconstructing a tuple/list by arithmetic or formatting that uses equality/zero checks.
+
+How to fix it (step-by-step, specific changes you can make):
+1. Inspect append(...) implementation and locate the normalization that touches zero. Search for patterns like:
+   - "if value == 0" or "if newcode == 0"
+   - "value = 0" assignments
+   - explicit int() conversions for values that may be floats
+2. Preserve the sign bit when you need to keep -0.0:
+   - If you must normalize numeric types, skip normalization for zero sign preservation:
+     - Replace "if newcode == 0: newcode = 0" with a branch that preserves sign, e.g.
+       - use math.copysign(0.0, newcode) to create a zero with the same sign: newcode = math.copysign(0.0, newcode)
+       - or only normalize when you explicitly want positive zero.
+3. If append intentionally collapses -0.0 to 0.0 for other reasons, but your test expects -0.0, change the contract:
+   - Either change the test to not depend on negative-zero sign (use math.copysign or inspect sign bit) or change append to keep the sign when newcode has it.
+   - To assert negative zero in tests, compare sign explicitly:
+     - Use math.copysign(1.0, value) == -1.0 or use struct.pack/bitwise inspection to check the sign bit.
+4. Example code change (pseudo-patch you can apply in append):
+   - Before (problematic):
+     if newcode == 0:
+         newcode = 0
+   - After (preserve sign):
+     import math
+     if newcode == 0:
+         # preserve sign of original zero
+         newcode = math.copysign(0.0, newcode)
+   Or, better, avoid replacing zeros at all unless needed.
+
+How to update tests if intended behavior is different:
+- If the class should not guarantee negative-zero, change the test to compare numeric equality rather than string/representation:
+  - assert value == 0.0 (not "-0.0")
+- If the class must preserve -0.0, make tests assert sign explicitly:
+  - assert math.copysign(1.0, value) == -1.0
+
+Summary checklist:
+- Line 126: add() produces/receives -0.0 as newcode.
+- Line 138: append(newcode) contains normalization logic that turns -0.0 into 0 (losing sign).
+- Fix: change append() normalization to preserve the sign (use math.copysign or avoid the "if newcode == 0: newcode = 0" replacement), or change the test to not require negative-zero.
+
+If you paste the append(...) function here I can point to the exact statement to change and give the exact one-line patch.

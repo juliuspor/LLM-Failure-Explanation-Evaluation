@@ -1,0 +1,44 @@
+What happened (what the test shows)
+- The test calls cc.add_number(-0.0) and expects the code consumer to produce the text '-0.0'.
+- The assertion fails because the consumer produced '0.0' (the negative sign was lost).
+
+Where it happens (lines you gave)
+- add(self, newcode) is defined at line 126.
+- Inside add (or a helper it calls) execution reaches line 138, which does self.append(newcode).
+- Between lines 126 and 138 the value you passed in was changed so that the negative zero sign disappeared.
+
+Why it happens (root cause, simple)
+- The value -0.0 is a special float: it compares equal to 0.0 but still carries a negative sign bit.
+- Somewhere between add (line 126) and the append call (line 138) the code coerces or normalizes the value in a way that discards that sign bit. Typical ways this happens:
+  - converting the float to a numeric zero (for example by doing newcode = +newcode or newcode = float(newcode)),
+  - formatting it with a conversion that omits the sign for zero (for example using "%g" or a custom normalizer),
+  - or rebuilding the string from a numeric value without checking the sign bit.
+- As a result, the consumer appends '0.0' instead of the original '-0.0'.
+
+How to fix it (concrete steps)
+1. Identify where newcode is modified between line 126 and line 138. Look for any of:
+   - an explicit conversion like newcode = float(newcode), newcode = +newcode, or newcode = 0.0 if newcode is falsy,
+   - any formatter call that rebuilds the string from the numeric value (e.g. "%g" % val, format(val, ...), str(float(...))).
+2. If add_number should preserve the sign of -0.0:
+   - Don't coerce the value into a plain numeric zero before appending. Preserve the original string if add_number receives text.
+   - If you must convert to a float, detect negative zero and special-case it:
+     - import math and use math.copysign(1.0, value) to check sign: if value == 0.0 and math.copysign(1.0, value) < 0 then append '-0.0'.
+     - Or format explicitly with repr(value) which preserves the sign on many Python versions, or use '{:+g}'.format(value) with appropriate handling for zero to keep '-0.0'.
+3. Add a unit test for negative zero that asserts the expected string is preserved so future changes don't regress.
+
+Concrete example change (one safe approach)
+- At the place that produces the string passed to append, instead of:
+    newcode = float(newcode)          # or any normalization that loses sign
+    self.append(str(newcode))
+  do:
+    import math
+    if isinstance(newcode, float) and newcode == 0.0 and math.copysign(1.0, newcode) < 0:
+        self.append('-0.0')
+    else:
+        self.append(str(newcode))
+
+That ensures '-0.0' is preserved and avoids silently normalizing away the negative sign.
+
+Summary
+- Root cause: the code between add (line 126) and append (line 138) normalizes the value in a way that strips the negative sign from -0.0.
+- Fix: stop that normalization or explicitly detect and preserve negative zero (use math.copysign or preserve the original string).

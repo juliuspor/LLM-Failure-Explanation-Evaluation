@@ -1,0 +1,86 @@
+I can’t point to the exact line that fails because you didn’t paste the implementation of LocaleUtils.to_locale or the failing stack trace. To give a useful, non‑vague explanation I need the code around the to_locale method (or at least the failing lines and the stack trace). Please paste the method (and the line numbers if available) and the input string that caused the failure.
+
+Meanwhile, here are the concrete, specific things that typically cause a strict String→Locale converter to fail, what to inspect in your code, where to look, and exact fixes to apply.
+
+What to paste for a precise diagnosis
+- The full body of the to_locale method (or the smallest file that contains it). Mark line numbers if possible.
+- The exact input that failed (value of locale_str).
+- The stack trace or the exact ValueError message and where it was raised.
+
+Likely root causes (with exact variables/methods/lines to inspect)
+1. None handling
+   - Check the very first lines that read locale_str. If you expect None to return None, ensure you have:
+     if locale_str is None:
+         return None
+   - Bug pattern: code calls locale_str.strip() or locale_str[0] before checking None; this raises AttributeError/TypeError at the first call site. Inspect the beginning of to_locale for any operation on locale_str before a None check.
+
+2. Splitting / indexing the string incorrectly
+   - If you split with parts = locale_str.split('_') and then index parts[1] or parts[2] without checking length, an IndexError can occur.
+   - Check code like:
+       parts = locale_str.split('_')
+       language = parts[0]
+       country = parts[1]   # line X — fails if parts has length 1
+   - Fix: check len(parts) first or use conditional assignment:
+       parts = locale_str.split('_')
+       language = parts[0]
+       country = parts[1] if len(parts) > 1 else ''
+       variant = parts[2] if len(parts) > 2 else ''
+
+3. Wrong separator assumption
+   - Docstring says separator must be underscore. If code splits on '-' or uses locale_str.replace('-', '_') quietly, inputs with '-' may fail validation later.
+   - Check for code that checks locale_str[2] == '_' (hard index): this breaks for short strings. Use split or guard index positions.
+
+4. Case validation mistakes (language lower, country upper)
+   - Common bug: using str.islower() or str.isupper() on empty strings or multi-character values without checking length first.
+   - Example failing snippet:
+       if len(language) == 2 and not language.islower():
+           raise ValueError(...)
+     But if language length is not 2, code might still run other checks that assume length; check all places you use len(language).
+   - Also watch for locale_str.casefold() or upper/lower conversions that mutate the input; the docstring says you must validate case strictly, not auto-convert.
+
+5. Length checks and indexing
+   - Docstring requires exact lengths. If code uses exact index checks like locale_str[2] to be '_' and then uses locale_str[3:5] as country, that will raise when locale_str length is less than 5.
+   - Inspect any slicing like locale_str[3:5] and guard with len(locale_str) >= 5 before slicing.
+
+6. Variant handling & JDK behaviour note
+   - The docstring mentions variant behaviour differences; if code tries to manipulate variant case (e.g., variant = variant.upper()) you may get different results than expected. That’s not an exception cause, but can cause failing tests if expected variant case differs.
+   - Look for calls to variant.upper() or .lower() and remove them if you must preserve exact variant.
+
+7. Using regex or strict validators that are too strict/loose
+   - If you use a regex like r'^[a-z]{2}(_[A-Z]{2}(_[A-Za-z0-9]+)?)?$' make sure you anchor and test with the exact inputs. A missing ^ or $ can allow unexpected matches or partial matches that later cause logic to fail.
+   - If you reject empty country when it’s allowed (Locale("en","")), tests will fail. Check the allowed forms: "en", "en_GB", "en_GB_variant".
+
+Concrete debugging steps (apply to your file)
+1. Reproduce with the failing input and capture the exception and stack trace.
+2. Open to_locale and find the line number from the trace. Paste that line and the 5 lines above and below here.
+3. Add simple asserts/guards at the start of the function:
+   if locale_str is None:
+       return None
+   if not isinstance(locale_str, str):
+       raise TypeError('locale_str must be str or None')
+4. Replace any direct indexing with guarded logic:
+   parts = locale_str.split('_')
+   language = parts[0]
+   country = parts[1] if len(parts) > 1 else ''
+   variant = parts[2] if len(parts) > 2 else ''
+5. Validate lengths and case explicitly and raise with informative messages (include locale_str and which check failed):
+   if len(language) not in (2, 0):
+       raise ValueError(f'invalid language length: {language!r}')
+   if language and not language.islower():
+       raise ValueError(f'language must be lowercase: {language!r}')
+   if country and (len(country) not in (2,) or not country.isupper()):
+       raise ValueError(f'country must be 2 uppercase letters: {country!r}')
+6. Add unit tests for these inputs:
+   - None → None
+   - "en" → Locale("en","")
+   - "en_GB" → Locale("en","GB")
+   - "en_GB_xxx" → Locale("en","GB","xxx")
+   - "EN" (expect ValueError)
+   - "en-gb" (expect ValueError or fix depending on spec)
+   - "e" or "eng" (expect ValueError)
+   - "" (empty string — decide and document behavior)
+
+If you paste the to_locale implementation and the stack trace I will:
+- Point to the exact failing line number and variable name.
+- Explain in plain language why it failed (what was None/mis-indexed/invalid).
+- Provide a minimal fixed implementation and the exact unit tests to verify the fix.

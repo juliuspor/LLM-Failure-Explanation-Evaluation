@@ -1,0 +1,33 @@
+What happened (where it fails)
+- The bug is caused by the test on line 176: if x == int(x) ...
+- That test and the subsequent use of int(x) (line 177) break for large or imprecise floating-point values because float arithmetic loses integer precision above 2**53 (about 9e15). In those cases a float can look "integral" (x == int(x) becomes true) even though the original quantity had a fractional component that was lost, and int(x) will give a truncated, imprecise integer. The code then runs the trailing-zero stripping logic (lines 180–187) and prints a wrong result.
+- Practically: for very large floats you either incorrectly treat a non-integer as an integer, or you lose digits when converting the float to an int and build a wrong mantissa/exp. The failure stems from relying on exact equality between a binary float and an arbitrary-size int (lines 176–177).
+
+Why that causes wrong output (why it fails)
+- Binary64 floats cannot represent all integers exactly once they get large. Example: a float that should be 1e16 + 1 will be represented as 1e16; x == int(x) will be true even though the source value had a fractional or low-order integer part. The algorithm then formats the value as if it were an exact integer (lines 189–192) and produces wrong text.
+- Using int(x) early (line 177) also hides the float’s limited precision: int(x) converts the inexact float to an int, so the later arithmetic on mantissa/exp is acting on the already-lossy value.
+
+Where to change it (concrete steps)
+1. Decide what semantics you want for large floats:
+   - If you want to treat any float with no fractional part in its float representation as an integer (i.e., format what the float actually represents), use the float method is_integer() and keep current logic, but be aware you will be formatting the float’s rounded value:
+     - Replace line 176 with: if isinstance(x, float) and x.is_integer() and not math.isinf(x) and not math.isnan(x):
+   - If you want to detect values that originally had a fractional part (before float rounding) you cannot rely on float equality; you must keep the original source as Decimal or string, or use a tolerance-based test:
+     - Replace the exact test with a tolerance test, e.g.
+       if abs(x - round(x)) < tol and not math.isinf(x) and not math.isnan(x):
+       choose tol = 1e-12 or relative tolerance depending on magnitude.
+2. Don’t call int(x) unless you accept the float’s precision loss. If you need exact decimal digits for very large numbers, use decimal.Decimal or keep the number as a string at input.
+   - If you will work with exact decimal arithmetic, construct a Decimal from the input string and perform the trailing-zero stripping on the Decimal.
+3. If you keep the integer-path, compute the abs threshold and tests using the integer value once you accept the precision loss:
+   - Use if abs(value) >= 100: instead of if abs(x) >= 100: (lines 180) to avoid confusion between float magnitude and integer magnitude after conversion.
+4. If you want to support numpy scalars, ensure you convert/inspect them safely (np.isnan/np.isinf or use float(x).is_integer()).
+
+Minimal concrete fixes you can apply immediately
+- If you simply want to avoid mis-formatting due to float precision but accept formatting what the float actually holds:
+  - Change line 176 to:
+    if isinstance(x, float) and x.is_integer() and not math.isinf(x) and not math.isnan(x):
+  - Change line 180 to use value:
+    if abs(value) >= 100:
+- If you need exact decimal semantics, parse the original value as a string -> decimal.Decimal and do the integer test and trailing-zero trimming on the Decimal.
+
+Summary
+- Root cause: testing integrality with x == int(x) (line 176) and immediately using int(x) (line 177) relies on exact float-to-int equality and loses/carries float rounding errors for large numbers. Replace the exact check with x.is_integer() (if you accept float-represented integrality) or use a tolerance/Decimal/string-based approach if you need exact decimal behavior. Also switch the magnitude check (line 180) to use value (the integer) if you go the integer-path.

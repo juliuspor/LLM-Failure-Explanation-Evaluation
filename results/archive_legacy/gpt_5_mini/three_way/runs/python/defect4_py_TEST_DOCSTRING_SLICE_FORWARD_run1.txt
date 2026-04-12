@@ -1,0 +1,38 @@
+What happened (symptom)
+- The failing test test_max_middle_index_simple expects the maximum-middle index to be 1 (middle = 150) but the code returns 3.
+- The same class of failure appears in other middle-bound cases (including the MockTimePeriod test).
+
+Where it happens
+- Inside TimePeriodValues._update_bounds(period, index).
+- Specifically in the code that updates the "max middle" (and symmetrically the "min middle") logic.
+
+Root cause (precise)
+- The comparison uses the index variable (or the stored index field) instead of the stored middle-value field when deciding whether the current period's middle is a new maximum.
+- Concretely: the code compares the freshly computed middle value to self._max_middle_index (an index), not to self._max_middle (the stored maximum middle value). Because an index (small integer like 0..n) is being compared to a timestamp/middle value (large integer or float), the comparison is meaningless and can choose the wrong branch. That allows the wrong element (e.g. index 3) to become recorded as max_middle_index.
+
+Example showing the effect
+- For the failing test the mid values are [50, 150, 25, 75] at indices [0,1,2,3].
+- If the code does "if middle > self._max_middle_index:" the RHS is an index (initially 0 or -1), so after a few updates the inequality behaves incorrectly and eventually index 3 can be chosen even though its middle (75) < 150.
+
+Exactly what to change (step-by-step fix)
+1. In TimePeriodValues._update_bounds(period, index) find the max-middle check. It likely looks like:
+   if middle > self._max_middle_index:
+       self._max_middle_index = index
+       self._max_middle = middle
+2. Replace that comparison so the middle value is compared to the stored max middle value:
+   if middle > self._max_middle:
+       self._max_middle = middle
+       self._max_middle_index = index
+3. Do the symmetric fix for the min-middle case if it suffers the same mistake:
+   - Replace comparisons against self._min_middle_index with comparisons against self._min_middle.
+   - Ensure both the value and the index are updated in the same block: first update the stored value, then update the stored index (order doesn't really matter, but keep both set together).
+4. Run the test suite.
+
+Why this fix works
+- The logic should compare the newly computed middle (a numeric value) to the previously stored middle-value, not to an index. After comparing the numeric values, you then record the index of the item that produced the new extreme. This restores correct behavior for get_max_middle_index() and get_min_middle_index().
+
+Additional notes
+- Confirm initial sentinel values for self._max_middle and self._min_middle are set to sensible numbers (e.g. -inf/+inf or the middle of the first element) so the first element initializes both value and index correctly.
+- Check other bound-update branches (start/end min/max) for similar mistakes; the tests you provided for start/end currently pass, but a consistent pattern makes future bugs less likely.
+
+If you paste the current _update_bounds implementation I can point to the exact lines to change.

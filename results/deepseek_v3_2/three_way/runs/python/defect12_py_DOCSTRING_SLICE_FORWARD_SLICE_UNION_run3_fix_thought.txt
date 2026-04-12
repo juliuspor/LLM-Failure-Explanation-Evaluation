@@ -1,0 +1,77 @@
+The bug is that `substring_java` raises an IndexError when `end` is -1 because it checks `end < 0`. The `abbreviate` function should convert `upper = -1` to `len(text)` before calling `substring_java`. The original code had a condition `if upper == -1 or upper > len(text):` which set `upper = len(text)` only if `upper == -1` OR `upper > len(text)`. However, if `upper` is -1, it's set to `len(text)`. But the order of checks matters: after that, there is `if upper < lower: upper = lower`. That's fine. The issue is that `substring_java` is called with `upper` as the `end` parameter. After the adjustments, `upper` should never be -1. However, the bug diagnosis mentions that `slice_forward` (which is `substring_java`) uses `s[start:end]` and the check `end < 0` fails. Indeed, the original code passes `upper` to `substring_java` after possibly adjusting it. But the adjustment `if upper == -1 or upper > len(text): upper = len(text)` is correct. Wait, let's examine the original `abbreviate` code: it had:
+
+        if upper == -1 or upper > len(text):
+            upper = len(text)
+        if upper < lower:
+            upper = lower
+
+This ensures that if `upper` is -1, it becomes `len(text)`. So why does the bug occur? The bug diagnosis says the error occurs because `end` is -1. That would happen if `upper` is -1 and the condition `upper == -1 or upper > len(text)` is not executed? But it is. Unless the condition is incorrectly written? Actually, the condition is `if upper == -1 or upper > len(text):`. That's fine. But note: if `upper` is -1, then `upper > len(text)` is false (since -1 is not greater than length), but the first part is true, so it sets `upper = len(text)`. So `upper` becomes length. So `substring_java` should not receive -1.
+
+Wait, the bug diagnosis might be referencing a different version? The provided source code includes `substring_java` and its usage. The bug diagnosis mentions `slice_forward` and `slice_union` which are not in the source code. Possibly the diagnosis is from a different context? The source code we have uses `substring_java`. The bug might be that `substring_java` does not handle negative `end` at all, and the `abbreviate` function should ensure `end` is not negative. But the `abbreviate` function already does that by converting -1 to length. However, there is another scenario: `upper` could be negative but not -1? The doc says `upper` is -1 for no limit, but maybe other negative values are invalid. The `substring_java` will raise IndexError for any negative `end`. The `abbreviate` function should ensure `end` is non-negative. The condition `if upper == -1 or upper > len(text):` only handles -1 and too large values. If `upper` is -2, it will not be changed and will be passed to `substring_java`, causing error. But the doc says `upper` is -1 for no limit, so other negative values are invalid. Should we treat them as invalid? The Java original likely throws an exception for negative upper (except -1). The Python version might want to mimic that. However, the bug diagnosis specifically says the error occurs when `end` is -1. So maybe the condition `if upper == -1 or upper > len(text):` is not being executed because `upper` is -1 but `len(text)` is 0? Let's see: if `text` is empty, the function returns `StringUtils.EMPTY` early. So `len(text) == 0` returns early. So for empty string, we never reach that condition. But if text is empty, we return empty string, so no call to `substring_java`. So that's fine.
+
+Maybe the bug is that `upper` is -1 and `len(text)` is something, but the condition `if upper == -1 or upper > len(text):` sets `upper = len(text)`. Then later, `if upper < lower: upper = lower`. If `lower` is greater than `len(text)`, then `upper` becomes `lower`. That could be larger than `len(text)`. Then `substring_java` will be called with `end = upper` which is > len(text), causing IndexError because `substring_java` checks `end > len(s)`. Indeed, the condition `if upper == -1 or upper > len(text):` only sets `upper = len(text)` if `upper == -1` OR `upper > len(text)`. But after that, we have `if upper < lower: upper = lower`. If `lower` is greater than `len(text)`, then `upper` becomes `lower`, which is > len(text). Then `substring_java` will raise IndexError because `end > len(s)`. That's a bug. The fix: after adjusting `upper` for -1 and > len, we should also ensure `upper` does not exceed length after the `upper < lower` adjustment. Actually, the Java implementation likely does: if upper < lower, set upper = lower, but then if upper > length, it will cause substring to throw? Let's think: In Java's String.substring, if end > length, it throws. So the Java code must ensure end <= length. The original Java code (from Apache Commons Lang) does:
+
+        if (upper == -1 || upper > str.length()) {
+            upper = str.length();
+        }
+        if (upper < lower) {
+            upper = lower;
+        }
+
+But if upper is set to lower and lower > str.length(), then upper > str.length(). Then later, when calling str.substring(0, upper), it will throw StringIndexOutOfBoundsException. That's likely intended? Actually, the Java implementation might have a check: if upper > str.length(), then upper = str.length() again? Let's examine the actual Java source from Apache Commons Lang 3.12.0 WordUtils.abbreviate:
+
+    public static String abbreviate(final String str, int lower, int upper, final String appendToEnd) {
+        if (str == null) {
+            return null;
+        }
+        if (str.length() == 0) {
+            return StringUtils.EMPTY;
+        }
+        if (upper == -1 || upper > str.length()) {
+            upper = str.length();
+        }
+        if (upper < lower) {
+            upper = lower;
+        }
+        final StringBuffer result = new StringBuffer();
+        final int index = StringUtils.indexOf(str, " ", lower);
+        if (index == -1) {
+            result.append(str.substring(0, upper));
+            if (upper != str.length()) {
+                result.append(StringUtils.defaultString(appendToEnd));
+            }
+        } else if (index > upper) {
+            result.append(str.substring(0, upper));
+            result.append(StringUtils.defaultString(appendToEnd));
+        } else {
+            result.append(str.substring(0, index));
+            result.append(StringUtils.defaultString(appendToEnd));
+        }
+        return result.toString();
+    }
+
+Indeed, after setting upper = lower, there is no re-check against length. So if lower > str.length(), then upper > str.length(), and str.substring(0, upper) will throw. That's probably considered invalid input? The method expects lower and upper to be within bounds? The documentation says lower is the minimum index at which to consider abbreviating at a space. It doesn't say it must be <= length. If lower > length, then there is no space after lower, so index = -1, and we go to the first branch. Then result.append(str.substring(0, upper)) where upper = lower > length, causing exception. So the bug is that the method does not handle lower > length correctly. The fix should be to cap upper to length after the upper < lower adjustment. Or cap lower to length initially. The Java implementation might have been fixed in later versions? Let's check Apache Commons Lang 3.14.0: same code. So maybe the intended behavior is to throw an exception if lower > length? That would be consistent with substring throwing. But the bug diagnosis says the error is because end is -1. That's different.
+
+Let's re-read the bug diagnosis: "The code fails because the function `slice_forward` (line 34) uses `s[start:end]` where `end` is the index to slice up to, but the docstring says `upper` is the maximum end index for abbreviation. However, the failure likely occurs in `slice_union` (lines 32-34) when `end` is -1 (meaning no limit). The check `if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):` raises an IndexError because `end` is -1, which is less than 0. This violates the condition `end < 0`, causing an exception. The docstring says `upper` can be -1 for no limit, but `slice_union` does not handle -1 correctly. Specifically, when `upper` is -1, it should be converted to `len(s)` before calling `slice_union`, or `slice_union` should treat -1 as a special case. The error occurs because `end` is passed as -1 to `slice_union`, which rejects negative indices."
+
+This mentions `slice_forward` and `slice_union` which are not in the provided source code. Possibly the diagnosis is for a different implementation? But the source code we have uses `substring_java`. The `substring_java` function has exactly the same check: `if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):`. So the same issue: if `end` is -1, it raises IndexError. So the bug is that `abbreviate` might pass -1 as `end` to `substring_java`. When could that happen? The only place `substring_java` is called is with `end` being `upper` or `index`. `index` is from `StringUtils.index_of` which returns -1 if not found. If `index` is -1, we go to the first branch and call `substring_java(text, 0, upper)`. So `upper` must be -1. But we already have a condition that sets `upper = len(text)` if `upper == -1`. However, note that this condition is executed only if `upper == -1` OR `upper > len(text)`. But if `upper` is -1, it is set to `len(text)`. So `upper` should not be -1 when passed to `substring_java`. Unless the condition is not executed because `len(text)` is 0? But we return early for empty string. So `len(text) > 0`. So why would `upper` remain -1? Wait, the condition is `if upper == -1 or upper > len(text):`. If `upper` is -1, it sets `upper = len(text)`. That's fine. But what if `upper` is -1 and `len(text)` is 0? Already returned. So not.
+
+Maybe the bug is that `upper` is -1 and `lower` is greater than `len(text)`. Then after setting `upper = len(text)`, we have `if upper < lower: upper = lower`. That sets `upper` back to `lower`, which is > len(text). But `upper` is now positive, not -1. So still not -1.
+
+Thus, the bug diagnosis might be inaccurate for this specific code. However, the bug could be that `substring_java` is called with `end = index` when `index` is -1? No, we only call `substring_java` with `index` as end in the last branch: `substring_java(text, 0, index)`. But that branch is only taken if `index != -1` and `index <= upper`. So `index` is not -1.
+
+Wait, there is a branch: `if index == -1: ...` and inside that branch we call `substring_java(text, 0, upper)`. So `index` being -1 does not cause `substring_java` to receive -1.
+
+So the only way `end` is -1 is if `upper` is -1 and the condition `if upper == -1 or upper > len(text):` is not executed because of short-circuit? No, it's executed.
+
+Maybe the bug is that `upper` is -1 and `len(text)` is 0, but we didn't return early because `len(text) == 0` returns `StringUtils.EMPTY`. That's correct.
+
+Let's test with some values: text = "hello", lower=0, upper=-1, append_to_end="...". According to the code, `upper` becomes 5. Then `index = StringUtils.index_of(text, " ", 0)` returns -1 because no space. Then `result = substring_java(text, 0, 5)` which is fine. `upper != len(text)`? 5 != 5? false, so no append. Returns "hello". That's fine.
+
+What about text = "hello world", lower=0, upper=-1. upper becomes 11. index of space at 5. index <= upper, so return substring(0,5) + append? Wait, condition: if index == -1? no. if index > upper? 5 > 11? false. So go to else: return substring(0, index) + append. That's "hello" + append. That's correct.
+
+Now, what about text = "hello world", lower=20, upper=-1. len=11. upper becomes 11. Then upper < lower? 11 < 20, so upper = lower = 20. Now upper > len(text). Then index = StringUtils.index_of(text, " ", 20) returns -1 (since no space after index 20). Then result = substring_java(text, 0, upper) where upper=20 > len=11. This will cause IndexError because end > len(s). That's a bug! The bug diagnosis didn't mention this, but it's a real bug. The fix should be to cap upper to len(text) after the upper < lower adjustment. So we need to ensure upper never exceeds len(text). The Java implementation might throw an exception intentionally? Let's see: In Java, String.substring(0, 20) on a string of length 11 throws StringIndexOutOfBoundsException. So the Java method would throw. Is that intended? Probably not; the method should handle out-of-bounds gracefully? The documentation doesn't specify. But the method is meant to abbreviate, so if lower > length, there is no space, and we should just return the whole string? Actually, if lower > length, then we look for a space after lower, which doesn't exist, so index = -1. Then we would abbreviate at upper, but upper is set to lower (since upper < lower). So we try to substring to upper which is beyond length, causing exception. That seems like a bug in the Java version too. However, the bug diagnosis is about -1 causing IndexError. That might be a different scenario.
+
+Let's consider the case where upper is -1 and lower is negative? lower is int, could be negative. The method doesn't check lower bounds. If lower is negative, then StringUtils.index_of(text, " ", lower) will treat negative as 0 (since StringUtils.index_of has `if start < 0: start = 0`). That's fine. But upper is -1, becomes len(text). Then upper < lower? If lower is negative, upper < lower is false because len(text) >=0 > negative. So fine.
+
+Maybe the bug is that substring_java itself is buggy: it should allow end to be -1 as a special case meaning length? But the function is meant to mimic Java's substring, which does not allow negative indices. So we should fix abbreviate to ensure end is never negative. The current fix: ensure upper is not negative after adjustments. But upper could

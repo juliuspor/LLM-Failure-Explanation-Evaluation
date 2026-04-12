@@ -1,0 +1,32 @@
+What happens
+- The code throws an uncaught exception from FieldUtils.safe_multiply(...) when the multiplication overflows, instead of turning that into the intended ValueError("Offset is too large").
+
+Why it fails (root cause, exact spot)
+- In this method the problematic line is:
+      offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  (the last line inside the try block).
+- The try is written to catch ArithmeticError:
+      try:
+          ...
+      except ArithmeticError:
+          raise ValueError("Offset is too large")
+- FieldUtils.safe_multiply (the utility used to detect multiplication overflow) does not raise Python's ArithmeticError. In the actual implementation that triggers here it raises a different exception type (for example OverflowError in Python, or ArithmeticException / IllegalArgumentException in the original Java library). Because the code catches ArithmeticError and not the actual exception type thrown by safe_multiply, the exception escapes the try/except and the caller sees an unexpected error instead of the intended ValueError.
+
+Where to change it (concrete steps)
+1. Replace the except clause with the actual exception type(s) thrown by FieldUtils.safe_multiply. For Python, catch OverflowError (or Exception if you must be broad). For Java, catch ArithmeticException (or IllegalArgumentException) instead of ArithmeticError.
+   - Example (Python): 
+         except OverflowError:
+             raise ValueError("Offset is too large")
+   - Example (Java): 
+         } catch (ArithmeticException e) {
+             throw new IllegalArgumentException("Offset is too large", e);
+         }
+2. Alternatively, remove the try/except and let the exact low-level exception propagate, or validate before multiplication to guarantee no overflow occurs (compute bounds and raise ValueError yourself).
+
+Why this fix fixes it
+- The try/except will now actually catch the overflow exception that safe_multiply throws and translate it into the intended ValueError("Offset is too large"), matching the method's stated behavior.
+
+No other hidden bugs were found in the sign arithmetic
+- The logic that converts hours and minutes into total minutes uses the standard pattern:
+      totalMinutes = hours*60 + (hours >= 0 ? minutes : -minutes)
+  which is correctly implemented here as the two-branch code using hours_in_minutes +/- minutes_offset. The only functional failure observed is the wrong exception type being caught.

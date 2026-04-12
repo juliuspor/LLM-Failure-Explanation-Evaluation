@@ -1,0 +1,50 @@
+What happened
+- The test failed in LocaleUtils.to_locale when passed "fr__POSIX" (see test_locale_with_empty_country_variant).
+- The method validates characters by position. For "fr__POSIX" the characters at index positions are:
+  - 0='f', 1='r', 2='_', 3='_', 4='P' ...
+- The current validation expects an uppercase country letter at index 3 (or otherwise rejects a non-uppercase character at that position). Because index 3 is '_' rather than an uppercase letter, the code raises ValueError: Invalid locale format: fr__POSIX.
+
+Why this is the root cause
+- The input format language__variant (language + double underscore + variant) is a valid format: it means language="fr", country="" (empty), variant="POSIX".
+- The code incorrectly assumes that after the first underscore there must be a country code (uppercase letters) and checks for an uppercase letter at a fixed index. That check does not allow the empty country case where the second underscore immediately follows the first underscore.
+- The failure always occurs in LocaleUtils.to_locale validation logic that checks specific character indexes (the check that examines locale_str[3] and/or requires an uppercase country character).
+
+Where it occurs (variables/methods)
+- Method: LocaleUtils.to_locale(locale_str)
+- Input variable: locale_str == "fr__POSIX"
+- Failing check: the branch that validates the country portion by inspecting specific index characters (the check that asserts locale_str[3].isupper() or similar). This is why the code throws ValueError instead of returning Locale("fr", "", "POSIX").
+- Test that exposed it: test_locale_with_empty_country_variant in the test file.
+
+How to fix it (clear steps)
+1. Stop validating the country by fixed character positions. Instead split the string on '_' with a maximum of 2 splits and handle empty parts:
+   - parts = locale_str.split('_', 2)
+   - language = parts[0]
+   - country = parts[1] if len(parts) > 1 else ""
+   - variant = parts[2] if len(parts) > 2 else ""
+2. Then validate each part:
+   - language: length must be 2 and all lowercase letters
+   - country: either empty or length 2 and all uppercase letters
+   - variant: if present, allow any non-empty string (or apply whatever variant rules you already have)
+3. Return Locale(language, country, variant) (or Locale(language, country) if variant is empty).
+4. Update the tests to ensure language__variant cases are covered (your test suite already has them).
+
+Minimal example replacement of the problematic logic (concept):
+- Replace positional checks like "if not locale_str[3].isupper(): raise ValueError" with:
+  parts = locale_str.split('_', 2)
+  if len(parts[0]) != 2 or not parts[0].islower(): raise ValueError("Invalid language")
+  country = parts[1] if len(parts) > 1 else ""
+  if country and (len(country) != 2 or not country.isupper()): raise ValueError("Invalid country")
+  variant = parts[2] if len(parts) > 2 else ""
+  return Locale(parts[0], country, variant)  # or omit variant if empty per your Locale constructor
+
+Why this fix works
+- Splitting handles empty country correctly: "fr__POSIX".split('_',2) -> ["fr", "", "POSIX"] so country becomes "" and variant "POSIX".
+- Validation then permits an empty country and avoids erroneous character-position checks.
+
+What to check after the change
+- Run your full test suite, including:
+  - test_locale_with_empty_country_variant (the originally failing case)
+  - other tests that assert strict casing and separators
+- Confirm that other invalid inputs still raise ValueError.
+
+This pinpoints the bug (invalid fixed-index country validation inside LocaleUtils.to_locale) and gives the exact parsing and validation changes to accept language__variant correctly.

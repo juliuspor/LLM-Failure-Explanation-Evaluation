@@ -1,0 +1,29 @@
+What happened (what failed)
+- The test calls MockCodeConsumer.add_number(-0.0).
+- Execution goes into add(self, newcode) (line 126) and then immediately delegates to self.append(newcode) (line 138).
+- The value stored/serialized by append() ends up as "0.0", so get_code() returns "0.0" and the assertion expecting "-0.0" fails.
+
+Root cause (why it failed, exactly where)
+- The failure is in the append(newcode) implementation that runs at line 138. That method converts the numeric input into its textual form in a way that loses the negative-zero sign bit.
+- In other words, append() is normalizing the float value before converting it to text (for example by doing arithmetic on the value, using a string formatting path that canonicalizes -0.0 to 0.0, or explicitly casting through a representation that drops the sign). Because of that conversion, the stored string is "0.0" instead of "-0.0".
+- The error is not in add_number or add() themselves: add() simply forwards newcode to append() at line 138. The loss of the negative sign happens inside append().
+
+Why this is predictable
+- IEEE floating-point negative zero is distinct from positive zero at the bit level but many numeric operations and some formatting routes treat -0.0 and 0.0 the same. If append() uses any arithmetic (x + 0.0, abs(x), rounding) or a formatting path that ignores sign for zero, the sign is lost.
+
+How to fix it (concrete steps)
+1. Inspect the append() method implementation at or around line 138.
+   - Look for any code that transforms the numeric value before producing its string (examples to look for: arithmetic like newcode + 0, use of abs(), int-casting, or a format string like "{:g}".format(value) that your code path may normalize).
+2. Preserve the original sign when converting floats to strings. Two practical approaches:
+   - Use a formatting function that preserves the sign of negative zero: use repr(newcode) (or format(newcode, "r") if your environment supports it). In CPython, repr(-0.0) yields "-0.0".
+     - Replace the conversion line (e.g. something like text = str(newcode) or text = "{:g}".format(newcode)) with text = repr(newcode).
+   - Or explicitly detect negative zero and handle it: check math.copysign(1.0, newcode) < 0.0 to detect negative zero, and then produce "-0.0" when value == 0.0 and sign is negative:
+     - if newcode == 0.0 and math.copysign(1.0, newcode) < 0: text = "-0.0"
+     - else: text = str(newcode) (or whatever formatting you need).
+3. Add a unit test that covers this case (your given test):
+   - Keep the test you wrote: cc.add_number(-0.0); assert cc.get_code() == '-0.0'
+   - Add a complementary test for positive zero to ensure you still get "0.0".
+4. Run tests and verify no other code paths rely on the previous normalization.
+
+Summary
+- The call chain is add_number -> add (line 126) -> append (line 138). The sign is lost inside append() during float-to-string conversion. Fix append() to preserve the negative-zero sign either by using repr(newcode) or by detecting negative zero with math.copysign and formatting "-0.0" explicitly.

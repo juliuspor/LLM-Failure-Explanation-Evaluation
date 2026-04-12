@@ -1,0 +1,40 @@
+What failed
+- The test calls CsvEscaper.translate_string('\U0001F630') (the single code point U+1F630).
+- The code in the slice (lines 35–44) assumes the string has 16-bit UTF‑16 code units and tries to detect a high surrogate at line 39:
+  - high = code_units[index] (line 38)
+  - if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units): (line 39)
+  - low = code_units[index + 1] (line 40)
+  - combine high and low into a single code point (line 43)
+- That assumption is wrong for the way Python strings are represented on common builds: Python 3 strings are sequences of Unicode code points (not UTF‑16 code units). For the single character '\U0001F630' ord() gives 0x1F630, not a surrogate. The surrogate-range test fails, and the code either:
+  - incorrectly tries to read a second code unit (index+1) when there is no surrogate pair and so index+1 is out of range (triggering the IndexError raised at line 36), or
+  - fails to normalize/encode properly and ends up returning the wrong value because it mixes up code units and code points.
+
+Root cause (plain language)
+- The method treats the Python string as if it were an array of UTF‑16 16-bit code units and contains surrogate pairs for characters above U+FFFF. In Python 3 a character above U+FFFF is a single code point (value >= 0x10000) on typical builds, so the surrogate-detection and index arithmetic are wrong. That mismatch between "what the code expects" and "what Python gives" is why the test fails.
+
+Exactly where it happens
+- In translate_string you read code_units[index] into local variable high at line 38.
+- You then check the high-surrogate range at line 39 and (if you think it's a surrogate) read code_units[index + 1] at line 40.
+- If your string contains a single non-BMP character (like U+1F630), index+1 may be out of bounds or the surrogate logic is simply wrong for that element — the IndexError in line 36 is the symptom.
+
+How to fix it (specific steps)
+Pick one of these two correct approaches, depending on what you intended:
+
+A) If you want to work on Unicode code points (recommended for Python 3):
+1. Ensure code_units is a list of code points: code_units = [ord(ch) for ch in string].
+2. Remove surrogate-pair handling entirely. A character above U+FFFF will already be represented as one entry >= 0x10000, so you can treat each entry as a full code point.
+3. Update any indexing logic so you never assume a code point will be split across two list entries.
+
+B) If you really need to operate on UTF‑16 code units:
+1. Convert the Python string to UTF‑16 16-bit units explicitly:
+   - bytes16 = s.encode('utf-16-le')  # or 'utf-16-be'
+   - code_units = [int.from_bytes(bytes16[i:i+2], 'little') for i in range(0, len(bytes16), 2)]
+2. Then the surrogate-detection and combining logic at lines 39–43 are correct because code_units will be actual 16-bit units.
+3. Be careful with the BOM if you use 'utf-16' without specifying endianness; use 'utf-16-le' or 'utf-16-be' to avoid a BOM byte pair.
+
+Tests to add
+- Add a unit test for a BMP character (e.g. 'A') and a non-BMP emoji (e.g. '\U0001F630') to confirm both are preserved or escaped as expected.
+- If you pick approach B, also add tests for strings that contain actual surrogate code units after encoding/decoding boundaries.
+
+Summary
+The code fails because it mixes up UTF‑16 code-unit logic with Python 3 string code-point semantics. Fix by either using ord() to get code points (and remove surrogate logic) or explicitly encode to UTF‑16 and operate on 16-bit units.

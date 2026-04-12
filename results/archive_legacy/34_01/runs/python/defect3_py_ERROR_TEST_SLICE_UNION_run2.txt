@@ -1,0 +1,40 @@
+What happened (where it failed)
+- The IndexError was raised at line 36 in to_utf16_code_units():
+  - The code checks `if index < 0 or index >= len(code_units): raise IndexError(...)`.
+  - The failing index was 2, meaning the caller passed `index == 2` while `len(code_units)` was <= 2.
+- Your test string '\U0001F630' is U+1F630. In UTF-16 this is encoded as a surrogate pair (two code units). to_utf16_code_units builds `code_units` as the UTF-16 units, so for that input `len(code_units)` should be 2 and valid indices are 0 and 1. Calling the function with `index == 2` is out of range.
+
+Why it happened (root cause)
+- The code that calls to_utf16_code_units is using the string index space (indices based on Python `s`, which counts Unicode code points) instead of the UTF-16 code-unit index space stored in `code_units`.
+- For characters that become surrogate pairs in UTF-16 (like U+1F630), a single Python string index corresponds to two UTF-16 code units. If the caller iterates or computes an index using `len(s)` or positions in `s`, it can produce a value equal to the number of code units (e.g. 2) and then pass that into to_utf16_code_units, which only expects 0..len(code_units)-1. That mismatch causes the IndexError at line 36.
+
+Exactly where to look
+- to_utf16_code_units: `code_units` is the list of UTF-16 units (lines 10–12 and after).
+- The check that raised: line 35–36 (`if index < 0 or index >= len(code_units): raise IndexError(...)`).
+- The caller (CsvEscaper.translate_string) is passing an index value that comes from the wrong domain (string-codepoint index instead of code-unit index). Look for loops like `for i in range(len(s))` or any index variable derived from `s` that is later passed directly into to_utf16_code_units.
+
+Concrete fixes (step-by-step)
+Pick one of these fixes depending on intended design:
+
+1) Iterate over UTF-16 code units (preferred if you need UTF-16 semantics)
+   - Build `code_units = to_utf16_code_units_list(s)` once (if you already have such a helper).
+   - Replace any loops that use `range(len(s))` with `range(len(code_units))`.
+   - When you encounter a high surrogate at `code_units[i]` and consume a pair, increment `i` by 2; otherwise increment by 1.
+   - This makes all indices passed to to_utf16_code_units refer to `code_units` and avoids out-of-range calls.
+
+2) Keep using Python string indices, and change to_utf16_code_units to accept a string index
+   - Change the function signature to accept both the original string and the string-index, or change it to compute code units internally from the single character at `s[index]` (e.g. `ord(s[index])` and handle surrogate logic based on Python code points).
+   - Example change: do not build `code_units` at all; use `cp = ord(s[index])` and for characters above 0xFFFF return the code point directly. That avoids mixing UTF-16 code-unit indexing with Python string indexing.
+
+3) Map between the two index domains
+   - If you must keep both representations, explicitly map a Python-string index to the corresponding UTF-16 code-unit index before calling to_utf16_code_units, e.g. compute the UTF-16 offset of s[:i] and pass that offset in. But this is more complex and error-prone.
+
+Minimal immediate patch to stop the crash
+- Find the place in CsvEscaper.translate_string that calls to_utf16_code_units(index). If it loops `for index in range(len(s)):` change it to:
+  - `code_units = to_utf16_code_units(s)` (if that returns the whole list); then
+  - `for index in range(len(code_units)):` and adjust the rest of the logic to operate on code_units.
+
+Why that fix works
+- It ensures the `index` you pass to to_utf16_code_units (checked at line 36) is in the same index space as `code_units`, so `index >= len(code_units)` cannot happen unless the caller really miscomputes the count.
+
+If you paste the caller loop from CsvEscaper.translate_string I can give the exact one-line change to make.

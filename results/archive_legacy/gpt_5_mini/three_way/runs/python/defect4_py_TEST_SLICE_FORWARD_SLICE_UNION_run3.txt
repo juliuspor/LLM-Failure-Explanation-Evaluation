@@ -1,0 +1,57 @@
+What happened (root cause)
+- In _update_bounds the code that updates the cached index for a bound assigns the new index unconditionally after doing a comparison. Concretely, look at the min-start update block:
+  - It computes start (lines 331–335).
+  - It fetches the current min-start value into min_start (lines 340–345).
+  - It tests if start < min_start and, if true, sets self._min_start_index = index (line 346–347).
+  - Immediately after that test it executes another assignment self._min_start_index = index (line 349), outside the if.
+- Because of that unconditional assignment at line 349, _min_start_index is always set to the current index regardless of the comparison result. The result: the “min start” index (and the same pattern appears for other bounds) ends up being the last-added index instead of the true minimum.
+
+Why this causes the observed failures
+- When you later ask for get_max_middle_index() (or any of the other cached-index getters) the stored index is wrong because the update logic clobbered the previously correct index every time a new item was added.
+- The test case that expected max_middle_index == 1 but got 3 is exactly the symptom of the index being overwritten by the last insert rather than being updated only when the new value is actually more extreme.
+
+Where it occurs (exact references)
+- The problem appears in the _update_bounds method around these lines:
+  - start calculation: 331–335
+  - reading the current min start period: 340–345
+  - conditional update: 346–347 (correct intent)
+  - unconditional overwrite: 349 (bug — this line should not be here or should be in an else branch)
+- The same mistaken pattern is present in the other bound-update blocks (max/min start, max/min end, max/min middle). The unit tests you supplied show failures for the max_middle_index case; inspect the corresponding max-middle update block for the same wrong-index usage / unconditional assignment or wrong comparison variable.
+
+How to fix it (step-by-step, concrete)
+1. Remove the unconditional assignment after the comparison. Only set the cached index when the comparison says the new period is more extreme.
+   - Example fix for the min-start block:
+     - Replace:
+       if start < min_start:
+           self._min_start_index = index
+       self._min_start_index = index
+     - With:
+       if start < min_start:
+           self._min_start_index = index
+2. Check every bound-update block in _update_bounds (min/max start, min/max end, min/max middle) for the same pattern:
+   - Ensure there is no unconditional assignment that clobbers the cached index.
+   - Ensure the code compares against the correct local variable (e.g., compare middle against min_middle, max_middle, etc.) — the comment in your test mentions a wrong index variable being used for comparison; verify each comparison uses the intended existing-bound variable.
+3. Add (or keep) unit tests that exercise all branches (SimpleTimePeriod and generic TimePeriod) — your supplied tests already do that. Run the full test suite after code changes.
+4. Optionally, simplify the method: factor the “get numeric value for the new period” and “get numeric value for stored period” into small helper functions to reduce copy/paste mistakes.
+
+Patch suggestion (conceptual)
+- Remove the stray assignment lines that happen after the conditional updates.
+- Example (pseudo-change) for the relevant snippet:
+   # old (buggy)
+   if start < min_start:
+       self._min_start_index = index
+   self._min_start_index = index
+   # new (fixed)
+   if start < min_start:
+       self._min_start_index = index
+
+What to verify after the fix
+- Run your provided tests:
+  - test_max_middle_index_simple should pass (max_middle_index == 1).
+  - test_min_start_index, test_max_start_index, test_min_end_index, test_max_end_index should all return correct indices.
+  - test_generic_time_period_support should pass for the Simple and Mock TimePeriod branches.
+
+Why this explanation pins it down
+- The exact offending statement is the unconditional overwrite at line 349 (and equivalent lines in other blocks). That single extra assignment turns a conditional update into an unconditional one, which is why the index values are wrong and why tests show the last index instead of the true min/max.
+
+If you want, paste the full _update_bounds function here and I will mark the exact lines to delete or show a drop-in corrected implementation.

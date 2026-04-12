@@ -1,0 +1,46 @@
+What happened (what fails)
+- The code that computes minutes_offset is assigning to minutes_offset twice, on lines 402 and 404:
+  - Line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because the second assignment (line 404) runs after the first, the subtraction on line 402 is immediately overwritten. That makes the value used to compute offset at line 405 wrong.
+- The wrong minutes_offset then passes into FieldUtils.safe_multiply(..., DateTimeConstants.MILLIS_PER_MINUTE) on line 405 and causes an invalid or out-of-range offset. That triggers the later error path (raise ValueError("Offset is too large") on line 407) or otherwise produces an incorrect offset returned by cls.for_offset_millis() on line 408.
+
+Where it occurs (exact lines)
+- Line 402: minutes_offset = hours_in_minutes - minutes_offset
+- Line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Line 407/408: error handling and returning the offset
+
+Why this happens (root cause)
+- The code intends to handle two mutually exclusive cases (probably "+" vs "-" sign in a timezone offset), but the second assignment is executed regardless of the first. That means either:
+  - A missing else or incorrect indentation caused both branches to execute; or
+  - The wrong operator or variable was used so the first assignment had no lasting effect.
+- As a result you do not get the intended signed minutes value. If the offset is supposed to be negative when the sign is '-' it never becomes negative (or the arithmetic becomes inconsistent), which can produce an out-of-range millisecond offset or an incorrect result.
+
+Concrete fixes (exact steps)
+1. Decide the intended logic. Typical correct behavior when parsing hours and minutes with a sign is:
+   - if sign == '-': minutes_offset = hours_in_minutes - minutes_part
+   - else: minutes_offset = hours_in_minutes + minutes_part
+   (Or equivalently use minutes_offset = sign_multiplier * (hours_in_minutes + minutes_part).)
+2. Implement one of these concrete code corrections:
+   Option A — add the missing else (most likely fix)
+   - Change the code so the addition runs only when the subtraction did not:
+     - Insert an else before line 404 so line 404 becomes part of the alternate branch.
+     - Example (pseudocode reflecting lines):
+       if sign == '-':
+           minutes_offset = hours_in_minutes - minutes_offset   # line 402
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset   # line 404
+   Option B — use a sign multiplier (clearer and less error-prone)
+   - Compute a sign variable (e.g., sign = -1 if '-' else +1) and compute once:
+       total_minutes = hours_in_minutes + minutes_part
+       minutes_offset = sign * total_minutes
+   Option C — fix the operator or variable if one assignment was simply wrong
+   - If only one of the two assignments was intended, remove the incorrect one.
+3. Add a small unit test that parses a negative offset like "-01:30" and a positive one "+01:30" to confirm minutes_offset becomes -90 and +90 respectively.
+4. After fixing, keep the existing bounds check around FieldUtils.safe_multiply to catch any remaining overflow (no change needed there).
+
+Why these fixes work
+- Adding the else or using a sign multiplier ensures only one consistent computation is applied, so minutes_offset holds the intended signed number of minutes before multiplying to milliseconds. That prevents producing the wrong or out-of-range offset that caused the failure.
+
+If you want, paste the few lines above and below lines 402–408 and I will give the exact corrected snippet.

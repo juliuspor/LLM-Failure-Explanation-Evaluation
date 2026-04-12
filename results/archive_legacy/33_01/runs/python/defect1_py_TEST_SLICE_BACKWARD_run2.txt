@@ -1,0 +1,49 @@
+What happened (where it failed)
+- The call was DateTimeZone.for_offset_hours_minutes(-2, -15).
+- Inside for_offset_hours_minutes the parameter minutes_offset is -15.
+- At line 396 the code checks:
+  if minutes_offset < 0 or minutes_offset > 59:
+and at line 397 it raises ValueError("Minutes out of range: {minutes_offset}").
+- Because minutes_offset is -15 the check is true and the ValueError is raised. The code rejects negative minutes even though the caller passed a negative minutes to indicate a negative offset.
+
+Why it failed (root cause)
+- The method treats minutes_offset as if it must always be non‑negative (0..59). The API call, however, passed minutes with the same sign as hours (both negative), so minutes_offset was -15 and triggered the "out of range" check.
+- In short: the validation at lines 396–397 assumes minutes_offset >= 0, but the caller provided negative minutes to indicate sign. The sign handling is inconsistent between hours and minutes.
+
+Where to change it (specific names and lines)
+- The offending code is the validation of minutes_offset at lines 396–397 inside DateTimeZone.for_offset_hours_minutes.
+- Variable names: minutes_offset (the parameter being validated) and hours_offset (or similar — the hours parameter passed in) are relevant.
+
+Two clear fixes (step-by-step)
+
+Option A — Enforce nonnegative minutes and require caller to pass nonnegative minutes (simpler API change)
+1. Document that minutes_offset must be 0..59 and its sign is taken from hours_offset.
+2. Keep the existing validation (lines 396–397) but add a failure message explaining that minutes must be nonnegative and sign is controlled by hours:
+   - No code change required except tests/call sites: change the call to DateTimeZone.for_offset_hours_minutes(-2, 15).
+3. Update any callers that pass negative minutes to pass absolute(minutes).
+
+Option B — Accept signed minutes and normalize internally (keeps caller behavior)
+1. Replace the current validation and add normalization. At the location of lines 396–397, change to:
+   - if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - sign = -1 if hours_offset < 0 or minutes_offset < 0 else 1
+   - minutes = abs(minutes_offset)
+   - total_minutes = hours_offset * 60 + sign * minutes
+   - Then use total_minutes for creating the zone.
+2. This accepts minutes_offset = -15 and produces the expected total offset (-135 minutes).
+3. Make sure you handle mixed sign cases explicitly (e.g., hours = -2, minutes = 15 should be treated as -2:15 or raise — choose policy and document it). If you decide mixed signs are invalid, add a check:
+   - if (hours_offset < 0 and minutes_offset > 0) or (hours_offset > 0 and minutes_offset < 0):
+         raise ValueError("Hours and minutes signs must match")
+4. Add unit tests for:
+   - (-2, -15) -> id '-02:15'
+   - (-2, 15)  -> either error or '-02:15' depending on chosen policy
+   - (2, -15)  -> error or '02:15' depending on policy
+   - bounds: minutes = 0, 59, 60 -> ValueError for 60
+
+Which to choose
+- If you want the API to accept callers like DateTimeZone.for_offset_hours_minutes(-2, -15) without changing all call sites, implement Option B.
+- If you prefer a stricter API where minutes must be 0..59 and sign comes from hours, implement Option A and update callers.
+
+Summary
+- The ValueError is raised because minutes_offset is negative and the code at lines 396–397 requires 0..59.
+- Fix by either normalizing signed minutes inside for_offset_hours_minutes (preferred if you want backward-compatible behavior) or requiring callers to pass nonnegative minutes and taking sign from the hours parameter.

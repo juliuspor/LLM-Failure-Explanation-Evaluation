@@ -1,0 +1,48 @@
+What happened (where it fails)
+- The error is raised in ArrayUtils.add at lines 346–351:
+  - Line 346 checks: if inferred_type == object and expected_type != object:
+  - Line 347 raises a TypeError because the code thinks it cannot cast an "object" list to a list of the requested expected_type.
+- In your call: ArrayUtils.add(None, None, expected_type=str)
+  - array (first arg) is None
+  - element (second arg) is None
+  - expected_type is str
+- Because both the input array and the element are None, the code never sets a concrete inferred_type for the new list. inferred_type remains object (the "unknown"/default marker). At line 346 the code sees inferred_type == object but expected_type != object (expected_type is str) and raises the TypeError. In short: inferred_type is "unknown" (object) while expected_type is a concrete type (str), so the code refuses to proceed and raises.
+
+Why this is the root cause (no guessing)
+- The condition that sets inferred_type from actual values is inside an element-check branch:
+  - The code path that sets inferred_type = object runs only when element is not None (see line 337–340 in the slice).
+  - Because element is None here, that branch does not run and no real element-type inference happens.
+- Later (line 346) the code treats inferred_type == object as an irreconcilable mismatch with a non-object expected_type and raises.
+- So the real bug is: when array is None and element is None, inferred_type remains object but the code still enforces a cast to the requested expected_type instead of accepting that a None element can be placed into a list whose runtime element-type is only known from expected_type.
+
+How to fix it (concrete steps and code changes)
+Pick one of these specific fixes; apply it near the type-inference block (before line 346):
+
+Option A — Use expected_type when inference yields only object
+- Add a step that uses expected_type to set inferred_type when nothing useful was inferred from array/element:
+  - Example patch (pseudo-code, insert before line 346):
+    if inferred_type == object and expected_type is not None:
+        inferred_type = expected_type
+  - Rationale: if the caller supplied expected_type, treat that as the inferred runtime element type instead of raising.
+
+Option B — Special-case the (array is None and element is None) case
+- Only raise when there is a real conflict, not when both array and element are None:
+  - Example patch:
+    if inferred_type == object and expected_type != object and not (array is None and element is None):
+        raise TypeError(...)
+  - Rationale: allow creating a one-element list [None] of the requested expected_type when there is no information from array or element.
+
+Option C — Allow None values to be added regardless of inferred_type
+- When element is None, skip the strict cast check and allow adding None into a list with expected_type:
+  - Example patch:
+    if element is None:
+        # accept None into list; no cast needed
+    elif inferred_type == object and expected_type != object:
+        raise TypeError(...)
+
+Which to choose
+- If expected_type is intended to be authoritative (caller tells what type the list should hold), use Option A.
+- If the intent is to permit adding None without forcing a type when there is no other information, use Option B or C.
+
+Summary in one line
+- The code raises because inferred_type stayed at object (no element to infer from), and the code treats that as incompatible with expected_type=str; fix by using expected_type to set inferred_type or special-casing the all-None input so [None] is allowed.

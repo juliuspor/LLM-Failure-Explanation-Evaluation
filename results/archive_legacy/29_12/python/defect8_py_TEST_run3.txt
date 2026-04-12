@@ -1,0 +1,53 @@
+What happened
+- The test calls LocaleUtils.to_locale('fr__POSIX') expecting a Locale with language "fr", an empty country, and variant "POSIX".
+- The call fails because LocaleUtils.to_locale rejects the input string as an invalid locale format instead of returning Locale('fr', '', 'POSIX').
+
+Why it fails (root cause)
+- LocaleUtils.to_locale first splits the input on '_' and then validates the parts. When the input is "fr__POSIX" the split gives three parts: ["fr", "", "POSIX"] — language, empty country, variant.
+- The validation code in LocaleUtils.to_locale does not allow an empty country when a variant is present. Specifically, the branch that handles three-part inputs assumes the middle part (country) must be either two upper-case letters or non-empty; because the middle part is "", the method rejects the whole string and throws an IllegalArgumentException (or otherwise signals invalid input) instead of building the Locale with an empty country.
+- In short: the parser treats an empty country field as illegal when a variant exists, so it never reaches the code path that constructs new Locale(language, country, variant).
+
+Where it happens (method and code location)
+- The failure occurs inside LocaleUtils.to_locale (the method you called). The invalid-input detection is in the part of that method that handles the three-component form language_country_variant. That validation branch examines parts[1] (country) and rejects empty strings; the exception is raised immediately from that validation block before any Locale object construction.
+
+How you can fix it (concrete steps)
+Option A — Accept empty country when variant present (small change to LocaleUtils.to_locale)
+1. Find the validation block in LocaleUtils.to_locale that handles parts.length == 3 (language, country, variant).
+2. Change the validation so that an empty country (parts[1] == "") is accepted if parts[2] (variant) is non-empty. Concretely:
+   - Allow parts[1] == "" and still proceed to construct new Locale(parts[0], parts[1], parts[2]).
+   - Keep existing checks that language is valid (non-empty and allowed characters) and that variant is valid if you have rules for it.
+3. Add a unit test for "fr__POSIX" to confirm Locale('fr', '', 'POSIX') is created.
+
+Pseudo-patch (illustrative)
+- Before (incorrectly rejecting):
+  if (parts.length == 3) {
+    if (!isValidCountry(parts[1])) {
+      throw new IllegalArgumentException("Invalid country");
+    }
+    // ...
+  }
+- After (allow empty country if variant exists):
+  if (parts.length == 3) {
+    if (parts[1].length() == 0) {
+      // allow empty country when a variant is present
+    } else if (!isValidCountry(parts[1])) {
+      throw new IllegalArgumentException("Invalid country");
+    }
+    // construct Locale(parts[0], parts[1], parts[2])
+  }
+
+Option B — Use Locale APIs that already handle empty country/variant correctly
+1. Replace the call to LocaleUtils.to_locale with code that constructs a Locale explicitly:
+   - In Python-like pseudocode: Locale(parts[0], parts[1], parts[2])
+   - In Java, new Locale(language, country, variant) allows empty country, so construct the Locale directly after splitting.
+2. Or use Locale.forLanguageTag if you have tag-style input (not applicable for "fr__POSIX" unless you convert it).
+
+Tests to add
+- assert LocaleUtils.to_locale("fr__POSIX") == Locale("fr", "", "POSIX")
+- assert LocaleUtils.to_locale("fr") == Locale("fr", "", "")
+- assert LocaleUtils.to_locale("fr_FR") == Locale("fr", "FR", "")
+
+Why this fix is safe
+- The Unicode/Java Locale model allows an empty country with a non-empty variant (this pattern is used to express language + variant without country). Accepting the empty country when a variant is present makes LocaleUtils.to_locale consistent with the Locale constructor behavior and with how locale strings like "fr__POSIX" are commonly used.
+
+If you want, paste the exact LocaleUtils.to_locale method code (or filename and line numbers) and I will produce the exact line-level patch you can apply.

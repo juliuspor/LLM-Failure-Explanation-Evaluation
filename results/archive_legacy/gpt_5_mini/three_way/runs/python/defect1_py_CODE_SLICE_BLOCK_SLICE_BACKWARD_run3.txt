@@ -1,0 +1,49 @@
+What happened (where, in plain terms)
+- The thrown error comes from the minutes-range check at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes_offset. If the caller passed a negative minutes value (for example hours_offset = -5, minutes_offset = -30 or hours_offset = 0, minutes_offset = -30), the code raises ValueError there and fails immediately.
+
+Why it failed (root cause)
+- The code assumes minutes_offset must always be a non‑negative 0..59 value and uses the sign only from hours_offset. But callers sometimes pass minutes with a sign (negative minutes) or the intended meaning was "apply the sign to the minutes part" (e.g. -5 hours 30 minutes). Because the code rejects negative minutes outright at line 396, any signed-minute input will trigger the "Minutes out of range" error.
+- In addition, the code later reuses the minutes_offset variable to hold the combined total minutes, which makes the flow harder to reason about, but the immediate failure point is the validation on lines 396–397.
+
+Concrete examples showing the failure
+- Input that fails: for_offset_hours_minutes(-5, -30)
+  -> minutes_offset < 0 triggers the check at line 396 and raises ValueError("Minutes out of range: -30")
+- Input that succeeds (by current API assumption): for_offset_hours_minutes(-5, 30)
+  -> validation passes; later the code computes hours_in_minutes = -300 and minutes_offset = -330.
+
+How to fix it (step-by-step, explicit code changes)
+Option A — Require minutes to be unsigned and make that clear
+1. Document the method contract: minutes_offset must be 0..59 and the sign comes from hours_offset only.
+2. Keep the current check, but improve the error message to explain that minutes must be non-negative and sign is taken from hours:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes must be 0..59 (sign comes from hours). Given: {minutes_offset}")
+3. (Optional) Do not accept negative minutes from callers; update any call sites that pass signed minutes.
+
+Option B — Accept a signed minutes_offset and normalize correctly (recommended if callers may pass signed minutes)
+1. Replace the strict minutes check with normalization logic that allows signed minutes but keeps absolute minutes < 60:
+   abs_minutes = abs(minutes_offset)
+   if abs_minutes > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total_minutes by applying the sign of the overall offset. Example implementation:
+   hours_in_minutes = hours_offset * 60
+   sign = -1 if hours_offset < 0 else 1
+   total_minutes = hours_in_minutes + sign * abs_minutes
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Return cls.for_offset_millis(offset)
+3a. Alternatively, you can detect a zero hours_offset and let minutes_offset's sign determine the sign:
+   if hours_offset == 0:
+       total_minutes = minutes_offset  # allows -30..59
+   else:
+       total_minutes = hours_in_minutes + ( -abs(minutes_offset) if hours_offset < 0 else abs(minutes_offset))
+
+Notes and pitfalls to watch for
+- Keep minutes magnitude to <= 59 (abs(minutes_offset) <= 59).
+- Be explicit how mixed-sign inputs are interpreted (e.g., hours = -1, minutes = +30 -> -1h30m, but hours = -1, minutes = -30 should be the same; pick one interpretation and document).
+- Avoid reusing the minutes_offset variable for "total minutes" (use a separate variable like total_minutes) — this avoids confusion and makes debugging easier.
+- After normalization, check for overflow when you multiply by MILLIS_PER_MINUTE (the existing try/except is fine).
+
+Summary
+The code fails because lines 396–397 reject negative minutes values, but callers (or tests) used signed minutes. Either enforce the unsigned-minutes contract and update callers, or accept signed minutes and normalize them before combining with hours. The simplest corrective change is to normalize minutes using abs(minutes_offset) and apply the hours sign when computing total_minutes, then proceed to safe_multiply.

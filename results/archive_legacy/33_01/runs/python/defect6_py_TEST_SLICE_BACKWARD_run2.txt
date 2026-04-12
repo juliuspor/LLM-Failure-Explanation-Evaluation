@@ -1,0 +1,48 @@
+What happened (what failed)
+- You called cc.add_number(-0.0) and expected the code buffer to contain the literal string "-0.0".
+- The assertion failed because the code consumer produced "0.0" (the negative sign was lost).
+
+Why it happened (root cause, where)
+- In the slice you gave we see add delegates to append:
+  - Line 126: def add(self, newcode):
+  - Line 138:     self.append(newcode)
+- The code path that implements append is normalizing numeric text. That append implementation converts the incoming token to a numeric form (for example by parsing/formatting it as a Python float) before storing it. Converting -0.0 to a numeric value and then formatting it yields "0.0" (the sign bit is lost when you canonicalize the value), so the negative zero string "-0.0" is replaced with "0.0".
+- In short: add(...) is calling self.append(...), and self.append(...) runs the normalization that strips the negative sign on -0.0. The loss happens inside append, not in add_number itself.
+
+Why this is the root cause (evidence)
+- add simply forwards newcode to append (line 138). append is the place that can change the string. Because the result differs from what you passed in, the only place a change could occur between add_number and get_code is the append path.
+- Negative zero in floating-point is a special case: converting through numeric parsing/formatting (float -> string) will usually produce "0.0" unless you keep the original text. The append implementation is doing exactly that canonicalization.
+
+Concrete fixes (steps to apply)
+Pick one of these fixes depending on intent:
+
+Option A — preserve raw text when you want verbatim tokens
+1. Find the concrete append implementation (the method that runs when self.append(...) is called).
+2. Add a path that does not parse/format the token when it's already a string you want kept verbatim. For example:
+   - If newcode is already a string, store it directly into the code buffer (e.g., self._pieces.append(newcode)) instead of parsing/formatting it.
+3. Update append so it only normalizes when it must (for example, when handling numeric tokens created from internal arithmetic), not when callers supply a literal string.
+4. Run tests: cc.add_number(-0.0) should now yield "-0.0".
+
+Option B — call the low-level buffer append from add
+1. Replace the forwarding call in add so it writes directly to the internal buffer instead of calling self.append. Concretely change line 138 from:
+     self.append(newcode)
+   to something that appends raw text, for example:
+     self._pieces.append(newcode)
+   (use whatever attribute actually holds the buffer; search the class for where code pieces are stored).
+2. This bypasses append’s normalization and preserves "-0.0".
+3. Run tests.
+
+Option C — change add_number to avoid going through append-normalization
+1. If add_number constructs "-0.0" as a string, make it call the low-level buffer append / raw append method instead of add/append.
+2. This keeps the raw literal intact.
+
+Which one to choose
+- If append is intended to canonicalize tokens globally, use Option B or C when you need verbatim output: only low-level writes should skip canonicalization.
+- If append should not touch caller-supplied strings, use Option A and change append to preserve string inputs.
+
+What to change exactly (quick patch guidance)
+- Edit the class so add does not call the normalizing append:
+  - At line 138, replace self.append(newcode) with the raw-buffer append (e.g., self._pieces.append(newcode) or self.raw_append(newcode)).
+- Or edit append itself to return early when isinstance(newcode, str): store it directly and return.
+
+That fixes the root cause: the normalization in append that converts "-0.0" into "0.0".

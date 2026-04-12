@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The failure happens inside DateTimeZone.for_offset_hours_minutes, at the check on line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Calling DateTimeZone.for_offset_hours_minutes(-2, -15) triggers that check because minutes_offset is -15, so the method raises ValueError("Minutes out of range: -15"). That is why your assert never runs.
+
+Why it fails (root cause)
+- The method assumes minutes must be non‑negative (0..59). It does not accept a negative minutes argument, even though callers sometimes pass a negative minutes together with a negative hours (e.g., -2 and -15) expecting the total offset -2:15.
+- Later code (lines 406–409) contains logic that tries to adjust minute values for negative hour offsets, but that code only runs when minutes are already in the accepted 0..59 range. Because the early check rejects negative minutes outright, the normalization logic never runs for inputs like (-2, -15).
+- In short: the precondition on line 400 is too strict (rejects negative minutes) while the later code expects minutes to be normalized instead. The mismatch causes the exception.
+
+Exactly where to look in the source
+- Line 400: the minutes range check that throws the ValueError.
+- Lines 406–409: the normalization logic that adjusts minutes for negative hours, which never runs if the check at 400 has already failed.
+- The method entry is DateTimeZone.for_offset_hours_minutes (the failing call).
+
+Concrete fixes (step‑by‑step)
+1. Option A — caller fix (quick):
+   - Pass the sign only on hours and give minutes as a non‑negative value:
+     DateTimeZone.for_offset_hours_minutes(-2, 15)
+   - This avoids the check entirely and produces the expected "-02:15".
+
+2. Option B — library fix (recommended if you want the method to accept negative minutes):
+   - Change the minutes validation so the method accepts a negative minutes argument and normalizes it into total minutes before validating the range. Concretely:
+     - Replace the check on line 400 with a validation that allows minutes in the range -59..59:
+         if minutes_offset < -59 or minutes_offset > 59:
+             raise ValueError(f"Minutes out of range: {minutes_offset}")
+     - Compute total_minutes = hours * 60 + minutes_offset (taking both signs into account).
+     - Then normalize total_minutes and check the absolute offset limit (matching existing logic that later multiplies by MILLIS_PER_MINUTE).
+   - Or, if you prefer to preserve earlier style, normalize minutes to a positive 0..59 and carry over to hours:
+       if minutes_offset < 0:
+           # combine signs: convert (-2, -15) -> total_minutes = -((2*60) + 15)
+           total_minutes = hours_in_minutes - abs(minutes_offset)  # follow existing math
+       else:
+           total_minutes = hours_in_minutes + minutes_offset
+     - Ensure you compute offset = total_minutes * MILLIS_PER_MINUTE and apply the same overflow checks as currently done near line 409–411.
+
+Minimal code patch (illustrative)
+- Replace the block around line 400–409 with (pseudocode):
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours * 60
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    # then existing overflow check and return cls.for_offset_millis(offset)
+
+Why this fix works
+- It allows callers to express offsets either as (-2, 15) or (-2, -15) and produces the same total offset (-135 minutes).
+- It removes the contradictory early rejection (line 400) that prevented the normalization code from executing.
+
+Summary
+- The immediate cause is the strict minutes range check at line 400 rejecting negative minutes.
+- Either call with positive minutes (DateTimeZone.for_offset_hours_minutes(-2, 15)) or change the validation/normalization so negative minute arguments are converted into the correct total offset before rejecting out‑of‑range values.

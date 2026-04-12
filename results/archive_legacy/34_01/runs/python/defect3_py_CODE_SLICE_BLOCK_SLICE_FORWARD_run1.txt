@@ -1,0 +1,54 @@
+What happened
+- The code throws IndexError("String index out of range: {index}") from code_point_at(...) at lines 35–36 because pos is advanced past the end of code_units and then code_point_at(code_units, pos) is called.
+- The overshoot happens in the block at the end of the while loop:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it happens (root cause)
+- translate_codepoint(...) returns a value called consumed. The code’s comment says "they just took care of a surrogate pair", which implies translate_codepoint consumes UTF-16 code units (1 for BMP, 2 for a surrogate pair). In that case consumed is a count of code units.
+- Inside the for-loop you call code_point_at(code_units, pos) and then char_count(...) and add that to pos. char_count(code_point_at(...)) returns 1 for a BMP codepoint or 2 for a codepoint encoded as a surrogate pair.
+- If translate_codepoint returned 2 because it already consumed a surrogate pair (2 code units), the loop runs twice. In the first iteration char_count(...) will return 2 (because the same surrogate pair is still at pos) and you add 2 to pos. In the second iteration you call code_point_at(code_units, pos) with pos already moved past the surrogate pair (and possibly past length), which causes code_point_at to raise IndexError.
+- In short: translate_codepoint and the loop use inconsistent unit semantics (one counts code units, the other adds char_count(codepoint) again), leading to double/extra advancement of pos and an out-of-bounds read.
+
+Exactly where to look
+- The while loop that starts with while pos < length and the inner block:
+    consumed = self.translate_codepoint(code_units, pos, out)
+    ...
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The IndexError is raised in code_point_at at lines 35–36 when called with pos >= len(code_units).
+
+Concrete fixes (pick one, depending on intended contract)
+
+Fix A — translate_codepoint returns number of UTF-16 code units consumed (1 or 2)
+- Replace the for-loop with a single advance by consumed (no call to code_point_at here):
+
+    # replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+    # with:
+    pos += consumed
+
+Rationale: If consumed is already a count of code units, advancing by consumed moves pos correctly without re-reading codepoints.
+
+Fix B — translate_codepoint returns number of code points consumed (1 for one codepoint)
+- Change translate_codepoint to return the number of code points (not code units), or if it already does return codepoints, make the increment loop call code_point_at once per codepoint (this is what you have, but confirm translate_codepoint's contract). Example, explicitly:
+
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+Rationale: If consumed means “how many codepoints were handled”, you must call code_point_at once per codepoint and advance pos by the UTF-16 code unit length of each codepoint. (Note: do not loop consumed times if consumed is code units.)
+
+Which to choose
+- Decide the semantic contract for translate_codepoint:
+  - If translate_codepoint handles surrogate pairs internally and returns the number of UTF-16 code units it consumed, use Fix A.
+  - If translate_codepoint reports how many codepoints it consumed (1, 2, ...), use Fix B and ensure translate_codepoint actually follows that contract.
+
+One-line test to verify fix
+- Run with a string containing a surrogate pair (e.g., an emoji). Before fix you will get IndexError; after applying the correct fix you should finish without error and pos should equal length at the end.
+
+Summary
+- Root cause: mismatch between what consumed means (code units vs codepoints) and how pos is advanced, causing pos to be moved too far and code_point_at to be called with an out-of-range index.
+- Fix by making the units consistent: either advance pos by consumed (if consumed is code units) or make translate_codepoint return codepoints and advance pos by char_count per codepoint.

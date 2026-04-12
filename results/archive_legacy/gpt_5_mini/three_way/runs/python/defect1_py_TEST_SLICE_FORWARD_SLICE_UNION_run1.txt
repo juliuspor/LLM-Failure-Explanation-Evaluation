@@ -1,0 +1,56 @@
+What happened (root cause)
+- At line 396 the code forbids negative minute values by doing:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This rejects inputs like (-2, -15) immediately, so test_negative_hours_negative_minutes fails because the method raises ValueError instead of returning -02:15.
+- The code later (lines 402 and 404) already tries to handle sign combinations by doing either:
+  minutes_offset = hours_in_minutes - minutes_offset  (line 402)
+  or
+  minutes_offset = hours_in_minutes + minutes_offset  (line 404)
+  That logic only makes sense if minutes_offset is allowed to be negative (or at least you convert it properly). But because of the earlier guard, negative minutes never reach that section.
+
+Why this is wrong
+- The minutes range check on line 396 is too strict. The intended valid range (per the docstring and tests) is -59..+59, not 0..59.
+- Because of that incorrect check, valid inputs with negative minutes when hours are negative are rejected before the sign-combination logic runs.
+- The failing behavior is therefore located at the minutes validation on line 396 (the early rejection), not the later arithmetic.
+
+Where it occurs (specific variables/lines)
+- Validation: line 396 (minutes_offset check)
+- Sign-handling: lines 402 and 404 (minutes_offset = hours_in_minutes - minutes_offset OR + minutes_offset)
+- Final multiplication: line 405 (offset = FieldUtils.safe_multiply(minutes_offset, ...)) uses an already-rejected/incorrect minutes_offset for input cases that get through.
+
+Concrete fix (step-by-step)
+1. Allow minutes in the range -59..+59. Replace the range check at line 396:
+   Old:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   New:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Normalize how you combine hours and minutes so the arithmetic is explicit and correct. Replace the logic at lines 402–404 with a clear calculation using absolute minutes where appropriate. For example:
+   hours_in_minutes = hours * 60
+   minutes_abs = abs(minutes_offset)
+   if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_abs
+   else:
+       total_minutes = hours_in_minutes + minutes_abs
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   This ensures:
+   - (-2, -15) -> hours_in_minutes = -120, minutes_abs = 15, total_minutes = -135 -> -02:15
+   - (-2, 15)  -> hours_in_minutes = -120, minutes_abs = 15, total_minutes = -135 -> -02:15
+   - (2, 15)   -> hours_in_minutes = 120, minutes_abs = 15, total_minutes = 135 -> +02:15
+   - (2, -15)  -> still rejected by your business rule (if you want that), because you're validating sign combinations elsewhere
+
+3. Optionally, make the sign-combination rule explicit:
+   - If you want to reject mixed-sign inputs like (2, -15), add a check:
+       if (hours > 0 and minutes_offset < 0) or (hours < 0 and minutes_offset > 0):
+           # either normalize as above or raise ValueError depending on intended API
+   - But based on your tests/docstring you accept (-2, 15) and (-2, -15) and reject (2, -15). Make that rule explicit in code and tests.
+
+Why these changes fix the tests
+- Changing the range check to -59..+59 allows negative minute inputs to reach the sign-combining logic.
+- Computing total_minutes by using abs(minutes) and subtracting when hours are negative reproduces the intended semantics shown in your docstring and tests: both (-2, 15) and (-2, -15) give -02:15, while (2, -15) is rejected.
+
+If you want, I can produce the exact patched code snippet replacing lines 396–405 so you can drop it in directly.

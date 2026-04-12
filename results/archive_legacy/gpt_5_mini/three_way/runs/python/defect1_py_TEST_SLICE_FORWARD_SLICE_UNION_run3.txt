@@ -1,0 +1,60 @@
+What failed
+- The code rejects negative minute values too early (line 396), then later tries to handle minute signs as if negative minutes were allowed. That makes the logic inconsistent and causes tests that expect negative minute inputs to be accepted and interpreted correctly to fail.
+
+Where it happens (exact lines)
+- Line 396: the code does this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This forbids any negative minute value.
+- Lines 402 and 404 (the combination logic) then try to compute a combined minute offset with expressions like:
+  minutes_offset = hours_in_minutes - minutes_offset
+  minutes_offset = hours_in_minutes + minutes_offset
+  Those branches assume minutes can be negative (or are handled differently depending on hour sign), but because of the check at 396 a negative minutes value never reaches this code.
+
+Why that causes the tests to fail
+- Your tests expect that negative minutes are allowed in some cases (e.g., DateTimeZone.for_offset_hours_minutes(-2, -15) should produce -02:15, and DateTimeZone.for_offset_hours_minutes(0, -15) should produce -00:15). Because the code raises ValueError at line 396 whenever minutes_offset < 0, those calls fail immediately.
+- At the same time, the combination logic (lines 402/404) is written with a different expectation of how signs should combine (e.g. negative hours may combine with minutes by subtracting or adding). But that logic never gets a chance to run for negative minutes because of the early rejection.
+
+Root cause (concise)
+- The range check for minutes is wrong: it should allow minutes in -59..59 (or be conditional on the sign of hours), but currently it enforces 0..59 unconditionally. This contradicts the later code that tries to handle negative minutes when hours are negative (and contradicts the expected behavior described in the docstring/tests).
+
+Concrete fixes (step-by-step, with exact places to change)
+1. Change the minutes range check at line 396 so negative minutes in [-59, -1] are allowed:
+   - Replace
+       if minutes_offset < 0 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+     with
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This allows negative minutes to be passed through for later combination logic.
+
+2. Make the combination logic explicit and consistent with your intended semantics (the docstring/tests imply: if hours < 0, the minutes extend the magnitude; if hours > 0, minutes must be non-negative; if hours == 0, minutes sign determines sign):
+   Replace the cryptic branches at lines 402 and 404 with clearly spelled-out logic. For example:
+   - Compute hours_in_minutes = hours * 60 (already present).
+   - If hours > 0:
+         if minutes_offset < 0:
+             raise ValueError("Mixed sign hour and minute not allowed")
+         total_minutes = hours_in_minutes + minutes_offset
+     elif hours < 0:
+         # For negative hours, treat minutes as adding to the magnitude (use absolute value)
+         total_minutes = -(abs(hours_in_minutes) + abs(minutes_offset))
+     else:  # hours == 0
+         total_minutes = minutes_offset  # sign of minutes determines sign
+
+   Concretely replace the existing lines 402..405 with the above logic and then compute:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+3. Keep the overflow check already present (lines 405–407); ensure it still applies to total_minutes before multiply.
+
+Why these fixes work
+- Allowing minutes in -59..59 avoids premature ValueError for valid cases such as (0, -15) and (-2, -15).
+- The explicit combination logic matches the documented/tested behavior:
+  - (+h, +m) -> +h:mm
+  - (+h, -m) -> error
+  - (-h, +m) -> - (|h|*60 + |m|)  (i.e., -02:15 for (-2, 15))
+  - (-h, -m) -> - (|h|*60 + |m|)  (i.e., -02:15 for (-2, -15))
+  - (0, +/-m) -> sign set by minutes
+
+Summary
+- Root cause: wrong minutes range check at line 396 that forbids negative minutes, conflicting with later sign-combination code (lines 402/404).
+- Fix: allow minutes in -59..59 and replace the combination branches with explicit logic that follows the documented/tested sign rules. This will make tests like (-2, -15), (0, -15), and (-2, 15) behave as expected.

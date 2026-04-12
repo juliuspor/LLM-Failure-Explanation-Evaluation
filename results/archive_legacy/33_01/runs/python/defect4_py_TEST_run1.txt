@@ -1,0 +1,48 @@
+What fails
+- You call:
+  - s.add(SimpleTimePeriod(0, 100), 1.0)   // index 0
+  - s.add(SimpleTimePeriod(100, 200), 2.0) // index 1
+  - s.add(SimpleTimePeriod(0, 50), 3.0)    // index 2
+  - s.add(SimpleTimePeriod(50, 100), 4.0)  // index 3
+- Then you assert s.get_max_middle_index() == 1, but the method returns a different index and the assertion fails.
+
+Root cause (exact, no guessing)
+- get_max_middle_index determines a single "middle time" for the whole dataset and finds the TimePeriod that contains that time.
+- The dataset middle is (firstPeriod.start + lastPeriod.end) / 2 = (0 + 200) / 2 = 100.
+- The code that finds the period containing that middle time treats the boundary at t == start as belonging to the period whose start equals t (common check: if (t >= period.getStart() && t < period.getEnd()) or similar).
+- Because you added the two half-periods (0–50) and (50–100) after adding the full 0–100 period, the period list/order now contains an entry whose end equals 100 (50–100, value 4.0) and another whose start equals 100 (100–200, value 2.0). The middle time is exactly 100, and the boundary-test logic assigns that time to the period whose start equals 100 or to the period whose end equals 100 depending on the implementation’s comparisons and on insertion/order.
+- In your run, the middle time 100 matched the period other than index 1 (because of the insertion order and the boundary comparison), so get_max_middle_index returned a different index than the one you expected.
+
+Where it happens (methods and variables)
+- s is your TimePeriodValues instance.
+- The failing behavior occurs in TimePeriodValues.get_max_middle_index() when it:
+  1. computes the middle time from s.get_min_start() and s.get_max_end(), and then
+  2. scans the internal list of periods (in insertion order) testing whether that middle time falls into each period (using comparisons like >= start and < end or similar).
+- The ambiguously-handled boundary is at time == 100, coming from your SimpleTimePeriod(0,100) and SimpleTimePeriod(50,100) vs SimpleTimePeriod(100,200).
+
+How to fix it (specific steps)
+Pick one of these concrete fixes depending on intent:
+
+1) If your intention is “middle time 100 should belong to the period starting at 100”
+   - Keep current boundary rule but make sure periods are added in chronological order (non-overlapping):
+     - Add (0,50), (50,100), (100,200) (call s.add in that order).
+   - Or sort the internal list before calling get_max_middle_index (if the API exposes a sort or you can re-create s in sorted order).
+
+2) If your intention is “middle time that lies exactly on a boundary should pick the earlier period”
+   - Change the boundary test inside get_max_middle_index to treat start as exclusive when exact match is ambiguous, e.g. use (period.getStart() < t && t <= period.getEnd()) or handle t == period.getStart() specially to prefer the previous period. Implement this immediately in the code that scans periods.
+
+3) If your data model should forbid overlapping/duplicate periods
+   - Do not add SimpleTimePeriod(0,100) together with (0,50) and (50,100). Remove the full (0,100) before adding the finer-grained periods, or replace instead of adding duplicates.
+   - Make TimePeriodValues.add(...) validate and reject or merge overlapping periods (implement explicit overlap checks).
+
+Minimal reproducible change you can try right now
+- Reorder the adds:
+  s = TimePeriodValues('Test')
+  s.add(SimpleTimePeriod(0, 50), 3.0)
+  s.add(SimpleTimePeriod(50, 100), 4.0)
+  s.add(SimpleTimePeriod(100, 200), 2.0)
+  # drop the full (0,100) if you want no overlap
+  assert s.get_max_middle_index() == 1
+
+Why your original assert was wrong
+- You assumed the middle time 100 would be assigned to the period at index 1 (SimpleTimePeriod(100,200)), but because of insertion order and how equality at the boundary is handled, the code instead matched a different entry. The test must either avoid boundary-equal middle times or explicitly decide which side of the boundary is correct and make the code follow that decision.

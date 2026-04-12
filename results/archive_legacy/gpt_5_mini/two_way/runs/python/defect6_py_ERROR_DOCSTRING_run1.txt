@@ -1,0 +1,75 @@
+Short answer: the test is failing because the code produced a positive zero (+0) while the test expected a negative zero (-0). In IEEE-754 floating-point arithmetic +0 and -0 compare as equal with normal equality operators, so a plain numeric equality/assertion can hide the sign and cause confusing output like "Expected -0.0, got 0". The root cause is a sign loss in the code path that computes the value (or the test is checking the sign unnecessarily).
+
+I don’t have your source lines yet, so below I explain exactly what to check, where to look, how to confirm the sign, and concrete fixes you can apply. Replace my placeholder names with the real ones from your code (I use actual and expected for the test variables and show suggestions for JS and Python where appropriate).
+
+What happened (concise)
+- The test printed "Expected -0.0, got 0".
+- That means expected is -0.0 (negative zero).
+- The code under test returned +0 (printed as 0).
+- The numeric equality used by the test treats +0 and -0 as equal, so the test framework still reports the sign difference in the failure message but equality can be confusing.
+
+Why it happened (root cause)
+- IEEE-754 floats have a signed zero: -0.0 and +0.0 are distinct bit patterns but compare equal with == or usual numeric assertions.
+- Somewhere in the code that computes actual, the negative sign was lost (for example: abs(), multiplication by 0, a branch that forced 0, or conversion that canonicalizes negative zero to positive zero).
+- Or the test intentionally expects the negative sign, but the code returns 0 in a branch that doesn’t preserve sign.
+
+Where to look (file/line guidance)
+- Open the test that fails (the file and the failing assertion line shown by your test runner). Suppose the failing assertion is on line L of tests/test_foo.* — that line compares expected and actual. Note the variable names used there (e.g., expected, actual).
+- In the code under test, find the function being called from the test (e.g., computeValue() in src/foo.*). Inspect any places that can produce zero: returns, divisions, multiplications, absolute-value calls, conversions to integer/unsigned, or formatting steps. Check lines that explicitly set value = 0 or value = +value * 0.
+
+How to confirm the sign (exact checks)
+- JavaScript:
+  - Use Object.is(actual, -0) — returns true if actual is negative zero.
+  - Or check 1 / actual === -Infinity for negative zero and +Infinity for positive zero.
+  Example:
+    const actual = myFunc(...);
+    console.log(Object.is(actual, -0)); // true => negative zero
+    console.log(1 / actual); // -Infinity => negative zero
+- Python:
+  - Use math.copysign or struct to inspect bits:
+    import math, struct
+    actual = my_func(...)
+    is_neg_zero = (actual == 0.0) and math.copysign(1.0, actual) < 0
+    # or inspect bits:
+    bits = struct.pack('!d', actual) # network byte order
+  - Or check 1.0 / actual == float('-inf') for negative zero.
+- Java:
+  - Double.doubleToRawLongBits(value) to inspect sign bit.
+  - Or 1.0 / value == Double.NEGATIVE_INFINITY.
+
+Concrete fixes (step-by-step)
+1) Decide whether the test really needs negative zero:
+   - If the sign of zero is irrelevant for your behavior, change the test to not require -0.0. For numeric equality use an epsilon comparison or canonicalize both sides (e.g., assert Math.signbit or compare absolute values).
+   - If the sign matters, ensure code preserves it.
+
+2) If preserving sign is required, make a targeted code change where the sign was lost. Typical suspects and specific steps:
+   - If you used Math.abs() or abs(), it will remove the sign. Replace with logic that preserves sign when value is zero:
+     - JS: don’t call Math.abs() on values that should preserve signed zero.
+     - Python: avoid abs() if sign matters; use math.copysign to set sign explicitly.
+   - If you set value = 0 in a branch, change that assignment to preserve sign:
+     - JS example: if you want negative zero, use -0 instead of 0 (value = -0).
+     - Python: value = -0.0
+   - If conversion to integer or to an unsigned type removes sign, adjust conversion to keep a float or record sign before converting.
+   - If a ratio leads to zero (like a/b where a is 0), ensure numerator sign logic keeps the sign when expected.
+
+3) Add a targeted test or assertion to guard future regressions:
+   - JS test: assert(Object.is(actual, -0), "expected negative zero");
+   - Python test: assert math.copysign(1.0, actual) < 0 and actual == 0.0
+
+4) Verify locally and rerun test:
+   - Run the exact failing test file. Example commands:
+     - JS: npm test -- tests/test_foo.js
+     - Python: pytest tests/test_foo.py::test_my_case -q
+   - Add temporary debug prints to show 1/actual, or Object.is(actual,-0) to confirm before/after your change.
+
+Example diagnostic snippet (replace names with yours)
+- JS:
+    // tests/test_foo.js line L
+    const actual = computeValue(...);
+    console.log('actual raw:', actual, 'Object.is(actual, -0)=', Object.is(actual, -0), '1/actual=', 1/actual);
+- Python:
+    # tests/test_foo.py line L
+    actual = compute_value(...)
+    print('actual', actual, 'is_neg_zero', (actual == 0.0 and math.copysign(1.0, actual) < 0), '1/actual', 1.0/actual)
+
+If you paste the failing test file and the implementation of the function it calls (file names and the failing line numbers), I will point to the exact line where the sign is lost and give a minimal code change to fix it.

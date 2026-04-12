@@ -1,0 +1,54 @@
+What happened (root cause)
+- At line 346 the code does the comparison "if start < min_start:".
+- The variables used in that comparison are set only inside type-specific branches earlier:
+  - `start` is set only inside the `if isinstance(period, SimpleTimePeriod):` branch (line 331) or the alternative branch at line 335.
+  - `min_start` is set only inside the `if isinstance(min_start_period, SimpleTimePeriod):` branch (line 342 → 345).
+- If either `period` or `min_start_period` is not an instance of SimpleTimePeriod then the corresponding branch does not run and the local variable (`start` or `min_start`) is never defined.
+- That causes a runtime error (UnboundLocalError / NameError) at line 346 when the code tries to evaluate `start < min_start`.
+
+Where it occurs (exact lines & names)
+- `start` is conditionally set at:
+  - line 331: inside `if isinstance(period, SimpleTimePeriod):` — `start = period.get_start_millis()`
+  - line 335: alternative — `start = int(period.get_start().timestamp() * 1000)`
+- `min_start` is conditionally set at:
+  - line 342–345: inside `if isinstance(min_start_period, SimpleTimePeriod):` — either `min_start = min_start_period.get_start_millis()` (342/343) or `min_start = int(min_start_period.get_start().timestamp() * 1000)` (344/345)
+- The comparison that fails is line 346: `if start < min_start:`
+
+Why this is the bug (plain language)
+- The code assumes both `start` and `min_start` exist by the time it reaches the comparison, but those variables are only created inside type-specific branches. If a value uses a different period type, one or both variables are missing and the comparison blows up.
+
+Concrete steps to fix it (explicit, actionable)
+1. Ensure `start` and `min_start` are always defined before use:
+   - Initialize them to a default (e.g., `None`) before the type checks:
+     - `start = None` before line 331
+     - `min_start = None` before line 341
+2. Only compare when both values are present:
+   - Replace line 346 with:
+     - `if start is not None and min_start is not None and start < min_start:`
+3. Prefer a single way to get milliseconds so you don’t duplicate logic:
+   - Add (or use) a helper function like:
+     - `def millis_from_period(period):` that returns the start in milliseconds for any supported period type (calls `get_start_millis()` for SimpleTimePeriod, or converts `get_start().timestamp()` for others).
+   - Then call `start = millis_from_period(period)` and `min_start = millis_from_period(min_start_period)`.
+   - This removes the conditional assignment duplication and prevents missing variables.
+4. Handle type mismatches explicitly:
+   - If you cannot compute `min_start` (unsupported period type), decide and document behavior: skip this comparison, coerce the type, or raise a clear error.
+5. Add unit tests that exercise:
+   - `period` being SimpleTimePeriod and non-SimpleTimePeriod
+   - `min_start_period` being SimpleTimePeriod and non-SimpleTimePeriod
+   - The boundary case where `_min_start_index` is -1 vs >= 0
+
+Minimal patch example (conceptual)
+- Before the conditional logic:
+  - `start = None`
+  - `min_start = None`
+- Replace per-type code with:
+  - `start = millis_from_period(period)`  # implement this function
+  - if self._min_start_index >= 0:
+      - `min_start_period = self.get_data_item(self._min_start_index).get_period()`
+      - `min_start = millis_from_period(min_start_period)`
+      - `if start is not None and min_start is not None and start < min_start:`
+          - `self._min_start_index = index`
+      - else: (if you want new index always) `self._min_start_index = index` (preserve existing behavior if intended)
+
+Why this fix will stop the failure
+- Initializing and/or centralizing the millis conversion ensures `start` and `min_start` always exist (or you explicitly skip comparison), so the code will not attempt to compare undefined variables and will behave predictably for all supported period types.

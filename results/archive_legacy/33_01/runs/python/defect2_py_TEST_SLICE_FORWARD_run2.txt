@@ -1,0 +1,67 @@
+I can’t tell exactly which line in your code throws the failure without seeing the GrayPaintScale class, but here is exactly what happened, why it likely happened, and how to find and fix the bug step by step.
+
+What happened (observable symptom)
+- The test calls:
+  gps = GrayPaintScale()
+  color = gps.get_paint(-0.5)
+  assert color == (0, 0, 0)
+- The assertion failed. That means get_paint(-0.5) returned something other than (0, 0, 0) (either a different tuple or an exception).
+
+Why this is happening (most likely root causes)
+You passed a negative input (-0.5). The code that converts the input value to an 8-bit gray channel appears to not clamp or handle negative inputs correctly. The usual conversion pattern is:
+  - clamp input to [0.0, 1.0]
+  - scale to 0–255
+  - convert to integer
+  - return (g, g, g)
+
+Common bugs that produce a wrong result for -0.5:
+1. No clamping. If implementation does something like
+     i = int(value * 255)
+   then value = -0.5 -> i = -127 (or -128 depending on rounding). Returning (-127, -127, -127) will fail the assert.
+2. Sign/bit operations after cast. If the code writes the integer into an unsigned byte or uses bit masking incorrectly, negative ints can wrap into large positive values (e.g. -1 -> 255), producing (255,255,255) or other unexpected tuples.
+3. Using modulus or fractional conversion: something like
+     frac = value % 1.0
+   for negative value will yield a positive fraction other than 0.0 (e.g. -0.5 % 1.0 -> 0.5 in many languages), producing medium gray instead of black.
+4. Rounding choice without clamp. int(round(value*255)) without clamping can still produce negative integers.
+
+Where to look (exact places to inspect)
+Open your GrayPaintScale.get_paint implementation and check these specific lines:
+- The entry of the method (the first lines that read or convert the parameter named value, v, x, t, etc.)
+- Any line that does arithmetic like value * 255, value % 1.0, or int(...) / Math.floor / Math.round on value
+- Any line that does bitwise operations, masking (& 0xFF), or writes into a byte buffer before forming the (r,g,b) tuple
+- The return statement that builds color (return (r, g, b) or equivalent)
+
+How to reproduce and confirm quickly
+1. Add a small debug print as the first lines of get_paint:
+     print("get_paint input:", value)
+2. Immediately before you return, print the intermediate integer(s):
+     print("scaled int:", i, "returning:", (r,g,b))
+3. Run the test again to see the exact returned tuple or exception.
+
+Concrete fixes (apply one of these depending on what you find)
+A. If you find no clamp and you compute i = int(value * 255):
+- Replace the conversion block with:
+     value = max(0.0, min(1.0, value))      # clamp to [0,1]
+     gray = int(round(value * 255))        # scale and round
+     return (gray, gray, gray)
+- This guarantees get_paint(-0.5) returns (0,0,0) and get_paint(1.2) returns (255,255,255).
+
+B. If you find value % 1.0 or similar:
+- Remove modulus. Use explicit clamping as above. Modulus changes wrap behavior and is wrong here.
+
+C. If you find bitwise masking after a signed int (e.g. i & 0xFF):
+- Stop relying on signed cast behavior. Use clamp then produce the tuple from the clamped integer. If you must convert bytes, compute:
+     gray = int(round(value * 255)) & 0xFF
+  but only after clamping so negative values don’t wrap into 255.
+
+D. If you find rounding/truncation inconsistencies:
+- Use round then int, not direct truncation, so 0.5 becomes 128 when appropriate:
+     gray = int(round(value * 255))
+
+Tests to add (so this stays fixed)
+- assert gps.get_paint(-0.5) == (0, 0, 0)
+- assert gps.get_paint(0.0) == (0, 0, 0)
+- assert gps.get_paint(1.0) == (255, 255, 255)
+- assert gps.get_paint(0.5) in [(127,127,127), (128,128,128)] depending on your rounding rule
+
+If you want, paste the current GrayPaintScale.get_paint function here and I’ll point to the exact line and provide the one-line change to fix it.

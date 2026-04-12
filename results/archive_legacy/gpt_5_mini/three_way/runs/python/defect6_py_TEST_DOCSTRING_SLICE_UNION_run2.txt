@@ -1,0 +1,45 @@
+What happened (what failed)
+- Root cause: negative zero (-0.0) was treated as the integer 0 by the integer-branch of add_number, so its sign was lost and "0" was emitted instead of "-0.0".
+- Where it happened: inside the integer-handling branch starting at line 176:
+  - Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - Line 177: value = int(x)
+  - Line 178: mantissa = value
+  - Line 192: self.add(str(value))
+- Why that loses the sign: for x == -0.0, int(x) == 0 and the comparison x == int(x) is True (because -0.0 == 0.0). The code then uses value = int(x) (value == 0) and finally self.add(str(value)) which produces "0". Converting to int and emitting str(value) discards the sign bit of negative zero, so the negative sign is lost.
+
+Why this is a bug (details)
+- IEEE-754 negative zero is different from positive zero for sign-preserving semantics. The test expects negative zero to be printed as "-0.0".
+- The check x == int(x) is fine to detect integral-valued floats, but it is not safe for signed zero: it collapses -0.0 into 0 before any sign check happens, so later logic cannot recover the sign.
+
+Exactly where to change it (concrete steps)
+1. Detect negative zero before the integer branch (before line 176). Use an is_negative_zero check or math.copysign to test sign of zero.
+   - Example check: if x == 0.0 and math.copysign(1.0, x) < 0: handle negative zero specially.
+   - Or use CodeConsumer.is_negative_zero(x) if that method exists (your tests reference it).
+2. If negative zero, emit "-0.0" (or whatever exact representation you want to preserve) and return without falling through to the integer branch.
+3. Otherwise continue with the existing integer branch logic.
+
+Minimal suggested patch (where to insert)
+- Insert right before line 176 (the integer branch):
+
+    # preserve sign of negative zero
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        self.add("-0.0")
+        return
+
+- Or, using your utility:
+
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+Why this fixes it
+- The check runs before converting the float to int. For -0.0, it will match and emit "-0.0" directly. Because the function returns, the later code that sets value = int(x) and emits "0" is skipped.
+
+Additional notes and alternatives
+- Alternative representation: if you prefer "-0" instead of "-0.0", emit "-0" instead — be consistent with your style rules. Tests expect "-0.0".
+- Don’t try to detect negative zero after int(x) has been computed, because int(x) loses the sign information.
+- Keep the special-case small and localized: test for negative zero early, emit the preserved-string, and return.
+
+Summary
+- Failure cause: integer-branch (lines 176–192) converts -0.0 to int( -0.0 ) == 0 and emits "0", losing the negative sign.
+- Fix: detect negative zero before that branch (e.g., CodeConsumer.is_negative_zero or math.copysign) and emit "-0.0" immediately.

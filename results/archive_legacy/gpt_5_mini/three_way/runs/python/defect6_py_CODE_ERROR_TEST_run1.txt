@@ -1,0 +1,57 @@
+What happened (root cause)
+- The code treats -0.0 as an integer because of the test on line
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  For -0.0 that condition is True.
+- Right after that you do
+  value = int(x)
+  which converts -0.0 to the integer 0 and loses the negative sign.
+- Later you call self.add(str(value)) and end up printing "0" (or "0" with no sign) instead of "-0.0".
+- In short: the sign is lost by int(x) for negative zero before you have a chance to preserve it.
+
+Where it occurs in the code
+- The problematic sequence is:
+  prev = self.get_last_char()
+  ...
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+      value = int(x)            # <-- sign lost here for -0.0
+      ...
+      self.add(str(value))     # prints "0" instead of "-0.0"
+
+Why checks like x < 0 don't help
+- Tests like x < 0 will not be True for -0.0 in Python, so the earlier branch that adds a space when prev == '-' doesn't detect negative zero. You must explicitly detect negative zero (sign bit), not rely on numerical comparisons.
+
+How to fix it (concrete steps)
+1. Detect negative zero before converting to int. There is already a utility in tests: CodeConsumer.is_negative_zero(x). If you don’t have that, implement it like:
+   def is_negative_zero(x):
+       return x == 0.0 and math.copysign(1.0, x) < 0.0
+   (math.copysign preserves the sign bit.)
+
+2. At the top of add_number, handle negative zero immediately:
+   if self.is_negative_zero(x):
+       # preserve sign; use -0.0 exactly as expected by tests
+       self.add("-0.0")
+       return
+
+   This must be before the integer branch that calls int(x).
+
+3. Also update the prev == '-' spacing logic so it uses the negative-zero test instead of x < 0, if you need to insert a space when a negative zero follows a minus sign:
+   if self.is_negative_zero(x) and prev == '-':
+       self.add(" ")
+
+4. Alternatively (less preferred), change the integer-branch condition to exclude negative zero:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x) and not self.is_negative_zero(x):
+
+Exact minimal change example (insert at function start, before integer handling):
+    if self.is_negative_zero(x):
+        prev = self.get_last_char()
+        if prev == '-':
+            self.add(" ")
+        self.add("-0.0")
+        return
+
+Why this fixes it
+- By detecting negative zero first you never call int(-0.0) and you preserve the sign bit in the output exactly as the tests expect.
+
+Summary
+- Root cause: int(x) converts -0.0 to 0, losing the negative sign; the code assumed numeric equality would preserve sign.
+- Fix: detect negative zero (via math.copysign or is_negative_zero) before converting to int, print "-0.0" and return.

@@ -1,0 +1,60 @@
+What happened (where): In both snippets the failure happens at lines 32–33. The code checks
+- start < 0 or end < 0
+- start > end
+- start > len(s) or end > len(s)
+
+and if any of those are true it raises IndexError(f"String index out of range: {end}").
+
+Why it fails (root causes, with exact variables and lines):
+1. Wrong rejection of backward slices (line 32: start > end)
+   - The check start > end unconditionally forbids any slice where start is greater than end. That is exactly the case of a reverse slice (e.g. s[5:1:-1]) which is valid if a negative step is intended. The code never checks the step, so it incorrectly treats valid reverse slices as errors.
+2. Misleading error message (line 33)
+   - The IndexError message always prints end even if start is the out-of-range index. If start was invalid, the message points to end, which misleads the caller about which index failed.
+3. Incorrect handling of negative indices (line 32)
+   - The code rejects start < 0 or end < 0. In Python slicing negative indices are allowed and meaningful (they count from the end). Rejecting any negative index breaks normal Python semantics.
+4. Incorrect upper-bound logic for element access vs slice endpoints (line 32)
+   - For slicing, an index equal to len(s) is allowed as an endpoint (e.g. s[0:len(s)] is valid). The code uses start > len(s) and end > len(s), which forbids indices strictly greater than len(s) but would still allow equals. This part is less likely a direct failure here but combined with the other checks the behavior is inconsistent.
+
+Exactly what happened in a failing call (example):
+- Call: slice_func(s, start=5, end=1, step=-1) (intending s[5:1:-1])
+- At line 32 the test start > end is true, so the function raises IndexError.
+- At line 33 the message prints end (1) even though the problem was start (5).
+- Result: valid reverse slice is rejected with a misleading error.
+
+How to fix it (explicit steps and exact lines to change)
+1. Remove the unconditional start > end check (line 32). Backward slices are valid when a negative step is used; you must not reject them here.
+   - Replace
+     if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):
+   - With something that does not include start > end, e.g.:
+     if start < 0 or end < 0 or start > len(s) or end > len(s):
+2. Allow negative indices (if you want standard Python behavior)
+   - Remove the start < 0 or end < 0 checks entirely, or normalize negative indices to their positive equivalents before bounds checking:
+     if start < 0: start += len(s)
+     if end < 0: end += len(s)
+   - Then clamp/validate: if start < 0 or end < 0 or start > len(s) or end > len(s): raise ...
+3. Make the error message refer to the actual bad index
+   - Before raising, detect which variable is out of range and include that one in the message:
+     if start < 0 or start > len(s):
+         raise IndexError(f"String index out of range: {start}")
+     if end < 0 or end > len(s):
+         raise IndexError(f"String index out of range: {end}")
+4. If you must support steps (including negative), accept start > end when step is negative and reject it only when step is positive:
+   - If you have a step parameter, check:
+     if step is None or step > 0:
+         if start > end: raise IndexError(f"String index out of range: {end}")
+     else:
+         # allow start > end for negative step
+
+Minimal corrected example (replace lines 32–34):
+- Normalize negatives, validate each index separately, and don’t reject start > end unconditionally:
+  if start < 0:
+      start += len(s)
+  if end < 0:
+      end += len(s)
+  if start < 0 or start > len(s):
+      raise IndexError(f"String index out of range: {start}")
+  if end < 0 or end > len(s):
+      raise IndexError(f"String index out of range: {end}")
+  return s[start:end]
+
+Summary in one sentence: The code fails because it unconditionally rejects start > end (breaking valid reverse slices), rejects negative indices (breaking normal Python slicing), and always reports end in the error message even when start is the wrong index — fix by removing the start > end check, properly handling/normalizing negative indices, and reporting the actual out-of-range variable.

@@ -1,0 +1,45 @@
+What happened (root cause)
+- In ArrayUtils.add the code tries to infer the element type into a variable named inferred_type and it also accepts an expected_type parameter.
+- When you call ArrayUtils.add(None, None, expected_type=str) both the input array and the element are None, so inferred_type ends up as object.
+- The code at lines 346–351 checks for this situation and raises a TypeError:
+
+  346 |             if inferred_type == object and expected_type != object:
+  347 |                 raise TypeError(
+  348 |                     f"Cannot cast object list to {expected_type.__name__} list "
+  349 |                     f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  350 |                     f"[Ljava.lang.{expected_type.__name__};)"
+  351 |                 )
+
+- Because inferred_type == object and expected_type == str (not object), the condition is true and the code raises the TypeError. That is exactly why test_add_null_to_null_with_expected_type fails: the test expects a list [None] typed as str, but the method refuses to create it and raises.
+
+Why that is wrong
+- The test case deliberately passes expected_type=str to indicate the caller wants a String[]-like result even though all inputs are None.
+- Raising an error here is incorrect: when the caller provides expected_type, the method should honor that and produce a one-element list of that type (or in Python terms, return [None] without error), not refuse because it couldn't infer type from values.
+- The code is conflating "couldn't infer a concrete element runtime type" (inferred_type == object) with "this is an invalid cast". In the case where expected_type is provided, the proper action is to use expected_type, not raise.
+
+Exactly where to change it and how
+- Change the behavior at lines 346–351 so that when inferred_type == object and an expected_type is provided, you do not raise. Instead set inferred_type = expected_type (or otherwise proceed using expected_type) and construct the resulting list accordingly.
+- Minimal concrete fix (conceptual patch):
+
+  Replace lines 346–351 with logic like:
+
+  if inferred_type == object and expected_type is not None and expected_type != object:
+      # caller provided an expected_type; use it instead of failing
+      inferred_type = expected_type
+  # do not raise here; proceed to build/return the array/list
+
+- If the function uses None to mean "no expected type supplied", use expected_type is not None. If expected_type defaults to object, check for that accordingly.
+
+Checklist of exact steps to implement and verify
+1. Edit the code replacing the raise block (lines 346–351) with the snippet above so that inferred_type is set to expected_type instead of raising.
+2. Ensure expected_type default and check logic: if the function default is expected_type=object, change the check to "and expected_type != object"; if default is expected_type=None, use "expected_type is not None".
+3. Run the unit tests:
+   - The failing test test_add_null_to_null_with_expected_type should now pass (ArrayUtils.add(None, None, expected_type=str) returns [None]).
+   - Re-run the full suite to confirm no other behavior was broken.
+4. Optionally add an explanatory comment in the code around that block stating: "If caller provides expected_type but we couldn't infer it from values (both None), honor expected_type instead of raising."
+
+Why this fix is safe
+- When the caller explicitly provides expected_type, they are signaling the intended element type. Using that when inference fails (all inputs None) matches the expected contract.
+- In the absence of expected_type, inferred_type remains object and there is no change to behavior.
+
+This pinpoints the failure: the raise at lines 346–351 triggers when inferred_type == object while expected_type == str; changing that block to prefer expected_type when provided fixes the test.

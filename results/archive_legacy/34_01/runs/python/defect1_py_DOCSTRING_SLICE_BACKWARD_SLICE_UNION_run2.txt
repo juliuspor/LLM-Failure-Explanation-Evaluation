@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The code rejects negative minute values too early at lines 396–397:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check runs before the later sign/normalization logic at lines 402 and 404 which expect to see negative minutes for some valid combinations. Because of the early check, passing minutes_offset = -15 raises ValueError immediately and never reaches the normalization code.
+
+Why it fails (root cause)
+- The docstring allows negative minutes in specific combinations (for example (0, -15) => -00:15 and (-2, -15) => -02:15). The code, however, treats any negative minutes as invalid unconditionally at lines 396–397.
+- The later code (lines 402 and 404) contains logic that changes minutes_offset based on the sign of hours_offset. That logic is meant to handle negative minute values for valid cases, but it never runs because the early validation already threw an error.
+
+Concrete examples that fail but should succeed
+- Input (hours_offset=0, minutes_offset=-15):
+  - Expected: +00:15? (docstring says (0,-15) => -00:15) — should produce -00:15
+  - Actual: ValueError at line 396: "Minutes out of range: -15"
+- Input (hours_offset=-2, minutes_offset=-15):
+  - Expected: -02:15
+  - Actual: ValueError at line 396
+
+Where to change it (step-by-step fix)
+1. Remove or relax the unconditional negative check at lines 396–397.
+2. Validate minutes in context of the hours sign after normalization:
+   - Option A (recommended): allow minutes_offset in the range -59..+59 (change line 396 to)
+     - if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     Then let the existing sign/normalization code (lines 402, 404) handle combining hours and minutes.
+   - Option B: keep minutes non-negative but move the validation to after you compute the total offset in minutes (i.e., after you apply the sign adjustments), and then check the absolute minutes part is within 0..59.
+3. Ensure the final combined offset is then validated the same way the current code does (the existing overflow check that raises "Offset is too large" around lines 405–408).
+
+Minimal code edit example (apply at line 396)
+- Replace:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- With:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why that fix works
+- It permits negative minute values when they are valid per the docstring. The later code at lines 402/404 will then perform the correct sign normalization and produce the correct total offset. The existing overflow check still prevents offsets exceeding +/- 23:59:59.000.
+
+Summary
+- Root cause: unconditional rejection of negative minutes at lines 396–397 prevents valid (hours, minutes) combinations like (0, -15) and (-2, -15) from being processed.
+- Fix: allow minutes in -59..+59 (or validate after normalization) so the subsequent sign-handling code can run and produce the correct offset.

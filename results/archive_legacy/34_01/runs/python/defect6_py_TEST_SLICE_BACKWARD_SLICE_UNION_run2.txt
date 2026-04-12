@@ -1,0 +1,42 @@
+What happened
+- The test calls MockCodeConsumer.add_number(-0.0).
+- add_number(...) calls add(...) (line 126).
+- add(...) calls append(...) (line 138).
+- append(...) converts the numeric input into a string in a way that loses the negative-zero sign, so get_code() returns "0.0" (or "0") instead of the expected "-0.0".
+- In short: the negative sign on -0.0 is being dropped in append(...).
+
+Why this happens (root cause)
+- The drop happens inside append(...) (line 138) because the code there normalizes the numeric value before turning it into text. Typical code paths that produce this outcome are:
+  - converting the value with float(...) then formatting it with a formatter that treats -0.0 as 0.0, or
+  - performing an arithmetic operation that maps -0.0 to 0.0 (e.g. adding 0.0 or using abs()), or
+  - using a formatting function such as format(value, "g") / "%g" which may remove the negative-zero sign.
+- Any of those operations will turn -0.0 into a non-negative zero and so the string produced by append(...) no longer carries the sign.
+
+Exactly where it happened
+- add_number -> add(self, newcode) at line 126 -> append(self, newcode) at line 138.
+- The problematic conversion/formatting is in append(...) at line 138.
+
+How to fix it (concrete steps)
+1. Inspect append(...) at line 138 and find the code that turns a numeric value into text. Look for any float(...) call, arithmetic on the numeric value (like +0.0, abs(...), or operations that coerce types), or any formatting call (format(..., "g"), "%g", etc.).
+2. Replace the conversion so it preserves the sign of negative zero. Two safe options:
+   - Use repr(value) or format(value, "r") (or "{}".format(value) with !r) to preserve the sign on -0.0 in CPython. For example:
+     - current (problem): s = format(value, "g")   # may drop -0.0
+     - change to: s = repr(value)                 # preserves '-0.0'
+   - If you must use a custom format, explicitly preserve negative zero by checking the sign with math.copysign:
+     - import math
+     - if value == 0.0 and math.copysign(1.0, value) < 0:
+         s = "-0.0"
+       else:
+         s = format(value, "...")   # your desired format
+3. Run the test: the string produced in append(...) should now be "-0.0" for negative-zero input.
+
+Why the suggested fixes work
+- repr(-0.0) in Python preserves the negative sign as "-0.0".
+- Checking math.copysign(1.0, value) tells you whether the input was -0.0 (it returns -1.0 for negative zero) so you can special-case it and keep the sign.
+
+What to check after the change
+- add_number(-0.0) returns "-0.0" (your test).
+- add_number(0.0) still returns "0.0".
+- Other numeric formatting callers of append(...) still produce the expected string format for normal values.
+
+If you want, paste the current contents of append(...) (lines around 138) and I will give the exact replacement lines to preserve -0.0.

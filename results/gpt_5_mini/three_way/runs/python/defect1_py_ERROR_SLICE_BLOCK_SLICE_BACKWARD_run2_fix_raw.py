@@ -1,0 +1,26 @@
+@classmethod
+def for_offset_hours_minutes(cls, hours_offset: int, minutes_offset: int) -> 'DateTimeZone':
+    if hours_offset == 0 and minutes_offset == 0:
+        return cls.UTC
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError(f"Hours out of range: {hours_offset}")
+    # minutes_offset may be given as a signed component. Normalize so that
+    # minutes_abs is between 0 and 59 and sign is determined by hours_offset
+    # when hours_offset != 0, otherwise by minutes_offset sign.
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    try:
+        # Determine sign: if hours_offset is non-zero, use its sign; otherwise use minutes_offset sign
+        if hours_offset != 0:
+            sign = -1 if hours_offset < 0 else 1
+        else:
+            sign = -1 if minutes_offset < 0 else 1
+        minutes_abs = abs(minutes_offset)
+        if minutes_abs < 0 or minutes_abs > 59:
+            raise ValueError(f"Minutes out of range: {minutes_offset}")
+        total_minutes = abs(hours_offset) * 60 + minutes_abs
+        total_minutes *= sign
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+    return cls.for_offset_millis(offset)

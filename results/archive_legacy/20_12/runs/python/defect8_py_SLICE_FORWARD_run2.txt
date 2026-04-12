@@ -1,0 +1,46 @@
+What happened (where it failed)
+- The failure occurs in LocaleUtils.to_locale when called with "fr__POSIX".
+- The code raises ValueError("Invalid locale format: fr__POSIX") at the check at lines 250–251 (the branch that expects a '_' at index 5). In the provided slice those checks appear around lines 248–252.
+
+Why it failed (root cause)
+- The method enforces three allowed lengths: 2 (language), 5 (language_country), and >=7 (language_country_variant). Its early test is:
+  if length != 2 and length != 5 and length < 7: raise ValueError(...)
+  This rejects strings of length exactly 6 (but "fr__POSIX" is length 9, so it passes this test).
+- Later the code assumes that when there is a variant, the country occupies characters 3–4 (indexes 3 and 4) and must be two uppercase letters. It checks locale_str[2] == '_' (OK for "fr__POSIX") then checks ch3 = locale_str[3] and ch4 = locale_str[4] must be 'A'..'Z'. For "fr__POSIX":
+  - locale_str[0:2] = "fr"
+  - locale_str[2] = '_'
+  - locale_str[3:5] = "_" + "P" → ch3 == '_' which is not an uppercase letter, so that check fails and causes the ValueError.
+- The input "fr__POSIX" is a valid Java Locale form meaning language="fr", empty country="", variant="POSIX". The code does not handle the legal case where the country is empty but a variant is present (the two underscores "__" indicate empty country). Instead it strictly requires two uppercase letters in positions 3–4 whenever length > 2. That is why it rejects "fr__POSIX".
+
+Exactly where in the code to look
+- to_locale method:
+  - The failing validation is the ch3/ch4 uppercase checks (around lines 237–246 in this file; in your slice they are the checks before line 248).
+  - The later check locale_str[5] == '_' (lines 250–251) and returning Locale(locale_str[0:2], locale_str[3:5], locale_str[6:]) also assumes a two-letter country at 3:5.
+
+How to fix it (clear steps)
+1. Allow an empty country when parsing variants. Concretely:
+   - After confirming locale_str[2] == '_', check whether locale_str[3] == '_' (empty country). If so:
+     - Skip the uppercase-country validation.
+     - Ensure there is a '_' separator at index 3? (In "fr__POSIX" index 3 is '_' and index 4 is 'P', so treat country as "").
+     - Return Locale(locale_str[0:2], "", locale_str[4:]) (variant starts at index 4).
+2. Otherwise (country present), keep the existing checks for uppercase letters at index 3–4 and the '_' at index 5, and return Locale(language, country, variant) using the same slicing as now.
+
+A concrete implementation change (pseudo-steps to implement at the indicated lines):
+- Replace the current ch3/ch4 uppercase-only logic with:
+  - If locale_str[3] == '_':
+      # empty country, variant begins at index 4
+      if length < 5:
+          raise ValueError(...)  # no variant present
+      return Locale(locale_str[0:2], "", locale_str[4:])
+  - Else:
+      # existing two-uppercase-letter country handling:
+      verify locale_str[3] and locale_str[4] are 'A'..'Z'
+      if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+      if locale_str[5] != '_': raise ValueError(...)
+      return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why that fix works
+- It recognizes the legal Locale form with empty country (two underscores) and correctly extracts the variant starting right after the empty country marker, so LocaleUtils.to_locale("fr__POSIX") will produce Locale("fr", "", "POSIX") as expected.
+
+Summary
+- The method incorrectly requires a two-letter uppercase country when any variant is present, so it rejects strings with an empty country like "fr__POSIX". Adjust the parsing to accept and handle the empty-country case (double underscore) and extract the variant accordingly.

@@ -1,0 +1,63 @@
+I can’t point to the exact failing line because you only posted the docstring, not the implementation. However, the docstring makes the intended behavior clear and that lets me identify the small set of places your implementation is most likely to fail and the exact checks you should inspect and fix.
+
+Summary of likely root causes
+- Sign handling for minutes is wrong. The docstring allows minutes to be negative only when hours are zero or negative; when hours > 0 and minutes < 0 the function must raise ValueError. A common bug is applying the sign of hours to minutes or always treating minutes as an absolute value when computing total seconds, which yields an incorrect offset (or silently accepts (2, -15) when it should error).
+- Conversion to total seconds has an off-by-sign or off-by-one boundary error. The docstring caps offsets to ±23:59:59. If your code computes total_seconds = hours_offset * 3600 + minutes_offset * 60 without correctly normalizing sign, you can incorrectly accept or reject edge inputs such as (23, 59), (23, -59), (0, -15), or (-23, 59).
+- Range checks are performed in the wrong order or with the wrong conditions. For example, checking minutes in [-59,59] before validating the sign relationship with hours will let prohibited combinations through; or checking total magnitude before verifying sign rules will produce misleading error messages.
+- Zero-hour edge-case mishandling. The docstring explicitly allows (0, -15) to be -00:15. Implementations that take the sign from hours or normalize minutes to absolute value will turn (0, -15) into +00:15 or raise an error incorrectly.
+- Inconsistent error messages. The docstring promises ValueError for specific conditions. If the code raises a different exception or reports the wrong reason, callers will be confused.
+
+Where to look in your code (exact places to inspect)
+- The factory method that corresponds to this docstring (look for the function name that takes hours_offset and minutes_offset). Inspect:
+  1) the input validation block that checks hours range (-23..+23) and minutes range (-59..+59)
+  2) the code that enforces “minutes negative when hours positive” rule
+  3) the conversion to seconds (total_offset_seconds = hours_offset * 3600 + minutes_offset * 60)
+  4) the cap check that ensures |total_offset_seconds| <= 23*3600 + 59*60 + 59
+- Any helper function used to normalize sign or combine hours/minutes into a single offset value.
+
+Concrete failing examples to reproduce
+- (2, -15) should raise ValueError. If it doesn’t, sign handling is wrong.
+- (0, -15) should be accepted and produce -00:15. If this yields +00:15 or an error, the zero-hour sign case is broken.
+- (23, 59) should be accepted (max positive). If it’s rejected, the total-seconds bound is wrong.
+- (-23, -59) should be accepted (max negative). If it’s rejected or normalized incorrectly, the sign/abs logic is wrong.
+
+Precise fixes and code changes to apply (copy/paste)
+1) Validate ranges first:
+- if not (-23 <= hours_offset <= 23): raise ValueError("hours_offset out of range")
+- if not (-59 <= minutes_offset <= 59): raise ValueError("minutes_offset out of range")
+
+2) Enforce sign rule:
+- if hours_offset > 0 and minutes_offset < 0: raise ValueError("minutes must be non-negative when hours is positive")
+
+3) Compute total seconds carefully (do not flip signs or take abs):
+- total_seconds = hours_offset * 3600 + minutes_offset * 60
+
+4) Enforce absolute bound:
+- max_seconds = 23 * 3600 + 59 * 60 + 59
+- if abs(total_seconds) > max_seconds: raise ValueError("resulting offset exceeds +/- 23:59:59.000")
+
+5) Construct zone with total_seconds (or appropriate API call).
+
+Example (pseudo-Python you can paste into your method)
+- if not (-23 <= hours_offset <= 23):
+    raise ValueError("hours_offset must be between -23 and 23")
+- if not (-59 <= minutes_offset <= 59):
+    raise ValueError("minutes_offset must be between -59 and 59")
+- if hours_offset > 0 and minutes_offset < 0:
+    raise ValueError("minutes cannot be negative when hours is positive")
+- total_seconds = hours_offset * 3600 + minutes_offset * 60
+- max_seconds = 23*3600 + 59*60 + 59
+- if abs(total_seconds) > max_seconds:
+    raise ValueError("resulting offset exceeds +/- 23:59:59.000")
+- return DateTimeZone.from_offset_seconds(total_seconds)  # or your object constructor
+
+How to test after the fix (exact test cases)
+- should raise: (2, -15)
+- should accept and produce negative offset: (0, -15) -> -00:15
+- max positive allowed: (23, 59)
+- max negative allowed: (-23, -59)
+- out-of-range hours: (24, 0) -> ValueError
+- out-of-range minutes: (0, 60) -> ValueError
+- magnitude-exceeding: (23, 60) or (23, 59) + 1s equivalent -> ValueError
+
+If you post the actual implementation (the function body and line numbers), I will point to the exact lines that are wrong and give a minimal patch you can apply.

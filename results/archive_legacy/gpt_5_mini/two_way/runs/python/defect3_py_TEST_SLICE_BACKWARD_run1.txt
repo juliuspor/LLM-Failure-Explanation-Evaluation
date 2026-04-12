@@ -1,0 +1,39 @@
+What happened (short)
+- The test fails with IndexError coming from to_utf16_code_units / code_point_at when the translator processes a UTF-16 surrogate pair followed by another character (e.g. "\U0001F630A").
+- Root cause: the code mixes two different index spaces — Python string code points (one index per Unicode scalar in Python) and UTF‑16 code units (where a surrogate pair is two units). The index arithmetic used when a surrogate pair is seen advances by 2 in the wrong index space, so a later bounds check fails and raises IndexError.
+
+Where it occurs (specific references)
+- to_utf16_code_units is defined around line 10 (it produces a List[int] of UTF‑16 code units).
+- The bounds check that raises the exception is at lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- The translator calls code_point_at / to_utf16_code_units while iterating the input string in translate_string (the failing tests call CsvEscaper.translate_string). The code that advances the loop index after finding a surrogate pair increments the index by 2 (treating the pair as two code units) while the loop and/or other code expect an index in Python’s str code-point space.
+
+Why that causes IndexError (concrete)
+- Python strings are sequences of Unicode code points; indexing is by code points, not UTF‑16 code units. If you convert the string to a list of UTF‑16 code units and then use an index that was intended for Python string characters, those indexes no longer match the length of the code_units list.
+- Example with input "\U0001F630A" (surrogate pair + 'A'):
+  - Python string length is 2 (one code point for emoji, one for 'A').
+  - to_utf16_code_units produces a list length 3 (two units for the emoji surrogate pair + one for 'A').
+  - The translator code advances index by 2 when it sees a surrogate pair (treating it as two UTF‑16 units) but elsewhere treats index as if it were a Python code-point index. After advancing, index becomes 2 and a later call checks index >= len(code_units) (len(code_units) == 3) or compares index to something else causing the out-of-range check to trigger (the code-level mismatch results in a failing condition and IndexError).
+- In short: indexes are being incremented and checked against the wrong length (mixing code point and code unit indexing), so an index that should be valid becomes invalid in the other space.
+
+How to fix it (step-by-step, concrete)
+Pick one of these two clean fixes; do not mix index spaces.
+
+Option A — Operate on Python code points (recommended)
+1. Stop converting the string to UTF‑16 code units. Iterate over the Python string characters (for ch in s) or use an index over len(s) where s is the Python str.
+2. When you need to detect whether a character is part of a surrogate pair you don’t need to — Python already gives you the full Unicode scalar (an emoji is a single character in Python). Remove logic that treats characters as high/low surrogates or moves the loop index by 2.
+3. Ensure code_point_at and any helper functions operate on Python string indexes (or remove them and use ord(ch) directly when needed).
+
+Option B — If you must work in UTF‑16 code units
+1. Make to_utf16_code_units and code_point_at the single source of truth and ensure every index you use is in UTF‑16 code unit space.
+2. When you detect a surrogate pair and advance the index, do so consistently in the code-unit index variable, and perform bounds checks against len(code_units) (not len(s)).
+3. Provide a clear mapping function between code-point indexes and code-unit indexes if any part of the code still uses code-point indexes.
+
+Minimal concrete change that would likely fix your immediate failure
+- If translate_string currently increments an index variable idx (which was intended to be a code-point index) by 2 for a surrogate pair, change the algorithm to not increment by 2; instead increment by 1 (Python code-point space). Remove or fix any calls to to_utf16_code_units/code_point_at that assume the index is in UTF‑16 units. In other words: treat surrogate pairs as a single character when iterating Python strings.
+
+Why the recommended fix is better
+- Python’s str abstracts away UTF‑16 surrogates; treating characters as Python code points avoids these off-by-one/out-of-range errors entirely and is simpler and safer.
+
+If you want, paste the current translate_string / code_point_at implementation and I will show the exact lines to change and provide a corrected code snippet.

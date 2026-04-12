@@ -1,0 +1,55 @@
+What happened (where and when)
+- At line 71, get_paint computes g using
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  If self._lower_bound == self._upper_bound this expression divides by zero and raises a ZeroDivisionError. That is the immediate failure point.
+- The code at lines 74–75 then checks only g:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+  This check and error message are also incorrect for multiple reasons (see below), but they never run when the denominator is zero because the ZeroDivisionError happens first.
+
+Why it happened (root causes)
+1. Division by zero at line 71: the denominator (self._upper_bound - self._lower_bound) can be zero. There's no guard against that, so get_paint can raise ZeroDivisionError before any explicit validation runs.
+2. Incomplete/incorrect channel handling:
+   - The method calculates only g (line 71). It never computes r or b, yet the docstring promises an RGB tuple and the error message mentions Red/Green/Blue. That mismatch means the function neither returns an RGB tuple nor validates all three channels.
+3. Wrong/unclear error message at line 75:
+   - The ValueError message is the literal string "Color parameter outside of expected range: Red Green Blue". It does not say which channel failed, what value was out of range, or which variable triggered it (g). That makes debugging harder.
+4. Validation only checks g (lines 74–75). Even if g is validated, r and b are not validated because they are never computed.
+
+Concrete consequences
+- If lower_bound == upper_bound you get a ZeroDivisionError at line 71.
+- If lower_bound != upper_bound but value maps outside the range, you only check g (line 74) and will raise a ValueError that doesn't mention g, the offending value, or the numeric bounds.
+- The method fails to return the promised Tuple[int,int,int] because r and b are missing.
+
+How to fix it (explicit steps)
+1. Prevent division by zero at line 71:
+   - Before computing g, check the denominator:
+     denom = self._upper_bound - self._lower_bound
+     if denom == 0.0:
+         raise ValueError(f"Invalid bounds: lower_bound ({self._lower_bound}) == upper_bound ({self._upper_bound})")
+     Then compute scale = (value - self._lower_bound) / denom.
+2. Compute and return a full RGB tuple (r, g, b) as the docstring promises. If you intend grayscale, set r = g = b = int(clamped_scale * 255).
+   Example:
+     scale = (value - self._lower_bound) / denom
+     raw = int(scale * 255.0)
+     r = g = b = raw
+3. Validate each channel and give a clear message referencing variable names and values:
+     for name, channel in (("r", r), ("g", g), ("b", b)):
+         if channel < 0 or channel > 255:
+             raise ValueError(f"Color parameter '{name}' out of range: {channel} (expected 0..255)")
+4. Optionally clamp values instead of raising, if that is desired:
+     channel = max(0, min(255, raw))
+5. Update the docstring or method behavior so docstring and implementation match (grayscale vs full RGB).
+
+Minimal corrected code sketch (replace lines 71–75):
+  denom = self._upper_bound - self._lower_bound
+  if denom == 0.0:
+      raise ValueError(f"Invalid bounds: lower_bound ({self._lower_bound}) == upper_bound ({self._upper_bound})")
+  scale = (value - self._lower_bound) / denom
+  raw = int(scale * 255.0)
+  r = g = b = raw
+  for name, ch in (("r", r), ("g", g), ("b", b)):
+      if ch < 0 or ch > 255:
+          raise ValueError(f"Color parameter '{name}' out of range: {ch} (expected 0..255)")
+  return (r, g, b)
+
+That addresses the exact failures at lines 71 and 74–75 and makes the method behavior match the docstring.

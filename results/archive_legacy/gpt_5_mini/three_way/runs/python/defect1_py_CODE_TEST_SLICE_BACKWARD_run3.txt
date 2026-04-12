@@ -1,0 +1,77 @@
+What happened (where & why)
+- At lines 396–397 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That makes calls like for_offset_hours_minutes(0, -15), for_offset_hours_minutes(-2, -15), and for_offset_hours_minutes(-2, 15) fail unexpectedly because the tests expect negative minute values to be allowed in some combinations.
+
+- The arithmetic that combines hours and minutes is wrong (around the block after hours_in_minutes = hours_offset * 60). The code does:
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+  Two problems here:
+  1) It reuses minutes_offset as a temporary for total minutes, which is confusing.
+  2) The math is incorrect for negative hours with negative minutes. Example:
+     hours_offset = -2 -> hours_in_minutes = -120
+     minutes_offset = -15
+     Code does minutes_offset = -120 - (-15) = -105
+     Expected total minutes = -120 - 15 = -135
+     So subtracting minutes_offset (which can itself be negative) produces the wrong sign/magnitude.
+
+Summary of why tests fail
+- Negative minutes are rejected up-front (so tests that pass negative minutes fail at the validation).
+- Even if negative minutes were allowed, the combination logic computes the wrong total when hours are negative (wrong sign handling), so offsets like (-2, -15) and (-2, 15) would produce incorrect millisecond offsets.
+
+What to change (concrete steps)
+1) Change the minutes range check to accept negative minutes in the allowed range -59..59:
+   - Replace the check at lines 396–397 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2) Compute total minutes explicitly and correctly, handling sign combinations:
+   - Rules seen in the tests/docstring:
+     - If hours == 0: total_minutes = minutes_offset (minutes may be positive or negative)
+     - If hours > 0: minutes must be >= 0 (tests expect ValueError for (2, -15)); total_minutes = hours*60 + minutes
+     - If hours < 0: total_minutes = hours*60 - abs(minutes) (both (-2, 15) and (-2, -15) should yield -135 minutes)
+
+   - Implement this clearly, e.g.:
+     hours_in_minutes = hours_offset * 60
+     if hours_offset == 0:
+         total_minutes = minutes_offset
+     elif hours_offset > 0:
+         if minutes_offset < 0:
+             raise ValueError("Minutes must be >= 0 when hours > 0")
+         total_minutes = hours_in_minutes + minutes_offset
+     else:  # hours_offset < 0
+         total_minutes = hours_in_minutes - abs(minutes_offset)
+
+   - Then convert:
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+3) Return as before:
+   return cls.for_offset_millis(offset)
+
+Minimal corrected snippet
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+    hours_in_minutes = hours_offset * 60
+    if hours_offset == 0:
+        total_minutes = minutes_offset
+    elif hours_offset > 0:
+        if minutes_offset < 0:
+            raise ValueError("Minutes must be non-negative when hours is positive")
+        total_minutes = hours_in_minutes + minutes_offset
+    else:  # hours_offset < 0
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    return cls.for_offset_millis(offset)
+
+This fixes:
+- The incorrect range check that rejected valid negative minute inputs (lines 396–397).
+- The wrong sign/magnitude calculation when hours are negative (the branch using hours_in_minutes < 0 and subtracting minutes_offset).
+
+If you want, I can produce a full patched version of the method ready to drop into the file.

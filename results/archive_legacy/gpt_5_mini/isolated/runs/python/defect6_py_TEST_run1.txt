@@ -1,0 +1,56 @@
+What happened
+- The failing test is test_negative_zero which calls CodeConsumer.add_number(-0.0) and expects "-0.0".
+- The implementation of CodeConsumer.add_number currently turns -0.0 into "0" (or "0.0") instead of "-0.0".
+- Root cause: the method treats values that look like integers or zero by converting them to an integer string (int(value) or str(int(value))) or otherwise deciding "this is zero" before checking for negative zero. Converting -0.0 with int(-0.0) yields 0 and loses the sign bit, so the negative sign is dropped.
+
+Where it occurs
+- In CodeConsumer.add_number (the method under test). Typical offending code patterns found in that method:
+  - using value == 0.0 (or value.is_integer()) as a branch and then doing self.append("0") or self.append(str(int(value))) or similar
+  - doing the integer conversion before calling CodeConsumer.is_negative_zero or before checking the sign
+- The test relies on the utility CodeConsumer.is_negative_zero, which correctly detects -0.0; but add_number doesn't consult it early enough (or at all) and instead normalizes the number in a way that discards the negative-zero sign.
+
+Why it happens (technical detail, plain)
+- In IEEE-754 floats Python uses a sign bit for -0.0. int(-0.0) -> 0 discards that sign. str(-0.0) preserves the sign ("-0.0"), but conversion to integer or explicit zero branches do not.
+- So the sequence "detect integer/zero -> convert to int or to canonical integer-like representation -> append" will produce "0" for -0.0 instead of "-0.0".
+
+Concrete example of the buggy pattern
+- Suppose add_number looks like:
+  if value.is_integer():
+      self.append(str(int(value)))
+      return
+  # ... other cases
+- For value == -0.0, value.is_integer() is True, int(-0.0) == 0, append "0" -> sign lost.
+
+Exact fix (step-by-step)
+1. In CodeConsumer.add_number, check for negative zero before any integer/zero normalization. Use the existing utility CodeConsumer.is_negative_zero(value).
+2. If is_negative_zero(value) is True, append "-0.0" and return immediately.
+3. Only after that handle integer and other cases.
+
+Minimal patch (drop into add_number near its start)
+- Add (pseudo-Python, change variable name to match your implementation if needed):
+
+    # preserve negative zero sign before any normalization
+    if CodeConsumer.is_negative_zero(value):
+        self.append("-0.0")
+        return
+
+- Then the rest of add_number can keep its current integer/float/exp handling.
+
+Alternative approach
+- Instead of an early return, you can preserve the sign by formatting without converting to int when value == 0.0 and math.copysign(1.0, value) < 0:
+    import math
+    if value == 0.0 and math.copysign(1.0, value) < 0:
+        self.append("-0.0")
+        return
+
+What to verify after the change
+- Run the provided tests:
+  - test_negative_zero should now get "-0.0".
+  - Other tests (positive zero, integers, floats, scientific notation, infinities/NaN, negative-after-minus spacing) should behave the same.
+- Make sure you didn't break any code paths that relied on appending "0" for positive zero — the positive-zero branch should still produce "0".
+
+Why this explanation is certain
+- The tests indicate the code returns "0" where "-0.0" is expected, which matches the exact behavior of converting -0.0 to int or otherwise normalizing zero before checking sign.
+- The project already exposes is_negative_zero; the logical bug is that add_number doesn't use that detection early enough.
+
+If you want, paste the current CodeConsumer.add_number function and I will show the exact line(s) to change and return a ready-to-apply diff.

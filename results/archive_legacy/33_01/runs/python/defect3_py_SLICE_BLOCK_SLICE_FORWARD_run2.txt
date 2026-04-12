@@ -1,0 +1,40 @@
+What happened (where it fails)
+- The code is trying to return a Unicode code point from a UTF-16 code unit array (variable code_units) at a given index.
+- At line 38 you load high = code_units[index].
+- Lines 39–43 try to detect and decode a valid surrogate pair (high in 0xD800..0xDBFF and low in 0xDC00..0xDFFF).
+- If the second unit is missing or not a valid low-surrogate the function falls through to line 44 and returns high (the UTF-16 code unit value).
+
+Why that causes a failure (root cause)
+- A UTF-16 high-surrogate value (0xD800..0xDBFF) is not a valid Unicode code point by itself. Returning high (line 44) hands an invalid code point back to callers.
+- If index points at a low-surrogate (0xDC00..0xDFFF) you also return that code unit value unchanged (line 44), which again is not a valid standalone code point.
+- Downstream code that expects a real Unicode scalar value (>= 0 and not in surrogate ranges) will then fail because it got an illegal surrogate value.
+- Concretely: when you have an isolated or mispaired surrogate the function silently returns the raw surrogate unit instead of raising an error or handling it properly. That is the logical bug and explains where the failure originates (lines 38–44, with the bounds check at 35–36 not preventing this situation).
+
+How to fix it (clear steps and exact changes)
+1. Detect and reject isolated surrogates:
+   - If high is a high-surrogate (0xD800..0xDBFF) and index+1 >= len(code_units) or the next unit is not a low-surrogate (not 0xDC00..0xDFFF), raise an error (IndexError, ValueError, or UnicodeDecodeError depending on your API).
+   - If high is a low-surrogate (0xDC00..0xDFFF), raise an error (it is invalid to start decoding at a low surrogate).
+2. Only return a numeric code point that is guaranteed to be a valid Unicode scalar:
+   - For a non-surrogate unit, return it (as before).
+   - For a valid surrogate pair, return the composed code point (line 43).
+
+Example patch (pseudo-Python using your line numbers):
+- Replace lines 38–44 with:
+
+  38 |     high = code_units[index]
+  39 |     # If high is a high-surrogate, we must have a valid low-surrogate next
+  40 |     if 0xD800 <= high <= 0xDBFF:
+  41 |         if index + 1 >= len(code_units):
+  42 |             raise IndexError(f"Unpaired high surrogate at index {index}")
+  43 |         low = code_units[index + 1]
+  44 |         if not (0xDC00 <= low <= 0xDFFF):
+  45 |             raise ValueError(f"Invalid low surrogate at index {index + 1}: {low:#x}")
+  46 |         return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  47 |     # If high is a low-surrogate by itself it is invalid
+  48 |     if 0xDC00 <= high <= 0xDFFF:
+  49 |         raise ValueError(f"Unpaired low surrogate at index {index}: {high:#x}")
+  50 |     return high
+
+Notes
+- Choose the exception type appropriate for the surrounding API (UnicodeDecodeError if decoding a string, IndexError for out of range, ValueError for invalid content).
+- This change prevents returning 0xD800..0xDFFF as if they were valid code points and forces callers to handle malformed UTF-16 data explicitly.

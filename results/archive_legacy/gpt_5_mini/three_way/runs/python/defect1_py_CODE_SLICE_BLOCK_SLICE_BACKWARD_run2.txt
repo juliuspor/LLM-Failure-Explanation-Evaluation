@@ -1,0 +1,44 @@
+What happened (where it failed)
+- The exception comes from the minutes range check at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes_offset. If the caller supplied a negative minutes_offset (for example hours_offset = -1, minutes_offset = -30 to mean -1:30) the function raises "Minutes out of range" here.
+
+Why it failed (root cause)
+- The method enforces that minutes_offset must be in 0..59 regardless of the sign of hours_offset. That means callers who represent a negative offset by giving a negative minutes component (e.g. -30) will be rejected.
+- Later in the code the function expects to combine hours and minutes into a signed total minutes and applies the sign using hours_in_minutes < 0, but that only works if minutes_offset is non-negative (0..59). Supplying negative minutes trips the early validation and never gets to the combination logic.
+
+Exactly where to look
+- Lines 396–397 (the minutes validation) are the immediate source of the thrown ValueError.
+- The combination logic that follows (hours_in_minutes calculation and the if hours_in_minutes < 0 branch) shows the function expects to apply sign based on hours, not on minutes.
+
+How to fix (concrete steps)
+Pick one of these two consistent approaches and implement it:
+
+1) Require minutes to be non-negative (current design) — update docs and callers
+   - Keep the check: minutes_offset must be 0..59.
+   - Ensure every callsite passes a non-negative minutes_offset and encodes the sign in hours_offset only (e.g. -1:30 must be passed as hours_offset = -1, minutes_offset = 30).
+   - Update API docs and any caller code that currently passes negative minutes to pass positive minutes instead.
+
+2) Accept signed minutes (more forgiving) — change validation and normalization
+   - Change the validation to allow minutes_offset in -59..59:
+         if minutes_offset < -59 or minutes_offset > 59:
+             raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Normalize total minutes by combining hours and minutes according to sign:
+         total_minutes = hours_offset * 60 + minutes_offset
+     But be careful: if you want -1 hour and -30 minutes to be -90, that expression works for signed minutes. If you want minutes always treated as positive and sign determined by hours, use abs/minute logic.
+   - Then multiply total_minutes by MILLIS_PER_MINUTE and continue.
+   - Update tests to cover cases like (-1, -30), (-1, 30), (1, -30) to ensure desired semantics.
+
+Example concrete replacement (option 2):
+- Replace the validation and combination block with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    try:
+        total_minutes = hours_offset * 60 + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Summary
+- The immediate failure is due to the minutes validation at lines 396–397 rejecting negative minutes. Decide whether minutes should be signed in your API. Either (A) keep the rule and change callers to always pass non-negative minutes, or (B) accept signed minutes and change the validation and combination logic as shown above.

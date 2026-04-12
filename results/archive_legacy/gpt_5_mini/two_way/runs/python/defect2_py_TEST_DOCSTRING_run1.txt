@@ -1,0 +1,54 @@
+What happened (what fails)
+- The test fails because GrayPaintScale.get_paint raises a ValueError for inputs outside the configured range (for example value = -0.5 or 1.5). The tests expect those inputs to be clamped to the lower/upper bounds and return black (0,0,0) or white (255,255,255) instead of raising an exception.
+
+Where it occurs
+- The failure occurs inside GrayPaintScale.get_paint when the method computes an RGB component from the input value and then validates or converts that to an integer. In your tests the calls that fail are:
+  - gps.get_paint(-0.5) (test_lower_bound_clamping)
+  - gps.get_paint(1.5)  (test_upper_bound_clamping)
+- The root cause is that get_paint does not clamp the incoming value to the allowed range (lower, upper) before converting to 0–255, and therefore the method's validation code triggers the ValueError described in the docstring ("Raises: ValueError: If value produces RGB outside 0-255 range").
+
+Why it fails (root cause)
+- Expected behavior in the tests: values < lower should be treated as lower, values > upper as upper. The tests assume get_paint will clamp the input to [lower, upper], then map that normalized value to an integer grayscale component in the 0–255 range.
+- Actual behavior in your implementation: get_paint either
+  - validates the computed component and raises ValueError if it falls outside 0..255, or
+  - computes the mapping using the raw, unclamped value, producing an out-of-range component, then raises ValueError.
+- So for value = -0.5 or 1.5 the intermediate calculation yields a component outside [0,255] and the function raises instead of clamping and returning (0,0,0) or (255,255,255).
+
+Exactly what to change (concrete fix, step-by-step)
+1. In GrayPaintScale.get_paint(value) clamp value to the instance bounds at the start of the method:
+   - If value < self.lower then value = self.lower
+   - If value > self.upper then value = self.upper
+2. Compute the normalized fraction: frac = (value - self.lower) / (self.upper - self.lower)
+   - If upper == lower you must avoid division by zero; handle that explicitly (e.g., treat frac = 0.0 or return mid-gray or raise a clear error).
+3. Compute the grayscale component as an integer in [0,255], ensuring rounding/truncation consistent with your expectations. For the test suite use int(frac * 255.0) (which truncates 127.5 -> 127).
+4. Clamp the resulting component to [0,255] as a final safety check (component = max(0, min(255, component))).
+5. Return (component, component, component) and do not raise ValueError for out-of-range inputs that should be clamped.
+
+Example replacement for get_paint (drop-in)
+- Replace the method body with something like:
+
+def get_paint(self, value):
+    # clamp input value to configured bounds
+    if value < self.lower:
+        value = self.lower
+    elif value > self.upper:
+        value = self.upper
+
+    # avoid division by zero if bounds are equal
+    if self.upper == self.lower:
+        frac = 0.0
+    else:
+        frac = (value - self.lower) / (self.upper - self.lower)
+
+    component = int(frac * 255.0)
+    # safety clamp to 0..255
+    component = max(0, min(255, component))
+    return (component, component, component)
+
+How to verify
+- Run the provided tests after making the change. The failing assertions for -0.5 and 1.5 should now pass and return (0,0,0) and (255,255,255). The mid-value test (0.5 -> (127,127,127)) will also match because int(0.5*255) == 127.
+
+Extra note about rounding
+- The test expects truncation (127) for 127.5; the above uses int(), which truncates. If you want different rounding semantics use round() and adjust expectations accordingly.
+
+If you want, paste your current get_paint implementation and I will mark exactly which lines to change.

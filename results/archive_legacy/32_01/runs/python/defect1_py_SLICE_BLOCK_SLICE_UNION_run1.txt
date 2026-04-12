@@ -1,0 +1,46 @@
+What goes wrong (short answer)
+- The code validates the minutes value too early and treats the same variable, minutes_offset, first as a "minutes part" (0–59) and later as a "total minutes" value. That mixing of meanings causes the method to compute the wrong offset and hit the error path. The root cause is a units/sign mixup between lines 400–401 and the later adjustments on lines 406–409.
+
+What exactly happens (step‑by‑step, with line references)
+1. At lines 400–401 the method assumes minutes_offset is the minutes component and enforces
+   if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+   — this is the minutes-part validation.
+2. Later (line 406) the code does:
+   minutes_offset = hours_in_minutes - minutes_offset
+   or (line 408)
+   minutes_offset = hours_in_minutes + minutes_offset
+   — here minutes_offset is being combined with hours_in_minutes (i.e. converted into a total minutes value).
+3. The code then computes offset = minutes_offset * MILLIS_PER_MINUTE (line 409) and checks if offset is too large (lines 411–412). Because the variable minutes_offset has been repurposed from "minutes part" to "total minutes", the arithmetic and sign handling are incorrect and can produce an invalid/overlarge offset, so the method fails (raises ValueError / "Offset is too large").
+
+Why that is the real bug (no guesswork)
+- The bug is not a bad literal value check or a bad multiplier — it is that minutes_offset is used for two different meanings without normalization:
+  - Before line 400 it’s expected to be the minutes component (0..59).
+  - After line 406 it is treated as part of a total minute count (hours_in_minutes ± minutes).
+- Validating the variable as a minutes-part before you compute/apply sign + hours is the wrong place to do that. That leads to incorrect arithmetic and the subsequent error path.
+
+How to fix it (concrete steps)
+1. Keep the minutes-part validation but do it on the minutes component only, not on the reused variable. For example:
+   - Introduce minutes_part = minutes_input (or Math.abs(minutes_input) if input can be signed).
+   - Validate minutes_part: if minutes_part < 0 or minutes_part > 59: raise ValueError(...)
+2. Compute the total minutes separately, using the sign of the hours or a sign extracted from input:
+   - total_minutes = hours * 60
+   - if sign_is_negative: total_minutes -= minutes_part else: total_minutes += minutes_part
+3. Use total_minutes for the millisecond conversion:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the "offset is too large" check after computing offset (lines 411–412), but do not reuse minutes_part for total_minutes.
+
+Minimal code-change example (pseudocode referencing your lines)
+- Replace (current pattern)
+   if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+   ...
+   minutes_offset = hours_in_minutes - minutes_offset  # lines 406/408
+- With
+   minutes_part = minutes_offset
+   if minutes_part < 0 or minutes_part > 59: raise ValueError(f"Minutes out of range: {minutes_part}")  # line 400
+   minutes_total = hours_in_minutes - minutes_part  # or + minutes_part depending on sign
+   offset = FieldUtils.safe_multiply(minutes_total, DateTimeConstants.MILLIS_PER_MINUTE)  # line 409
+
+Why this fix addresses the root cause
+- It keeps the "minutes part" and the "total minutes" as separate values, so validation, sign handling and multiplication operate on the correct quantity. That prevents the mistaken reuse of minutes_offset that caused the offset calculation to be wrong and the method to fail.
+
+If you want, paste the surrounding method (the lines before 400 and after 412) and I’ll give the exact one-line replacements to patch this in your code.

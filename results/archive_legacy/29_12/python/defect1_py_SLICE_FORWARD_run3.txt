@@ -1,0 +1,35 @@
+What happened (where)
+- The bug is in the code you pasted, between lines 406 and 408 in the [SLICE_FORWARD] block. The two assignments there clobber the minutes value:
+  - Line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 408: minutes_offset = hours_in_minutes + minutes_offset
+- After those two lines run, minutes_offset no longer holds the intended minute component; it contains a wrong value that is too large. That wrong value then flows into:
+  - Line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - Which can cause the code to hit line 411 and raise ValueError("Offset is too large"), instead of returning the expected result at line 412 (cls.for_offset_millis(offset)).
+
+Why it fails (root cause, with a concrete example)
+- The second assignment (line 408) uses minutes_offset that was just overwritten by line 406, so it produces an incorrect total.
+- Example: suppose hours_in_minutes = 60 and the original minutes component was 15.
+  - After line 406: minutes_offset = 60 - 15 = 45
+  - After line 408: minutes_offset = 60 + 45 = 105 ← wrong (should be 60 + 15 = 75 or 60 - 15 = 45 depending on intent)
+- That inflated minutes_offset (105) gets multiplied by MILLIS_PER_MINUTE and can exceed allowed bounds, causing the ValueError.
+
+Exactly where the logic is wrong
+- Lines 406 and 408 are both writing to minutes_offset; one of them is incorrect or redundant. The code either:
+  - accidentally applies subtraction and then addition in sequence instead of choosing one, or
+  - reuses minutes_offset after it was modified instead of using the original minute value.
+
+Concrete fixes (step‑by‑step)
+1. Identify the intended behavior:
+   - Do you want hours_in_minutes plus the original minutes, or hours_in_minutes minus the original minutes? Decide whether you are computing total minutes as hours_in_minutes + original_minutes or as hours_in_minutes - original_minutes (or you only needed the result of the first operation).
+2. Use a named temporary for the original minutes component so you don't overwrite it:
+   - Before line 406 add: orig_minutes = minutes_offset
+   - Then replace the two lines with the single correct computation:
+     - If total should be hours + minutes: minutes_offset = hours_in_minutes + orig_minutes
+     - If total should be hours - minutes: minutes_offset = hours_in_minutes - orig_minutes
+3. Remove the extra/incorrect assignment entirely. Only perform the one correct assignment.
+4. Add a unit test covering a couple of cases (e.g., hours_in_minutes=60 with minutes=15, and a negative/minutes edge case) to ensure the ValueError no longer triggers incorrectly.
+
+Why this concrete change fixes it
+- It prevents the accidental reuse of a mutated minutes_offset value. The result will be the correct minute total multiplied into milliseconds and passed to cls.for_offset_millis(offset) instead of producing an inflated offset that trips the "Offset is too large" check.
+
+If you paste the few lines above and below these lines I can suggest the exact one-line replacement to insert.

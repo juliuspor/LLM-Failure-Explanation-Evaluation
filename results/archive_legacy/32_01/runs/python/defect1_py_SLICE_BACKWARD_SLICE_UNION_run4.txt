@@ -1,0 +1,48 @@
+What happened (root cause)
+- At lines 400–401 the code rejects any minutes_offset that is not between 0 and 59:
+  - 400: if minutes_offset < 0 or minutes_offset > 59:
+  - 401: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later, at lines 406 and 408 the code mutates minutes_offset depending on the sign of the hours part:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+- That mutation changes the meaning and the value domain of minutes_offset after you already validated it. The initial check only validated the raw minutes component (0–59), but the later arithmetic produces a minutes_offset in minutes-from-zero (can be much larger, or negative depending on hours_in_minutes). That leads to incorrect behavior and eventually an overflow or the "Offset is too large" error when offset is computed and checked (offset = FieldUtils.safe_multiply(...); raise ValueError("Offset is too large") at line 411).
+
+Why this fails (clear chain of cause → effect)
+1. The code assumes minutes_offset is a small 0–59 field and validates that (lines 400–401).
+2. The code then converts minutes_offset into a composite minutes count by adding/subtracting hours_in_minutes (lines 406 and 408). After that conversion minutes_offset is no longer guaranteed to be in 0–59 and can be large or negative.
+3. That converted minutes_offset is multiplied to milliseconds (line 409) and checked for overflow (line 411). Because the initial validation was done too early, invalid (out‑of‑range) values slip through after conversion and trigger the overflow/“Offset is too large” failure.
+
+Where it occurred
+- Validation occurs at lines 400–401.
+- The mutation/combination occurs at lines 406 and 408.
+- The failure/overflow check occurs at lines 409–411.
+
+Recommended fixes (concrete steps)
+Pick one of the following safe fixes and apply exactly as described:
+
+Option A — Validate after conversion
+1. Remove or move the minutes range check at lines 400–401.
+2. Perform the minutes-component validation after you compute the combined minutes_offset (i.e., after lines 406/408), or validate both before and after as needed.
+   - Keep combined-range checks around the final offset calculation so that the value multiplied at line 409 is within expected bounds.
+
+Option B — Validate the component and preserve sign explicitly
+1. Before changing minutes_offset, capture the sign of the hours part:
+   - sign = 1 if hours_in_minutes >= 0 else -1
+2. Validate that abs(minutes_offset) is between 0 and 59 (or keep existing 0..59 if minutes_offset is unsigned).
+3. Compute combined minutes as: minutes_offset = sign * minutes_offset + hours_in_minutes (or appropriate signed addition), ensuring you don’t first convert minutes_offset into a form that violates the original validation assumptions.
+4. Continue to multiply and overflow-check at line 409.
+
+Option C — Compute final offset from hours and minutes separately
+1. Do not mutate the minutes component into a combined minutes value. Instead compute:
+   - offset_minutes = hours_in_minutes + (sign_of_hours * minutes_offset)
+   - offset = FieldUtils.safe_multiply(offset_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+2. That keeps the validation of the minutes component meaningful and makes the arithmetic explicit.
+
+What to test after the fix
+- Hours positive, minutes between 0–59 (e.g., +2h 30m)
+- Hours negative, minutes between 0–59 (e.g., -2h 30m) — ensure sign is applied to minutes in the intended way
+- Boundary minutes: 0 and 59
+- Cases that previously raised "Offset is too large" to confirm overflow handling is correct
+
+Summary
+The code validates minutes_offset too early (lines 400–401) and then changes it (lines 406/408), so the validated assumption no longer holds when the value is used to compute offset at line 409, causing the failure at line 411. Move or adjust the validation so you check the correct value (the final combined minutes or the absolute minutes component with sign handled) before multiplying and checking for overflow.

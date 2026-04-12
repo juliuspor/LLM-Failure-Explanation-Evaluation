@@ -1,0 +1,49 @@
+What happened (root cause)
+- At line 231 the code checks only for length == 2. Nothing else prevents execution of the code starting at line 237.
+- At line 237 the code unconditionally reads locale_str[3] and locale_str[4]. If locale_str is shorter than 5 characters this raises an IndexError.
+- At line 245 the code reads locale_str[5] and at line 247 uses locale_str[6:], which require length >= 6 and >= 7 respectively; those reads are also unguarded and will raise IndexError when the string is shorter.
+
+Where it happens
+- The crash will occur inside to_locale when you pass a locale_str whose length is not long enough for the indexing reads at lines 237, 238, 245 and 247. For example, calling to_locale("en") (length 2) will hit line 231 and then the code flow reaches line 237 and fails with IndexError because locale_str[3] does not exist.
+
+Why it fails
+- The code is missing the correct length checks before using fixed-index access. The condition at line 231 only handles the two-character case; the later indexing assumes a five-character or longer string but the code never verifies that. In short: out-of-bounds indexing causes IndexError.
+
+Exact fixes (step-by-step)
+1. Decide the valid formats you expect, for example:
+   - "ll" (length 2)
+   - "ll_CC" (length 5, underscore at index 2, country code at 3..4)
+   - "ll_CC_variant" (length >= 7, underscore separators at index 2 and index 5)
+2. Replace the current length/flow checks so you only index after confirming string length and separator characters. Concretely:
+   - Keep the length == 2 branch for language-only (line 231).
+   - Add an explicit branch for length == 5 that checks locale_str[2] == '_' and alphabetic country code at 3..4 before reading locale_str[3] and locale_str[4].
+   - Add another branch for length >= 7 that checks locale_str[2] == '_' and locale_str[5] == '_' and country code at 3..4 before using locale_str[6:].
+3. Example corrected structure (pseudo-Python replacing the problematic area):
+
+   if length == 2:
+       return Locale(locale_str[0:2])
+   elif length == 5:
+       if locale_str[2] != '_':
+           raise ValueError(...)
+       ch3, ch4 = locale_str[3], locale_str[4]
+       if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+           raise ValueError(...)
+       return Locale(locale_str[0:2], locale_str[3:5])
+   elif length >= 7:
+       if locale_str[2] != '_' or locale_str[5] != '_':
+           raise ValueError(...)
+       ch3, ch4 = locale_str[3], locale_str[4]
+       if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+           raise ValueError(...)
+       return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+   else:
+       raise ValueError(...)
+
+4. Verify with tests:
+   - to_locale("en") => success
+   - to_locale("en_US") => success
+   - to_locale("en_US_POSIX") => success
+   - to_locale("e") or to_locale("enU") => should raise ValueError, not IndexError
+
+Why this exact change fixes it
+- Each index access (locale_str[3], [4], [5], [6:]) only happens after the code confirms the string is at least as long as required and the separators are in the expected positions. That removes the out-of-bounds IndexError and replaces it with controlled ValueError for invalid formats.

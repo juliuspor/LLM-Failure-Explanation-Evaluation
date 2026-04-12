@@ -1,0 +1,65 @@
+What happened (root cause)
+- In ArrayUtils.add the code computes inferred_type with:
+  - if array is not None: inferred_type = type(array)
+  - elif element is not None: inferred_type = type(element)
+  - else: inferred_type = object
+- type(array) returns the Python list class (i.e. <class 'list'>), not the element type stored in the list. That makes inferred_type meaningless for element-type inference when array is given.
+- For the failing test specifically (test_add_null_to_null_with_expected_type):
+  - array is None and element is None, so inferred_type becomes object.
+  - expected_type is str, so the code hits the block:
+    if inferred_type == object and expected_type != object: raise TypeError(...)
+  - That raises a TypeError, but the test expects no error and a returned [None].
+- In short:
+  - The code infers the wrong type for arrays by using type(array) (the container type) instead of the element type.
+  - It also uses the inferred_type before considering expected_type as a legitimate source of element type (so expected_type is only used to gate a TypeError, not for creating the resulting list).
+- Where it occurs in your snippet:
+  - The wrong inference happens at the lines setting inferred_type (the three-branch if/elif/else at the top).
+  - The incorrect exception logic is in the block that checks expected_type later:
+      if inferred_type == object and expected_type != object:
+          raise TypeError(...)
+
+Why that causes the failure you see
+- When both array and element are None the only way to produce a typed list for the caller is to respect expected_type. But the code instead treats object as a final inferred type and refuses to honor expected_type, raising a TypeError.
+- When array is non-None, using type(array) yields list, so any subsequent code that expects an element class (to allocate/copy a typed array) will get the wrong class, possibly producing lists of wrong element type or causing other logic errors downstream.
+
+Concrete fixes (step-by-step) — Apply to ArrayUtils.add
+1. Prefer expected_type if the caller provided it. If expected_type is set, use it as the element type to create the new list.
+2. If expected_type is None:
+   - If array is not None, inspect the array's contents to find a representative element type, not the list class:
+     - If array has any non-None element, use type(first_non_none_element).
+     - If array is empty or all elements are None, fall back to object.
+   - Else if element is not None, use type(element).
+   - Else fall back to object.
+3. Remove the code path that raises TypeError simply because inferred_type == object and expected_type != object. If expected_type is provided, use it to create/return arrays of that expected type; only raise if creating/copying the underlying storage truly cannot satisfy the requested type (in Python this is unlikely).
+
+Minimal corrected code snippet (replace the inbound inferred_type logic and the expected_type check):
+    def add(array: Optional[List[T]], element: T, expected_type: Optional[Type] = None) -> List[T]:
+        # 1) If caller supplied expected_type, use it as the element type
+        if expected_type is not None:
+            inferred_type = expected_type
+        else:
+            # 2) Derive element type from array contents, not from type(array)
+            if array is not None:
+                # find first non-None element to infer type
+                inferred_type = object
+                for item in array:
+                    if item is not None:
+                        inferred_type = type(item)
+                        break
+            elif element is not None:
+                inferred_type = type(element)
+            else:
+                inferred_type = object
+
+        new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+        new_list[len(new_list) - 1] = element
+
+        # No need to raise here — we already used expected_type if provided.
+        return new_list
+
+Notes and rationale
+- Using expected_type first prevents raising when add(None, None, expected_type=str) and allows you to create a list intended to be of that element type.
+- Inspecting array contents is the correct way to infer element type when you only have the container instance.
+- The original check that raised TypeError was defensive for Java-style casting but in this Python port it simply prevented valid calls where the caller provided expected_type. If you do need a strict check, perform it after you attempt to construct the new list and only if the copy/growth helper cannot produce the requested element type.
+
+This explains exactly where (the inferred_type assignment and subsequent expected_type check) and why (using type(array) and treating object as final inferred type) the code fails, and gives stepwise, concrete code changes to fix it.

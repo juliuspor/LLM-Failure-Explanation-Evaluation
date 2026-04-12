@@ -1,0 +1,75 @@
+Short answer: the test is failing because the test expects the negative zero bit-pattern (-0.0) but the function returned positive zero (+0.0). Many languages treat -0.0 and +0.0 as equal for numeric equality, but the test you wrote (or the test framework’s comparison you used) is checking the sign bit or raw representation, so it reports a mismatch: Expected -0.0, got 0.
+
+I can’t see your source files, so I’ll explain exactly how to locate the failure and how to diagnose and fix it with concrete steps and exact API calls you can run.
+
+What happened (where to look)
+1. Look at the assertion line in the stack trace. The AssertionError message shows the expected/actual values; the stack trace also shows the file and line number where the assertion was made. Open that test file and go to that line (e.g., tests/MyTest.java:42 or test_example.py:17).
+2. Identify the variables at the assertion: e.g.,
+   - expectedValue — the value you passed as the expected argument (looks like -0.0)
+   - actualValue — the value returned by the function under test, e.g., actual = myFunction(...)
+
+Why it happened (root cause)
+- Floating-point signed zero: IEEE-754 floats/doubles have both +0.0 and -0.0. They compare equal with numeric equality (==), but they have different bit patterns (sign bit differs).
+- Your test or assertion routine is checking representation (bitwise equality or string formatting that normalizes sign) rather than numeric equality with tolerance or canonicalization. This yields the AssertionError that explicitly prints "-0.0" vs "0".
+- Two common ways this arises:
+  - The code under test returned +0.0 because of an operation that produced +0.0 (e.g., division by +Infinity, addition with a positive result, Math.abs, explicit +0.0 literal).
+  - The expected value was constructed as -0.0 (e.g., using -0.0 literal, Math.copySign(0.0, -1.0), or result of a previous computation) but the actual value lost the sign.
+
+Concrete steps to diagnose (run these in your project)
+1. Inspect the failing assertion line from the stack trace; note the variable names: expectedValue and actualValue.
+2. Print both values and their raw bit patterns right before the assertion.
+
+If you are using Java:
+- Add these lines just before the failing assertion:
+  - System.out.println("expectedValue = " + expectedValue + ", bits=" + Long.toHexString(Double.doubleToRawLongBits(expectedValue)));
+  - System.out.println("actualValue   = " + actualValue   + ", bits=" + Long.toHexString(Double.doubleToRawLongBits(actualValue)));
+This will show 0x8000000000000000 for -0.0 and 0x0000000000000000 for +0.0.
+
+If you are using Python:
+- Add:
+  - import math, struct
+  - def bits(x): return hex(struct.unpack('<Q', struct.pack('<d', x))[0])
+  - print("expectedValue =", expectedValue, "bits =", bits(expectedValue))
+  - print("actualValue   =", actualValue,   "bits =", bits(actualValue))
+- Or use math.copysign(1.0, x) to check sign: math.copysign(1.0, -0.0) == -1.0.
+
+If you are using JavaScript:
+- console.log(expectedValue, Object.is(expectedValue, -0) ? "bits=-0" : "bits=+0", actualValue, Object.is(actualValue, -0) ? "bits=-0" : "bits=+0")
+
+What to change (concrete fixes — choose one depending on intent)
+1. If your test should accept either signed zero (you don’t care about sign):
+   - Change the assertion to compare numerically or with a tolerance, not bitwise. Examples:
+     - Java (JUnit): assertEquals(expectedValue, actualValue, 0.0); // compares numerically
+     - Python (unittest): self.assertEqual(expectedValue, actualValue) already treats -0.0 == 0.0; if your framework uses bitwise, normalize first: self.assertEqual(math.copysign(1.0, expectedValue), math.copysign(1.0, actualValue)) or compare bits as needed.
+   - Or canonicalize both sides to +0.0 before comparing:
+     - Java: if (expectedValue == 0.0) expectedValue = 0.0;
+     - Python: expected = 0.0 if expected == 0.0 else expected
+
+2. If your code must preserve the sign of zero and the test expects -0.0:
+   - Fix the function under test to return a negative zero where required. Use APIs that preserve sign:
+     - Java: return Math.copySign(0.0, -1.0); or ensure the operation that produces zero keeps sign (e.g., compute with negative operand).
+     - Python: return math.copysign(0.0, -1.0)
+   - Write a test that asserts bit-pattern equality explicitly:
+     - Java: assertEquals(Long.toHexString(Double.doubleToRawLongBits(expected)), Long.toHexString(Double.doubleToRawLongBits(actual)));
+     - Python: compare struct-packed bits.
+
+3. If the assertion routine is formatting numbers (string) and dropping the minus:
+   - Use a formatter that preserves the sign of negative zero, or compare bits instead of strings.
+
+Example concrete edit suggestions
+- Suppose the failing assertion is at tests/MyTest.java:42:
+  - Before: assertEquals(-0.0, myFunction(a, b));
+  - Debug prints: add the Long.toHexString(Double.doubleToRawLongBits(...)) calls shown above and run tests.
+  - If actual prints bits 0x0000000000000000, either:
+    - Change test to assertEquals(0.0, myFunction(a,b), 0.0); or
+    - Change expected to -0.0 if you really require negative zero: assertEquals(Double.longBitsToDouble(0x8000000000000000L), myFunction(a,b));
+
+Summary checklist to resolve
+- Find the failing assertion line from the stack trace.
+- Print the numeric values and raw bit patterns for expectedValue and actualValue.
+- Decide whether signed zero matters:
+  - If not: compare numerically or canonicalize both to +0.0.
+  - If yes: update function to produce -0.0 or change test to compare raw bits.
+- Re-run tests.
+
+If you paste the failing test file (the assertion line) and the function under test, I can point to the exact line(s) to change and provide a minimal patch you can apply.

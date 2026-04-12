@@ -1,0 +1,47 @@
+What happened (where it failed)
+- The failing check comes from MockCodeConsumer.add_number(-0.0) producing a different code string than the test expects.
+- The bug is in add(self, newcode). Relevant lines:
+  - line 132: c = newcode[0]
+  - line 133: if (self.is_word_char(c) or c == '\\') and self.is_word_char(self.get_last_char()):
+  - line 136:     self.append(" ")
+  - line 138: self.append(newcode)
+
+Why it fails (root cause)
+- add() decides whether to insert a separating space by looking only at the first character of newcode (c) and the last character already in the buffer.
+- Minus ('-') is not considered a "word char" by is_word_char, and it is not a backslash, so (self.is_word_char(c) or c == '\\') is False when c == '-'.
+- Many callers (including add_number) construct negative numbers in two pieces: they append the sign '-' as one piece and the digits "0.0" as another piece. That means add() is called first with "-" and then with "0.0".
+- When add("0.0") runs, c == '0' is a word char. add() then checks self.is_word_char(self.get_last_char()). The last char in the buffer is '-' (from the previous append). is_word_char('-') is False. Because the condition requires both sides true, add() does not insert a space between '-' and "0.0". The two pieces get concatenated without an intervening separator in a context where the code that produced the pieces expected them to remain distinct token-wise. That leads to an incorrect final string (the test fails because the produced code is not the intended tokenization of "-0.0" as the test expects).
+
+Concrete place to look
+- The decision (and mistake) is at line 133: the code treats '-' specially by not treating it like a word char. The split between sign and digits (done by add_number or whoever constructs the pieces) interacts with this logic and causes wrong spacing/concatenation.
+
+Concrete, actionable fixes (steps)
+1. If sign and digits are produced as separate pieces by add_number:
+   - Change add_number to emit the whole number as a single string (i.e., "-0.0" instead of "-" then "0.0"). This avoids the space/concatenation logic entirely.
+   - Steps:
+     - Find add_number and stop splitting the sign and digits; build the full string sign+digits and pass that to add(newcode).
+
+2. Or, change add() to treat a leading digit after a trailing '-' as needing separation (or treat '-' as a word-char for the purpose of this check):
+   - Option A (simpler): consider '-' as a word char when deciding whether to insert a space before a following word-char chunk:
+     - Replace line 133 with something like:
+       if (self.is_word_char(c) or c == '\\' or self.get_last_char() == '-') and self.is_word_char(self.get_last_char()):
+       (or better: include '-' in the set tested by is_word_char for the right-side check)
+     - This makes add("0.0") see that the previous '-' is a token boundary and will insert a space if needed.
+   - Option B (more precise): explicitly check for the pattern where last char is a sign and current first char is a digit, and insert the space:
+     - if c.isalnum() and self.get_last_char() in ('-', '+') and self.is_word_char(self.get_last_char()) is False:
+         self.append(" ")
+     - or unify logic so separators are inserted whenever concatenation would form unintended tokens.
+
+3. Prefer the first fix (emit "-0.0" as one piece) if you control add_number:
+   - Simpler and less likely to break other tokenization assumptions.
+   - Steps:
+     - Edit add_number so sign and digits are concatenated before calling add().
+     - Run the test suite.
+
+Why I recommend those fixes
+- The root is the mismatch between how tokens are built (split sign/digits) and how add() decides about separators.
+- Emitting the whole numeric token prevents fragile logic in add() from having to guess whether an adjacent chunk forms a single token.
+- If you must keep piecewise emission, make add() aware of sign characters in its separation check so it preserves correct token boundaries.
+
+Summary, in one line
+- add() only looks at the first char of newcode and treats '-' as not a word char; when negative numbers are emitted in two pieces ("-" then "0.0"), add() fails to insert the needed separation and the final string is wrong. Fix by emitting the whole number at once or by updating the separator logic at line 133.

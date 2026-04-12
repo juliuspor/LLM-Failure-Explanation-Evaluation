@@ -1,0 +1,44 @@
+What happened (where & when)
+- The code raised ValueError("Invalid locale format: fr__POSIX") at the check on line 246 (the raise at line 246).
+- That check executed while parsing the input string locale_str == "fr__POSIX".
+
+Why it failed (exact root cause)
+- The parser expects fixed positions for language, country and an optional variant (it slices locale_str[0:2] and locale_str[3:5] and then examines locale_str[5]).
+- The input "fr__POSIX" has two underscores in a row, which means the country part is empty (language="fr", country="").
+- For that input:
+  - locale_str[0:2] == "fr"
+  - locale_str[3:5] == "_P" (not a two-letter country code)
+  - locale_str[5] == "O"
+- The code reaches the test if locale_str[5] != '_' on line 245–246 and finds 'O' (not '_'), so it raises ValueError. In short: the parser assumes a non-empty two-letter country at positions 3–4 and an underscore at position 5 when a variant is present; it does not handle an empty country (double underscore), so it mis-parses and rejects "fr__POSIX".
+
+Why the current checks are brittle
+- The code relies on fixed index positions (0:2, 3:5, index 5) instead of splitting the string into parts. That makes the code fail for valid locale strings that allow an empty country with a variant (the common form "language__variant", e.g. "fr__POSIX").
+
+Concrete fixes (step-by-step, exact changes)
+1. Replace the fixed-index parsing with a split-based parsing that handles empty country fields. Example replacement logic you can put where the current slicing/checks are:
+   - parts = locale_str.split('_', 2)
+   - language = parts[0]
+   - country = parts[1] if len(parts) > 1 and parts[1] != "" else None
+   - variant = parts[2] if len(parts) > 2 else None
+   - Validate language is two letters; if country is not None validate two letters; then return Locale(language, country, variant)
+
+2. If you prefer a minimal edit keeping existing structure, change the checks so an empty country is allowed:
+   - After extracting language = locale_str[0:2], country = locale_str[3:5], treat country == "__" or country == "" as country = None.
+   - When checking for variant, don’t assume index 5 must be '_' for an empty country — instead use split logic for variant start.
+
+Example concrete snippet (drop-in replacement for the slice/check block):
+- parts = locale_str.split('_', 2)
+- if not parts or len(parts[0]) != 2:
+    raise ValueError(f"Invalid locale format: {locale_str}")
+- language = parts[0]
+- country = parts[1] if len(parts) > 1 and parts[1] else None
+- variant = parts[2] if len(parts) > 2 else None
+- if country is not None and len(country) != 2:
+    raise ValueError(f"Invalid country code in locale: {locale_str}")
+- return Locale(language, country, variant)
+
+What to check after the change
+- Test with "fr", "fr_FR", "fr__POSIX", "en_US_POSIX", and invalid strings like "f_US" or "fr_USA".
+- Confirm Locale receives None for missing country (instead of a wrong value like "_P").
+
+This explains exactly why "fr__POSIX" caused the ValueError (double underscore -> empty country -> fixed-index parsing mis-read the string and failed the index check) and gives precise code changes to fix it.

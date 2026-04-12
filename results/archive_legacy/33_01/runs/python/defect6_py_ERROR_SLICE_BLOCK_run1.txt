@@ -1,0 +1,52 @@
+What happened
+- The code only inserts a space when both the first character of newcode and the last character already in the buffer are "word characters":
+  - check at line 133: if (self.is_word_char(c) or c == '\\') and self.is_word_char(self.get_last_char()):
+- That condition misses cases where not inserting a space changes tokenization so that a negative zero literal (the string "-0.0") loses its minus sign and becomes "0" when later parsed/evaluated.
+- The failing assertion "Expected -0.0, got 0" comes from such a tokenization mistake: the writer built an output where tokens ran together (or were split incorrectly) and the minus sign was dropped or the numeric literal was reinterpreted as 0 instead of -0.0.
+
+Where it happened (specific places)
+- Line 132: c = newcode[0] — you look only at the first character of the new fragment.
+- Line 133: the boolean test uses self.is_word_char(c) and self.is_word_char(self.get_last_char()) to decide whether to append a space.
+- Line 136–138: when the test fails you append newcode directly (self.append(newcode)), producing the malformed token stream that caused "-0.0" to become "0".
+
+Why that exact test is wrong
+- The test only covers the case "wordchar + wordchar" (e.g., "return" + "foo" -> need space), but negative-number cases are not both word chars:
+  - newcode starting with '-' (the minus sign) is not a word character, so the test doesn't add a space.
+  - If the previous character in the buffer is a word/identifier character (e.g., "return") or a digit, missing the space turns "return -0.0" into "return-0.0" (or otherwise changes token boundaries), and downstream parsing can lose the negative sign or collapse the literal into 0.
+- In short: the code only prevents one kind of token merging; it fails to prevent other tokenization errors (notably around unary minus and numeric literals).
+
+How to reproduce quickly
+- Start with buffer containing "return" (last char is 'n', a word char).
+- Call add("-0.0") — because '-' is not a word char, the code does not insert a space and appends "-0.0" directly.
+- The output becomes "return-0.0" (no space). Depending on your downstream parser/consumer, that can be parsed/tokenized incorrectly and produce 0 instead of -0.0 — which matches the assertion failure you saw.
+
+Precise fixes (choose one)
+1) Insert space when appending a token that would join with the previous token to form a different token:
+   - Replace the condition on line 133 with a function that checks whether appending newcode[0] to the existing last character would change token boundaries. For a quick fix:
+     - if self.is_word_char(self.get_last_char()) and not self.is_word_char(c):
+         self.append(" ")
+     - And also handle the opposite case where last char is not word and newcode[0] is word.
+   - This prevents constructs like "return-0.0" by adding the needed space if the previous char is a word char and newcode starts with '-' or '.'.
+
+2) Explicitly handle minus and dot cases:
+   - On line 133, expand the condition to include '-' and '.':
+     - if (self.is_word_char(c) or c in ('\\', '-', '.')) and self.is_word_char(self.get_last_char()):
+         self.append(" ")
+   - This is simpler but ad-hoc and may miss other tokenization pitfalls.
+
+3) Best long-term fix: use a tokenizer-aware join rule
+   - Use the same tokenization rules that your parser uses. Rather than a heuristic based on is_word_char, consult a small tokenizer (or a table of token classes) and only omit the space when the two adjacent tokens are safe to concatenate. This avoids future edge cases.
+
+Exact lines to change (example for option 1)
+- Replace lines 132–136 with:
+  132 |         c = newcode[0]
+  133 |         last = self.get_last_char()
+  134 |         # Insert a space whenever concatenation would change token boundaries,
+  135 |         # e.g. when the previous char is a word char and the new start is not.
+  136 |         if self.is_word_char(last) and not self.is_word_char(c):
+  137 |             self.append(" ")
+
+Why this will fix your failing assertion
+- Adding the space in the cases that currently miss it prevents tokens from running together and ensures the literal "-0.0" remains a separate token. Downstream parsing will then see -0.0 rather than 0, so the assertion "Expected -0.0, got 0" will no longer fail.
+
+If you want, tell me what is_word_char() considers a word character and I can give the minimal precise condition (or a tokenizer-based snippet) to avoid this and similar tokenization mistakes.

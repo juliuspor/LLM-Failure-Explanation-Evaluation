@@ -1,0 +1,43 @@
+What happened (where it failed)
+- The code computes minutes_offset on lines 402–404, then converts that to milliseconds on line 405:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  - 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The test error is ValueError: Minutes out of range: -15. That means minutes_offset was -15 when the code reached the validation that raised the exception.
+
+Why it failed (root cause)
+- The code is trying to combine an hour component (hours_in_minutes) and a minute component (minutes_offset) into a single minute count, but the sign handling for the minute component is wrong.
+- If the parsed minute component is negative (e.g. -15 for "-00:15"), line 402 subtracts that negative value from hours_in_minutes, and line 404 then adds minutes_offset again. Because the code reuses minutes_offset for two different meanings (first as the parsed minute value, then as the combined total), the arithmetic ends up with a negative minute total (-15) instead of producing a normalized non‑negative minute component in the expected range 0..59 or a correctly signed total.
+- The later validation (the ValueError) expects the minute component to be in the valid range, and it sees -15, so it raises "Minutes out of range: -15".
+
+Exactly where to change (specific lines and variables)
+- The problematic lines are 402 and 404 (the two assignments to minutes_offset). They overwrite the parsed minute value with an incorrectly computed total:
+  - minutes_offset (parsed minutes) is used on line 402 and then immediately reused on line 404 in a different sense, producing an incorrect negative value.
+- The conversion on line 405 then propagates that wrong value into offset milliseconds, causing the validation error.
+
+Concrete fixes (step‑by‑step edits you can apply)
+1. Keep the parsed minute component separate from the combined-minute total. Introduce a new variable name, e.g. parsed_minutes and total_minutes:
+   - Replace the code at lines 402–404 with:
+     - parsed_minutes = minutes_offset   # preserve the parsed minute component
+     - if parsed_minutes < 0:
+         total_minutes = hours_in_minutes - abs(parsed_minutes)
+       else:
+         total_minutes = hours_in_minutes + parsed_minutes
+     - minutes_offset = total_minutes
+   This avoids reusing minutes_offset for two meanings and makes the sign handling explicit.
+
+2. Alternatively, compute the sign once from the hour component and apply it to minutes:
+   - sign = 1 if hours_in_minutes >= 0 else -1
+   - minutes_abs = abs(minutes_offset)
+   - minutes_offset = hours_in_minutes + sign * minutes_abs
+   This yields a correctly signed total and keeps parsed minutes in a valid 0..59 form before combining.
+
+3. Add an explicit validation before converting to milliseconds (before line 405) to reject an invalid parsed minute immediately:
+   - if not (0 <= abs(parsed_minutes) < 60):
+       raise ValueError(f"Minutes out of range: {parsed_minutes}")
+   This makes the error location and message clearer and prevents propagating a bad value into later arithmetic.
+
+Why these fixes work
+- They stop reusing minutes_offset for two different roles (parsed minutes vs. combined total), make the sign explicit, and ensure the minute component is normalized to the expected range before multiplying by DateTimeConstants.MILLIS_PER_MINUTE. That prevents producing a negative minute total like -15 that triggers the ValueError.
+
+If you want, paste the surrounding function (lines before 402 and after 408) and I’ll produce the minimal patch with exact replacement lines.

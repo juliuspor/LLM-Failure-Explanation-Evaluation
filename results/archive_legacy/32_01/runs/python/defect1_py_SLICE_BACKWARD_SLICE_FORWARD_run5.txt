@@ -1,0 +1,38 @@
+What happened (where it fails)
+- At lines 400–401 you validate minutes_offset to be in the range 0..59:
+  - 400–401: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later you reuse the same variable minutes_offset to build a total-minute value and change its meaning:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+  - 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- At 411 the code raises "Offset is too large" (before returning cls.for_offset_millis(offset)).
+
+Why it fails (root cause)
+- The code checks that minutes_offset is within 0..59, but then overwrites minutes_offset with a combined total number of minutes (hours_in_minutes ± minutes_offset). Reusing minutes_offset for a different meaning introduces a logic and sign error: when building the final minute count for negative hour offsets you subtract the validated positive minutes, producing a larger magnitude value than intended (or the wrong sign), which then multiplies out to an offset outside allowed bounds and triggers "Offset is too large."
+- In short: minutes_offset is validated as a small 0..59 value then reused as the total minutes. That name reuse plus incorrect sign handling makes the produced total minutes wrong and causes an overflow/invalid offset by the time you call FieldUtils.safe_multiply (line 409) and reach the error at line 411.
+
+Exactly where to look
+- Validation: lines 400–401 (minutes must be 0..59).
+- Combination and sign handling: lines 406 and 408 (these lines change minutes_offset into a total).
+- Multiplication and overflow check: line 409 (safe_multiply with MILLIS_PER_MINUTE) and the later raise at line 411.
+- Return path: cls.for_offset_millis(offset) (called after the computations).
+
+Concrete fixes (step-by-step)
+1. Stop reusing minutes_offset for two different meanings:
+   - Rename the validated small value to minute_part (0..59).
+   - Compute a separate total_minutes variable for the combined value.
+2. Compute total_minutes with correct sign semantics:
+   - If hours is non-negative: total_minutes = hours * 60 + minute_part
+   - If hours is negative: total_minutes = -(abs(hours) * 60 + minute_part)
+   (Do not do hours_in_minutes - minute_part, which can flip the magnitude/sign incorrectly.)
+3. Keep the original validation of minute_part (0..59) as you already do.
+4. Before multiplying:
+   - Use FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE) as you already do, but pass total_minutes (not the reused variable).
+   - If safe_multiply throws or you detect overflow, raise the "Offset is too large" error as currently done.
+5. Return cls.for_offset_millis(offset) with the correctly computed offset.
+
+Why these fixes work
+- Separating minute_part and total_minutes removes the confusing reuse that produced wrong sign/magnitude.
+- Explicit sign-aware combination guarantees the total minutes represent the intended offset, preventing unexpected oversized values that trigger the "Offset is too large" path.
+
+If you want, paste the surrounding function (the few lines above 400 and the conditional blocks around 406/408) and I will give an exact corrected code snippet.

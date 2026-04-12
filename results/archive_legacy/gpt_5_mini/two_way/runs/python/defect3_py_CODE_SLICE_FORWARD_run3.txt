@@ -1,0 +1,53 @@
+What happened
+- Root cause: a units mismatch between what translate_codepoint(...) returns and what the caller's loop expects.
+- translate_codepoint(code_units, pos, out) returns a value in one unit (most likely UTF-16 code units), but the caller treats that return value as a count of codepoints and advances pos by repeatedly adding char_count(code_point_at(...)). When surrogate pairs are present this produces wrong advancement (skipping characters or advancing past the end) and leads to wrong behavior or an IndexError.
+
+Where it fails (exact places)
+- The call that decides how many "items" were consumed:
+  - consumed = self.translate_codepoint(code_units, pos, out)
+- The code that advances pos after a non-zero consumed:
+  - for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  This loop is at the section after the comment "Contract with translators..." in your snippet.
+- The helper that reads a codepoint from UTF-16 code_units:
+  - code_point_at(code_units, index) (shown in the slice lines 38–44). It returns a single Unicode codepoint, combining a surrogate pair when present.
+
+Why that causes the bug
+- Suppose translate_codepoint returned 2 because it consumed two UTF-16 code units (a surrogate pair) representing a single codepoint (an emoji). The caller uses for pt in range(consumed): which runs twice.
+  - First iteration: code_point_at(code_units, pos) returns the combined codepoint (uses both code units), char_count(...) returns 2, so pos += 2 moves past both units.
+  - Second iteration: the loop runs again, but pos is already after the surrogate pair; code_point_at(code_units, pos) now reads the next unit (or out of bounds), causing incorrect skipping or an IndexError.
+- In short: consumed is in code units but the loop treats it as a count of codepoints (or vice versa). The pos increment uses char_count(code_point_at(...)) which advances by code units per codepoint, so double-counting occurs when consumed counts code units.
+
+How to fix it (concrete steps)
+Pick one clear consistent contract and implement it:
+
+Option A — Treat consumed as number of UTF-16 code units (recommended if translate_codepoint works with code units):
+1. Change the advancement code to add consumed directly:
+     if consumed > 0:
+         pos += consumed
+   Remove the for-loop entirely. This is correct if translate_codepoint returns how many code_units it consumed.
+
+Option B — Treat consumed as number of codepoints:
+1. Ensure translate_codepoint is changed to return number of codepoints consumed (1 for one codepoint, even if it was a surrogate pair).
+2. Keep the loop but compute the codepoint and advance exactly once per codepoint:
+     for _ in range(consumed):
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+   (This avoids re-reading/advancing beyond what was intended.)
+
+Option C — Defensive check (if you cannot change translate_codepoint immediately):
+1. Assert or validate the meaning of consumed at runtime:
+     if consumed <= 0:
+         ...
+     if consumed > 0 and consumed > (length - pos):
+         raise ValueError("translate_codepoint returned too many code units")
+2. Add unit tests with surrogate pairs (e.g. emojis like U+1F600) to demonstrate correct behaviour.
+
+How to verify the fix
+- Unit tests:
+  - Input a single BMP character (e.g. "A") and verify pos advances by 1 and output as expected.
+  - Input a surrogate-pair character (e.g. "😀" U+1F600) and verify pos advances by 2 and output as expected.
+  - Input mixtures of BMP and supplementary characters and verify no skipping or IndexError.
+
+Summary in one line
+translate_codepoint's return value is measured in a different unit (code units vs. codepoints) than the loop assumes; make the units consistent (advance pos by consumed if consumed is code units, or make consumed mean codepoints and advance per-codepoint) to fix the failure.

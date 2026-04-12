@@ -1,0 +1,39 @@
+What happened (where it failed)
+- The failing check is at lines 239–240:
+  239 |             if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+  240 |                 raise ValueError(f"Invalid locale format: {locale_str}")
+- For the input "fr__POSIX" the code indexes are:
+  - locale_str[0:2] = "fr"
+  - locale_str[2] = '_' (separator)
+  - locale_str[3] = '_' (empty country marker)
+  - locale_str[4:] = "POSIX" (variant)
+- ch3 and ch4 are taken from locale_str[3] and locale_str[4] (the code expects two uppercase letters for a country at 3 and 4). Because ch3 == '_' (not an uppercase letter) the condition is true and a ValueError is raised. That causes test_locale_with_empty_country_variant to fail.
+
+Why this is wrong (root cause)
+- The code assumes that if there is an underscore at position 2 then position 3 and 4 must always be uppercase letters for a country (pattern language_country). It never handles the valid alternate form language__variant (empty country, double underscore).
+- In other words, the code treats the second underscore of the double-underscore case as an invalid character (ch3), instead of recognizing it means "empty country" and that a variant follows.
+
+Exact place to change and concrete fixes
+1. Detect the double-underscore (empty country) case before validating ch3/ch4. Add a branch before the uppercase-country validation that checks:
+   - if locale_str[2] == '_' and locale_str[3] == '_':
+       return Locale(locale_str[0:2], "", locale_str[4:])
+   This directly handles "fr__POSIX" and similar strings (e.g. "en__UNIX", "de__DOS").
+2. Leave the existing uppercase-country validation for the normal language_country and language_country_variant cases, but only run it when you know you are not in the double-underscore case.
+3. Also ensure the code that parses the variant uses the right start index when country is empty (variant should start at index 4, not 6). The current code uses locale_str[6:] for the variant in the country-present path; that is fine for "en_US_WIN" (variant at 6) but not for "fr__POSIX".
+
+Concrete code snippet (where to insert/modify)
+- Before the ch3/ch4 check (just after confirming locale_str[2] == '_'), add:
+
+    # handle language__variant (empty country)
+    if locale_str[3] == '_':
+        # variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+
+- Then keep the existing ch3/ch4 uppercase check and the rest of the parsing for the normal country or country+variant forms.
+
+Which tests this will fix
+- test_locale_with_empty_country_variant and the other tests in test_locale_empty_country_with_variant will pass after this change. Existing behavior for en, en_US, en_US_WIN stays unchanged.
+
+Summary
+- Root cause: code validates country characters unconditionally (lines 239–240) and fails when the country is intentionally empty (double underscore), because it treats the second underscore as an invalid uppercase letter.
+- Fix: detect locale_str[3] == '_' (double underscore) first, return Locale(language, "", variant=locale_str[4:]), otherwise run the existing country-uppercase checks.

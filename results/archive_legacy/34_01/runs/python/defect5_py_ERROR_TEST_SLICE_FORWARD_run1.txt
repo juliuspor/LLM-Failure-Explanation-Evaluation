@@ -1,0 +1,59 @@
+What happened (plainly)
+- Your test calls ArrayUtils.add(None, None, expected_type=str).
+- Inside ArrayUtils.add the code creates a new Java array with element type Object (Object[]).
+- Later the method attempts to return that array as a String[] (or T[] where T is expected_type).
+- Java cannot cast an Object[] to a String[] at runtime, so a ClassCastException is thrown:
+  [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+- The exception prevents the method from returning [None], so the assertion fails.
+
+Why it fails (root cause)
+- In Java the runtime type of arrays matters. An array created as new Object[n] has runtime component type Object; it is not compatible with String[].
+- Casting does not change the array’s runtime type. A cast like (String[]) someObjectArray does not convert elements, it only tells the compiler to treat the reference as String[]; the JVM checks and throws a ClassCastException if the actual array type is not String[].
+- The code path that handles a null input array or builds the result is creating an Object[] (or otherwise preserving Object[]), then returning/casting it to the expected_type array (String[]) — that cast fails.
+
+Where it occurs (typical locations to check)
+- In ArrayUtils.add, look for the branch that handles a null input array or that allocates the result array (e.g. something like new Object[newLength], Arrays.copyOf(oldArray, newLength), or a cast like (T[]) someObjectArray).
+- The cast/return statement that converts the built array to the generic/expected type is where the ClassCastException is raised (the line that does (String[]) result or returns result typed as T[]).
+
+How to fix it (concrete steps)
+1. Allocate the result array with the correct runtime component type instead of new Object[].
+   - Use java.lang.reflect.Array.newInstance(expectedType, length).
+     Example:
+     - If expected_type is Class<T> expectedType and newLength is the needed length:
+       Object typedArray = Array.newInstance(expectedType, newLength); // runtime type is T[]
+       T[] result = (T[]) typedArray; // safe cast because runtime component type is T
+       // copy existing elements and set element
+       return result;
+2. If copying an existing array, use Arrays.copyOf with a component-type parameter (Java 6+):
+   - Arrays.copyOf((T[]) oldArray, newLength, (Class<? extends T[]>) Array.newInstance(expectedType, 0).getClass())
+   - This ensures the returned array has the right runtime component type.
+3. If using generics, avoid creating Object[] and then casting. Always create the array from expectedType via Array.newInstance.
+4. Update the null-input branch specifically:
+   - Current likely code (problematic):
+     if (array == null) {
+       Object[] newArray = new Object[1];
+       newArray[0] = element;
+       return (T[]) newArray; // throws ClassCastException when expectedType != Object
+     }
+   - Replace with:
+     if (array == null) {
+       Object typedArray = Array.newInstance(expectedType, 1);
+       T[] newArray = (T[]) typedArray;
+       newArray[0] = (T) element;
+       return newArray;
+     }
+
+Exact variables/methods to check and change in your code
+- ArrayUtils.add(...) — inspect the branch that constructs the result array (the code handling array == null or array length + 1).
+- The line that does new Object[...] or Arrays.copyOf(oldArray, newLength) without supplying the target component class.
+- The line that casts the built array to the expected generic T[] / String[] before return.
+
+Short test to confirm the fix
+- After changing allocation to Array.newInstance(expected_type, ...):
+  result = ArrayUtils.add(None, None, expected_type=str)
+  assert result.getClass().getComponentType() == str.class   // or equivalent in your environment
+  assert Arrays.equals(result, new String[] { null })       // or Python-level check expecting [None]
+
+Summary
+- The method created an Object[] and then tried to treat it as a String[]; Java refuses that at runtime.
+- Fix by allocating arrays with the correct component type using Array.newInstance or Arrays.copyOf with the component-type parameter so the returned array really is a String[] (or T[]) at runtime.

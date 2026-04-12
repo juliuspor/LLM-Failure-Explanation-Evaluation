@@ -1,0 +1,69 @@
+What happened (what failed)
+- Test test_add_null_to_null_with_expected_type calls ArrayUtils.add(None, None, expected_type=str).
+- In your code both array and element are None, so inferred_type becomes object (the else branch).
+- Later you call ArrayUtils._copy_list_grow1(array, inferred_type) and then you hit this check:
+
+      if expected_type is not None:
+          if inferred_type == object and expected_type != object:
+              raise TypeError(...)
+
+  Because inferred_type == object and expected_type is str, you raise the TypeError shown by the test:
+  "Cannot cast object list to str list ..."
+
+Why this happens (root cause, exact lines)
+1. At the top you compute inferred_type with:
+
+      if array is not None:
+          inferred_type = type(array)
+      elif element is not None:
+          inferred_type = type(element)
+      else:
+          inferred_type = object
+
+   - line: inferred_type = type(array) is wrong: type(array) returns the Python list class (built-in list), not the component/element type you intend. For example, for a populated list ["a","b"] it returns <class 'list'>, not <class 'str'>. For an empty list it still returns list (no element type available).
+   - When array is None (this test), you fall through to inferred_type = object. That loses the caller's expectation (expected_type=str).
+
+2. Later you treat inferred_type as the component type to allocate and/or check compatibility (ArrayUtils._copy_list_grow1 and your TypeError check). Because inferred_type is object, you then reject expected_type=str and raise the TypeError.
+
+So two separate mistakes:
+- Using type(array) to get an element/component type is incorrect.
+- You never use expected_type to recover a usable component type when array and element are both None.
+
+Where it occurred in the code
+- Wrong inference: the block computing inferred_type (the first if/elif/else).
+- The raising of the error: the if expected_type is not None: ... TypeError branch just after assigning the new_list and storing element.
+
+Concrete fixes (step‑by‑step)
+1. Prefer expected_type when present and array/element don't give a clearer component type:
+   - If expected_type is not None, set inferred_type = expected_type immediately (unless you can infer a better concrete type from array/element).
+
+2. When array is provided, do not use type(array). Instead:
+   - If array contains at least one non-None element, use type(first_non_none_element) as inferred_type.
+   - If all elements are None (or array empty), fall back to expected_type if provided, otherwise to object.
+
+3. When element is provided and array is None, use type(element) (but if element is None, again use expected_type as fallback).
+
+Minimal corrected approach (pseudocode):
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None:
+        # find first non-None element to infer type
+        for e in array:
+            if e is not None:
+                inferred_type = type(e)
+                break
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Then call ArrayUtils._copy_list_grow1(array, inferred_type) and only raise TypeError if you truly cannot satisfy expected_type (but that should not happen if you set inferred_type = expected_type when expected_type is given).
+
+Why this fixes the failing test
+- For the failing test expected_type=str is provided and both array and element are None. The corrected logic sets inferred_type = expected_type (str), so no TypeError is raised and the method returns ["None"] (or [None]) as expected.
+
+Additional notes
+- Be careful with empty lists: there is no element type to infer from an empty list; you must rely on expected_type or fall back to a neutral component type.
+- Using the element type of the first non-None element is a pragmatic inference for heterogeneous Python lists; it matches the intent of the Java bug you referenced (LANG-35).

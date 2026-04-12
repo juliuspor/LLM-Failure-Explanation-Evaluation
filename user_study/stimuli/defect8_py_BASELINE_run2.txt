@@ -1,0 +1,47 @@
+What happened (where)
+- The failure occurs inside LocaleUtils.to_locale at the country/variant parsing branch (around lines 237–247).
+- The test input "fr__POSIX" reaches the branch for length != 2 and locale_str[2] == '_' (so it goes into the else branch expecting either "ll_CC" or "ll_CC_variant").
+- At lines 237–240 you do:
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(...)
+- For "fr__POSIX", locale_str[3] is '_' (an underscore), not an uppercase letter, so the check fails and you raise ValueError: Invalid locale format: fr__POSIX.
+
+Why it happened (root cause)
+- The code assumes the country code is always present when length != 2, and immediately validates two uppercase letters at positions 3 and 4.
+- It does not handle the valid Java-style locale form language__variant (empty country, two underscores). In that form the country is empty and position 3 is '_' (underscore), so the uppercase-letter check is wrong.
+- In short: the code incorrectly treats the double-underscore case as invalid because ch3 is '_' rather than an uppercase letter.
+
+Exactly where to change it and how (concrete steps)
+1. After confirming locale_str[2] == '_' (line ~233), detect whether the country is empty by checking if locale_str[3] == '_'.
+2. If locale_str[3] == '_':
+   - Set country = "".
+   - Accept the rest as variant = locale_str[4:] (variant starts at index 4).
+   - Return Locale(locale_str[0:2], "", variant) after validating variant length if you need.
+3. Else (country not empty):
+   - Validate ch3 and ch4 are uppercase letters (as you already do).
+   - If length == 5, return Locale(language, country).
+   - If length > 5, ensure locale_str[5] == '_' and return Locale(language, country, locale_str[6:]).
+
+Minimal corrected code snippet (replace the country/variant block)
+- After verifying locale_str[2] == '_', use:
+
+    # handle empty country (double underscore) -> language__variant
+    if locale_str[3] == '_':
+        # variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # otherwise country must be two uppercase letters
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    if locale_str[5] != '_':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Notes
+- Also review the initial length check (line ~222): "if length != 2 and length != 5 and length < 7:" — it is awkward but not directly responsible for this particular failure because "fr__POSIX" length is 8 so it passes that test. The core bug is the country-letter validation that ignores the empty-country case.
+- After applying the change above, "fr__POSIX" will parse as Locale("fr", "", "POSIX") and the failing test will pass.

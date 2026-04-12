@@ -1,0 +1,59 @@
+What happened (where)
+- At line 396 the code validates the incoming minutes component:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later, at lines 402 and 404, the same variable minutes_offset is reused to hold a combined minutes value:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- At line 405 that (now-reused) minutes_offset gets multiplied by MILLIS_PER_MINUTE and stored in offset.
+- If the computation produces a value too large (or wrong sign), the code reaches the guard at line 407 and raises "Offset is too large".
+
+Why it fails (root cause)
+- The variable minutes_offset is being used for two different things:
+  1) the 0–59 minutes component (validated at line 396), and then
+  2) the total offset in minutes after combining with hours (assigned at lines 402/404).
+- Reusing minutes_offset makes the code hard to reason about and introduces a logic/overflow risk because:
+  - The code never makes the intent explicit (is minutes_offset a component or total minutes?), so the arithmetic at 402/404 can produce an incorrectly signed or overly large total.
+  - There is no revalidation of the combined value after the transformation. The only validation was for the 0–59 component at line 396, which doesn't protect against a huge total after adding/subtracting hours_in_minutes.
+- Practically, that means for some hour/minute inputs the computed offset (minutes_offset * MILLIS_PER_MINUTE) becomes outside the allowed limit and triggers the "Offset is too large" error at line 407. Reusing the variable hides the mistake and makes the arithmetic error likely.
+
+Concrete example (how the bug manifests)
+- Suppose hours_in_minutes == 720 (12 hours) and minutes_offset == 59 (valid at line 396).
+- If code follows the branch that does minutes_offset = hours_in_minutes + minutes_offset (line 404):
+  - minutes_offset becomes 779 (total minutes). Multiplying by MILLIS_PER_MINUTE produces a large millisecond value that may exceed allowed limits and cause the "Offset is too large" error at line 407.
+- The upstream check at line 396 does not prevent this because it only checked the minute component, not the final total.
+
+Exact fixes (step-by-step)
+1. Stop reusing minutes_offset for two meanings. Introduce clearly named locals:
+   - keep minutes_component (validated 0..59)
+   - compute total_minutes = hours_in_minutes + sign_adjusted_minutes
+2. Combine hours and minutes explicitly and with the correct sign. Example logic:
+   - hours_in_minutes = hours * 60
+   - if hours < 0:
+       total_minutes = hours_in_minutes - minutes_component
+     else:
+       total_minutes = hours_in_minutes + minutes_component
+   (Or, more clearly: total_minutes = hours * 60 + (hours < 0 ? -minutes_component : minutes_component))
+3. Revalidate or bound-check the total after combination (before multiplying):
+   - if abs(total_minutes) is larger than the allowed range (compute allowed total minutes from the existing offset limit), raise the "Offset is too large" error with a clear message.
+4. Multiply the validated total_minutes by MILLIS_PER_MINUTE and continue:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+5. Replace code at lines 402/404 with assignments to total_minutes and change uses of minutes_offset at line 405 to total_minutes.
+
+Minimal code replacement sketch
+- Replace the block from 396..405 with:
+  - validate minutes_component (same as current line 396)
+  - hours_in_minutes = hours * 60
+  - if hours < 0:
+      total_minutes = hours_in_minutes - minutes_component
+    else:
+      total_minutes = hours_in_minutes + minutes_component
+  - if total_minutes causes too-large offset:
+      raise ValueError("Offset is too large")
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- Using distinct variables prevents accidental reuse and makes the signed combination explicit.
+- Revalidating the combined total ensures you only raise "Offset is too large" when the full offset breaks limits, not because the minute component was valid but the combined result became invalid.
+- The code becomes readable and predictable: minutes_component is always 0–59, total_minutes is the single source of truth for the amount to convert into milliseconds.
+
+If you want, paste the surrounding function and I’ll show the exact lines to change and provide a ready-to-drop-in patch.

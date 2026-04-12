@@ -1,0 +1,90 @@
+I can’t point to exact line numbers or variable names in your repo because you didn’t paste the failing code or test. That said, the failure message is unambiguous about the root cause and how to fix it.
+
+What happened
+- Your test expected a floating value that has a negative sign bit (the IEEE “-0.0”), but the function under test returned a value that is +0 (printed or represented as 0).
+- Many languages and test frameworks print “-0.0” vs “0” when they preserve the sign bit in the textual representation, even though -0.0 == 0.0 compares equal in most languages.
+- The assertion failed because the test checks for the signed-zero form (negative zero) but the code returned positive zero (or an integer 0).
+
+Why that happens (root cause)
+- The sign bit of zero is lost or never set by the code path that produced the result. This can happen in several common ways:
+  - A branch or arithmetic wiped the sign (for example: -0.0 + 0.0 → +0.0; or multiplying by 0.0).
+  - The function converted the float to an integer or to a string that normalized away the sign.
+  - The test compared textual representations or used equality that compares representation rather than raw bits.
+  - The function explicitly returned an integer 0 rather than a float -0.0.
+
+How to locate the exact spot
+1. Open the test that failed and find the assertion line (the test framework printed the failure; find that test method and the exact assert line). That is where the expectation “-0.0” is written.
+2. From that test, trace the call to the function under test (the call site and the function name). Note the variable name where the returned value is stored (for example value = my_func(...)).
+3. Insert a quick inspect at that point to show exactly what the value is at runtime (see detection code below).
+
+How to reproduce and inspect the sign bit (examples)
+- In Python:
+  - Show the runtime value and its sign bit:
+    import math, struct
+    v = my_func(...)
+    print(repr(v))                # shows -0.0 vs 0.0
+    print(math.copysign(1.0, v))  # will be -1.0 for -0.0, +1.0 for +0.0
+    print(struct.pack('!d', float(v)).hex())  # raw IEEE-754 bits
+
+- In Java:
+    double v = myFunc(...);
+    System.out.println(Double.toString(v));            // prints -0.0 vs 0.0
+    System.out.println(Double.doubleToRawLongBits(v)); // shows sign bit in bits
+
+- In C/C++:
+    double v = my_func(...);
+    printf("%.17g\n", v);
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    printf("%016" PRIx64 "\n", bits);
+
+Concrete, actionable fixes (pick the one that fits your intent)
+
+If you intended to preserve negative zero:
+- Ensure the code returns a floating -0.0 explicitly. Example (Python):
+    return -0.0
+  or
+    return math.copysign(0.0, -1.0)
+- If your function currently does this somewhere:
+    return 0
+  change it to:
+    return -0.0
+  (or the language-appropriate float literal)
+
+- If the sign is being lost by arithmetic, adjust the order or use copysign to restore the sign after the arithmetic:
+    result = some_computation(...)
+    if was_expected_negative_zero: result = math.copysign(0.0, -1.0)
+
+If you did NOT intend negative zero (the test is wrong to expect -0.0):
+- Change the test assertion to not require sign of zero. For example:
+  - Python: assert value == 0.0  # don't check sign
+  - Or explicitly compare sign bits only when you need that behavior:
+      assert math.copysign(1.0, value) == -1.0
+
+If you need to assert the sign bit in tests (explicit check):
+- Use a bit-level or sign-check helper instead of plain equality. Examples:
+
+  Python (precise check):
+    import math
+    assert value == 0.0
+    assert math.copysign(1.0, value) == -1.0  # ensures negative zero
+
+  Java:
+    assert Double.doubleToRawLongBits(v) == Double.doubleToRawLongBits(-0.0);
+
+Step-by-step diagnostic checklist you can run now
+1. Open the failing test file and note the exact assert line and the expected value (-0.0).
+2. In the test just before the assert, add an inspect:
+   - print/repr() the returned value
+   - print sign-bit helper (math.copysign or doubleToRawLongBits)
+3. Run the test and observe:
+   - If the printed value is 0.0 and sign helper returns +1.0, your code produced +0.0.
+4. Inspect the implementation of the function:
+   - Look for places that return plain 0, integer 0, or perform operations that neutralize the sign bit.
+5. Apply the appropriate fix from the “Concrete fixes” section above.
+6. Re-run tests.
+
+Summary (one-line)
+The test failed because it compared for a negative-zero float (-0.0) but the code returned a positive zero (0 or +0.0); fix either the test (don’t require negative zero) or the implementation (return -0.0 or preserve sign) and verify using a sign-bit check (math.copysign or raw bits).
+
+If you paste the failing test assertion and the function under test (a few lines), I will point to the exact line and show the minimal code change to make the test pass.

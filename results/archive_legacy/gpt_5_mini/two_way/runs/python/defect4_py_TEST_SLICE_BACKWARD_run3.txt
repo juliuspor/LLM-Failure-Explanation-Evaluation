@@ -1,0 +1,70 @@
+What happened (root cause)
+- There are logic mistakes in TimePeriodValues._update_bounds that overwrite or set the wrong index when updating stored min/max indices.
+- Two concrete problems show up in the slice you provided:
+
+1) Unconditional overwrite of _min_start_index (lines shown 340–349)
+- At line 346 the code correctly checks if the new start is less than the current minimum:
+  if start < min_start:
+      self._min_start_index = index
+- But immediately after that conditional the code unconditionally assigns:
+  self._min_start_index = index
+  (this is the line shown at 349 in your slice)
+- Effect: _min_start_index will always be set to the most recently added/inspected index, regardless of the comparison. That breaks get_min_start_index() and any logic that expects the true minimum start to be tracked (your test_min_start_index fails unless the last added item happens to be the minimum).
+
+2) Wrong variable used for comparison / assignment for max_middle_index (mentioned in your header and typical of the same method)
+- The tests and comment indicate a different bug: when updating the "max middle" index the code uses the wrong index/variable in the comparison or assignment, so the index stored is not the index of the actual maximum middle value.
+- Although the exact lines for the max-middle block are not in the slice, your header says "Covers the max_middle_index bug where wrong index variable is used for comparison." That means the code likely compares the new middle value against the wrong stored value or assigns the wrong variable (for example comparing middle against max_middle_index instead of max_middle_value, or assigning self._max_middle_index = max_middle_index instead of = index). The symptom you saw ("Expected max_middle_index=1, got 3") matches this: the code ends up storing an incorrect index (often the last index) instead of the index of the max middle.
+
+Why this produced the failing test
+- test_max_middle_index expects the index of the period with middle = 150 (index 1), but because the method either overwrote indices unconditionally or used the wrong variable in the comparison/assignment, it returned 3 (the wrong index).
+- test_min_start_index exposes the unconditional overwrite: the stored min start index becomes the last added item, not the smallest start.
+
+Where to look in the file
+- Open hit04_timeperiod.py and find the method _update_bounds.
+- Inspect the blocks that update:
+  - self._min_start_index (lines around 340–349 in your slice)
+  - self._max_middle_index, self._min_middle_index (the "middle" blocks; not shown in slice but adjacent in that method)
+
+Exact fixes (clear, actionable steps)
+1) Fix the unconditional overwrite for min_start_index
+- Remove the stray unconditional assignment. Replace the shown block with a correct conditional-only update:
+  if self._min_start_index >= 0:
+      min_start_period = self.get_data_item(self._min_start_index).get_period()
+      if isinstance(min_start_period, SimpleTimePeriod):
+          min_start = min_start_period.get_start_millis()
+      else:
+          min_start = int(min_start_period.get_start().timestamp() * 1000)
+      if start < min_start:
+          self._min_start_index = index
+  else:
+      self._min_start_index = index
+- Concretely: delete the unconditional self._min_start_index = index at line 349 and ensure the else branch sets the initial index only when _min_start_index < 0.
+
+2) Fix the max_middle_index (and similarly min_middle_index) logic
+- Locate the block that updates the "middle" trackers. It should have a pattern analogous to start/end:
+  middle = ...
+  if self._max_middle_index >= 0:
+      current = self.get_data_item(self._max_middle_index).get_period()
+      current_middle = ...
+      if middle > current_middle:
+          self._max_middle_index = index
+  else:
+      self._max_middle_index = index
+- Likely mistakes to correct:
+  - Do not compare middle to the index variable (max_middle_index) — compare to the current middle value (current_middle).
+  - When the comparison says the new middle is larger, set self._max_middle_index = index (the new item's index), not some other variable.
+- Make analogous fixes for min_middle_index (use < and assign index).
+
+Why those changes fix the tests
+- The conditional-only update for _min_start_index prevents later items from overwriting the true minimum unless they actually are smaller.
+- Correct comparisons and assignments for max/min middle make the stored index correspond to the item that actually held the extreme middle value.
+
+Quick checklist for review after change
+- Run your provided unit tests:
+  - test_max_middle_index should return 1
+  - test_min_start_index should return 1
+  - test_max_start_index / test_min_end_index / test_max_end_index should behave as expected
+  - test_generic_time_period_support should exercise the "else" branches (non-SimpleTimePeriod) and pass
+- Inspect other index update blocks (min/max start, min/max end) for the same unconditional-overwrite or wrong-variable pattern and fix them similarly.
+
+If you want, paste the current _update_bounds implementation here and I will patch the exact lines for you.

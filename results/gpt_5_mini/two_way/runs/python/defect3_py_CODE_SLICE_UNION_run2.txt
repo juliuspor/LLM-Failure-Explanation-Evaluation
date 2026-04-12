@@ -1,0 +1,19 @@
+The code fails because of an infinite loop or IndexError caused by incorrect pos increment after a translator consumes one or more codepoints. Specifically:
+
+- In translate(), after consumed = self.translate_codepoint(code_units, pos, out) returns a positive number (lines ~22-29), the loop intends to advance pos past the consumed codepoints. It uses: for pt in range(consumed): pos += char_count(code_point_at(code_units, pos)).
+
+- Problem 1 (infinite loop): pos is not advanced before calling code_point_at inside the loop, so code_point_at(code_units, pos) repeatedly inspects the same code unit if char_count(...) returns 0 or if consumed corresponds to surrogate pairs but char_count returns 2 and pos update logic is wrong. If char_count(code_point_at(...)) returns 1 for a non-surrogate, the loop will add 1 each iteration, but if consumed > remaining codepoints this may go out of bounds.
+
+- Problem 2 (IndexError): code_point_at checks index against len(code_units) and raises IndexError if index >= len(code_units) (lines ~35-36). The for loop increments pos with char_count(...) but does not guard against advancing past length; on the next iteration code_point_at(code_units, pos) may be called with pos == len(code_units), causing IndexError.
+
+- Root cause: mixing units and codepoints. translate_codepoint reports how many codepoints it consumed but translate advances pos by asking for codepoints at the current pos repeatedly instead of advancing by the number of UTF-16 code units consumed (surrogate handling). The helper functions operate on UTF-16 code units (to_utf16_code_units, code_point_at, char_count) but the loop's logic misaligns units vs codepoints and calls code_point_at with an index that can be stale or out of range.
+
+Where it occurs:
+- translate(): the for pt in range(consumed) loop (lines ~27-29) is the immediate site. The call to code_point_at(code_units, pos) inside that loop can raise IndexError (see code_point_at checks at lines ~35-44) or cause pos to be advanced incorrectly, leading to skipping or repeating code units and thus infinite loops.
+
+How to fix (concrete steps):
+1) After translate_codepoint returns consumed, if consumed > 0, advance pos by the number of UTF-16 code units corresponding to those consumed codepoints. Implement a helper that counts UTF-16 code units for N codepoints starting at pos: iterate N times, read cp = code_point_at(code_units, pos), then pos += char_count(cp). This ensures code_point_at is called on valid indices and pos moves forward by units consumed.
+2) Alternatively, change translate_codepoint to return the number of UTF-16 code units consumed (not codepoints), and then simply pos += consumed.
+3) Add bounds checks before calling code_point_at to avoid IndexError: if pos >= length: break.
+
+These fixes resolve the mismatch between codepoints and UTF-16 units and prevent IndexError or infinite loops.

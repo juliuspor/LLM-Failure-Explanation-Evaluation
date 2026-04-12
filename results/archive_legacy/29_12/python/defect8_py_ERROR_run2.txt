@@ -1,0 +1,63 @@
+What happened (short): the code passed the string "fr__POSIX" to a locale parser. That string is malformed because it contains an empty territory element (the double underscore). The parser rejects it and raises ValueError: "Invalid locale format: fr__POSIX".
+
+Why it fails (root cause, no jargon): locale identifiers have a strict format: language, optionally a territory, optionally a variant. You put two underscores in a row which says “I have a blank territory and then a variant.” Most locale parsers (for example Babel’s Locale.parse or any strict validator) don’t accept an empty territory. They expect either:
+- "fr" (language only)
+- "fr_FR" (language + territory)
+- "fr_FR_POSIX" or "fr_POSIX" (language + variant, or language + territory + variant)
+but not "fr__POSIX". The empty territory slot is invalid, so the parser throws the ValueError.
+
+Where this happens in your run (how to find the exact line): look at the stack trace attached to the exception. The top-most frame in your code (the first frame listed that belongs to your files) is the line that called the parser. Typical culprits are:
+- Babel: Babel.core.Locale.parse(...) or babel.Locale.parse(...) (ValueError message text "Invalid locale format: ..." is exactly what Babel raises)
+- your wrapper function that builds the locale string, e.g. a line like locale = f"{lang}_{country}_{variant}" or similar
+Find the line number by opening the file and looking at the stack trace frame that points into your project (not the library frames).
+
+Concrete examples and exact fixes (step-by-step)
+
+1) Inspect the offending string
+- Step: print or log the value right before the parser call.
+  Example:
+  locale_str = <where you build it>
+  print("locale_str:", repr(locale_str))
+- Why: confirm it's exactly "fr__POSIX", not "fr_ _POSIX" or None.
+
+2) If the string is built from parts, fix the builder so it won’t emit empty segments
+- Problematic code (example showing the bug):
+  lang = "fr"
+  country = ""           # empty
+  variant = "POSIX"
+  locale_str = f"{lang}_{country}_{variant}"   # produces "fr__POSIX"
+
+- Corrected builder (skip empty parts):
+  parts = [p for p in (lang, country, variant) if p]
+  locale_str = "_".join(parts)   # produces "fr_POSIX"
+
+- Replace the building line in your file (for example, in mymodule.py line 42):
+  - old: locale_str = f"{lang}_{country}_{variant}"
+  - new: parts = [p for p in (lang, country, variant) if p]; locale_str = "_".join(parts)
+
+3) Or normalize to a library-accepted format before parsing
+- If you intend a variant without territory, use "fr_POSIX" or "fr@POSIX" depending on the library.
+- Example: Babel accepts "fr_POSIX" or "fr@POSIX" (better to use "_"):
+  locale = locale_str.replace("__", "_")   # quick hack, but prefer the builder fix above
+
+4) Validation before calling the parser
+- Example:
+  import babel
+  try:
+      babel.Locale.parse(locale_str)
+  except ValueError:
+      # handle or correct the format
+      raise ValueError(f"Bad locale string from {module}:{lineno} — got {locale_str!r}")
+
+5) How to verify fix
+- Unit test:
+  assert "_".join([p for p in ("fr", "", "POSIX") if p]) == "fr_POSIX"
+  babel.Locale.parse("fr_POSIX")  # should succeed
+
+Summary checklist (apply these in the file/line reported by your stack trace):
+- Step A: open the file and line reported by the stack trace — that is where you call Locale.parse (or locale.setter).
+- Step B: print the string just before that call to confirm its exact value.
+- Step C: change the string construction to skip empty parts (use parts = [p for p in (lang, country, variant) if p]; "_".join(parts)).
+- Step D: rerun tests to confirm the ValueError is gone.
+
+If you paste the stack trace (the file name and line number that raised this error) or the code that builds the locale string, I will point to the exact line and show the minimal change to fix it.

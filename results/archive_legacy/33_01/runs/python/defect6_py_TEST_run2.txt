@@ -1,0 +1,80 @@
+What happened
+- The failing test calls cc.add_number(-0.0) on your MockCodeConsumer and asserts the output is '-0.0'.
+- Your add_number implementation is treating -0.0 as non-negative so it outputs '0.0' (or '0') instead of '-0.0'.
+
+Why it happened (root cause)
+- In IEEE 754 floats there is a signed zero: -0.0 is distinct from +0.0 at the bit level, but numerical comparisons treat them as equal.
+- Most code that detects sign uses a test like if value < 0: or if value >= 0:. For -0.0, value < 0 is False, so that test says “not negative” even though the bit-sign is negative. That is why add_number(–0.0) loses the minus and produces '0.0'.
+- Concretely: inside add_number you likely do something like:
+  - if number < 0:
+      sign = '-'
+      number = -number
+    else:
+      sign = ''
+    buf.append(sign + str(number))
+  Because -0.0 < 0 is False, the code takes the else branch and prints a non-negative representation.
+
+Where it occurred (places to inspect)
+- The failing behavior happens inside MockCodeConsumer.add_number (the method you call).
+- The variable checked is the input float (often named number, value, or n) inside add_number.
+- The place to look is the conditional that decides whether to prepend '-' (the "if number < 0" style check) and the subsequent conversion to string.
+
+Correct fixes (concrete steps)
+Pick one of these fixes and apply it to MockCodeConsumer.add_number:
+
+1) Preserve the sign via repr() when converting to text
+- Replace your manual sign logic and str(number) with repr(number) or format that preserves sign:
+  - code change example:
+    old:
+      # if number < 0: ... str(number)
+    new:
+      text = repr(number)
+      buf.append(text)
+  - repr(-0.0) yields '-0.0' in Python, so the minus is preserved.
+
+2) Detect sign using math.copysign (recommended if you must normalize magnitude)
+- If you need to remove the magnitude but keep the original sign:
+  - import math
+  - sign_is_negative = math.copysign(1.0, number) < 0
+  - if sign_is_negative:
+      sign = '-'
+      magnitude = abs(number)   # or math.fabs(number)
+    else:
+      sign = ''
+      magnitude = abs(number)
+    buf.append(sign + format(magnitude, ...))
+  - math.copysign checks the sign bit, so it distinguishes -0.0 from +0.0.
+
+3) Inspect the sign bit directly (low-level option)
+- If you need exact control, inspect the float bits:
+  - import struct
+  - bits = struct.unpack('!Q', struct.pack('!d', number))[0]
+  - sign_is_negative = (bits >> 63) == 1
+  - Then format as you need.
+  - Use this only if you need a bitwise approach.
+
+Minimal suggested change (example)
+- If your current code is:
+    def add_number(self, number):
+        if number < 0:
+            s = '-' + str(-number)
+        else:
+            s = str(number)
+        self._buf.append(s)
+  Change it to:
+    import math
+    def add_number(self, number):
+        if math.copysign(1.0, number) < 0:
+            s = '-' + str(abs(number))
+        else:
+            s = str(number)
+        self._buf.append(s)
+
+Why these fixes work
+- repr(number) preserves the printed sign for negative zero.
+- math.copysign checks the sign bit rather than numeric comparison, so -0.0 is detected as negative and you can prepend '-' explicitly.
+- The struct.unpack approach reads the sign bit directly.
+
+What to check after changing
+- Run the failing test [TEST] again to confirm result == '-0.0'.
+- Also run other numeric formatting tests to ensure no unintended changes for normal negatives and positives.

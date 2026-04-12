@@ -1,0 +1,49 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method immediately rejects negative minute values at this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+So the method raises ValueError for minutes_offset == -15 and the test fails.
+
+Why it fails (root cause)
+- The method treats minutes_offset as always non‑negative (0..59). The code later tries to combine hours and minutes as signed minutes, but the validation forbids negative minutes up front.
+- In other words, negative minute offsets are considered invalid by the validation even though the later code expects to accept a signed minute component when the hour sign is negative.
+
+Where precisely it occurs
+- Inside for_offset_hours_minutes, at the minutes range validation (the if minutes_offset < 0 or minutes_offset > 59 check). That throws the ValueError for -15 before the combination logic runs.
+
+How to fix it (concrete steps)
+Option A — allow signed minutes (recommended if callers may pass negative minutes):
+1. Change the minutes validation to allow negative minutes in the range -59..59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Normalize sign consistency (prevent contradictory signs like hours=+2, minutes=-15):
+   - After validation, if hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes sign must match hours sign")
+   - If hours_offset < 0 and minutes_offset > 0: raise ValueError("Minutes sign must match hours sign")
+   - Or alternatively compute total_minutes = hours_offset * 60 + minutes_offset and use total_minutes (that implicitly handles signs).
+3. Replace the existing sign/combination block with a simple total:
+   total_minutes = hours_offset * 60 + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Option B — require minutes non‑negative and change caller (simpler if API contract is minutes >= 0):
+1. Keep the existing validation (minutes must be 0..59).
+2. Require callers to pass minutes as a positive magnitude and rely on hours_offset sign to indicate direction:
+   DateTimeZone.for_offset_hours_minutes(-2, 15) --> meaning -02:15
+3. Update documentation and tests accordingly.
+
+Example replacement (concise) for the method's relevant part (apply Option A):
+- Replace
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  and the subsequent combination logic
+- With
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    total_minutes = hours_offset * 60 + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+That change accepts (-2, -15) and computes offset = (-2*60) + (-15) = -135 minutes => "-02:15".
+
+Summary
+The code fails because it rejects negative minutes at the validation step, while the rest of the method expects a signed minute component. Fix by allowing signed minutes (with a sensible range) and computing total minutes directly, or change the API and callers to always pass non‑negative minutes.

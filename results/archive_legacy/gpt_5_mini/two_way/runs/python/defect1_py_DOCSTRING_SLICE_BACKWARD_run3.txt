@@ -1,0 +1,44 @@
+What failed
+- At lines 396–397 the code rejects any negative minutes:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The docstring explicitly allows negative minutes in some combinations (for example (0, -15) -> -00:15 and (-2, -15) -> -02:15). The current check prevents those valid inputs and will raise ValueError whenever minutes_offset is negative, even when the combination is permitted by the API.
+
+Why it fails (root cause)
+- The check enforces the magnitude and sign of minutes incorrectly. It treats negative minutes as always invalid, whereas the intended rules are:
+  - minutes magnitude must be between 0 and 59 (absolute value <= 59),
+  - the sign of the minutes must be consistent with the hours and the allowed combinations:
+    - hours > 0 and minutes < 0 is invalid (explicitly disallowed in the docstring),
+    - hours < 0 and minutes > 0 is allowed and should produce a negative offset (e.g. (-2, 15) -> -02:15),
+    - hours == 0 uses the sign of minutes (e.g. (0, -15) -> -00:15).
+- Because the code checks minutes_offset < 0 outright, valid negative-minute cases are rejected before any sign-consistency logic or total-offset magnitude checks run.
+
+Where to change it (concrete steps)
+1. Change the range check so it validates the absolute magnitude of minutes rather than forbidding negative minutes:
+   - Replace the current check with something like:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Enforce sign-consistency rules described in the docstring:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (disallowed combination).
+   - Other combinations (hours < 0 and minutes > 0, hours == 0 with minutes sign) are allowed.
+3. Compute the total offset properly (making sure (-2, 15) becomes negative 2h15m):
+   - Example approach: derive total_seconds by applying the hour sign to the minutes when hours != 0:
+     if hours_offset < 0:
+         total_seconds = hours_offset * 3600 - abs(minutes_offset) * 60
+     elif hours_offset > 0:
+         total_seconds = hours_offset * 3600 + abs(minutes_offset) * 60
+     else:  # hours == 0
+         total_seconds = (1 if minutes_offset >= 0 else -1) * abs(minutes_offset) * 60
+   - Then verify total_seconds magnitude does not exceed +/- 23*3600 + 59*60 + 59 (or whatever the required limit is).
+4. Keep the existing final magnitude check (raises if offset exceeds +/- 23:59:59.000).
+
+Minimal example patch (illustrative)
+- Replace lines 396–397 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Add after that:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Negative minutes are not allowed when hours_offset is positive")
+- Compute total_seconds as described and perform the existing overall-offset check.
+
+This will allow the valid negative-minute cases specified in the docstring (e.g. (0, -15), (-2, -15), (-2, 15)) while still rejecting the explicitly disallowed (2, -15).

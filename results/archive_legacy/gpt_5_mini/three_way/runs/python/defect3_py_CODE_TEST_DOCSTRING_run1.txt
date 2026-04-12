@@ -1,0 +1,54 @@
+What fails
+- The bug is in the block that runs when translate_codepoint(...) returns a positive value (the "consumed" branch).
+- The problematic lines are:
+
+    consumed = self.translate_codepoint(code_units, pos, out)        # (line assigning consumed)
+    ...
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))            # (line that advances pos)
+
+Why it fails (root cause)
+- There is a contract mismatch between what translate_codepoint(...) returns and how the code advances pos.
+  - translate_codepoint is expected to report how many codepoints it consumed (or the translator is handling code points, including surrogate pairs).
+  - The loop assumes "consumed" is a count of codepoints, and for each codepoint it calls code_point_at(code_units, pos) and then adds char_count(...) to pos.
+- This is fragile and incorrect when surrogate pairs are involved:
+  - A surrogate pair is two UTF-16 code units representing one codepoint.
+  - When a surrogate pair occurs, code_point_at(code_units, pos) looks at pos and the next code unit. If pos is the last index (or close to the end) and code_point_at reads beyond bounds while attempting to assemble a codepoint, you can get an IndexError (or otherwise incorrect indexing).
+  - The code both calls code_point_at(...) (which looks ahead) and then advances pos by the result of char_count(...). That interaction can make pos skip improperly or cause code_point_at to read past the array end when a surrogate pair is at/near the end.
+- Concretely: the loop increments pos inside its body while also using code_point_at(code_units, pos) which inspects the next code unit(s). That ordering and repeated look-ahead cause an out-of-range read when an emoji (surrogate pair) is followed by another character: the code_point_at call reads beyond the list boundary and raises IndexError.
+
+Where exactly it happens
+- The failure occurs in the for pt in range(consumed): ... loop and specifically at the expression code_point_at(code_units, pos). That call is made while pos is being changed inside the loop and may point at a surrogate half that requires looking at the next code unit, which isn't present (or was already consumed), causing the exception.
+
+How to reproduce quickly
+- Use an input with a surrogate pair followed by any other character (as your test does): input_seq = "\U0001F630A".
+- translate_codepoint returns consumed > 0 (it handled the surrogate pair), and the code_point_at(...) call inside the loop tries to read beyond the list and fails.
+
+Concrete fixes (steps you can take)
+Pick one consistent interpretation and implement it; two safe options:
+
+Option A — Have translate_codepoint return the number of UTF-16 code units it consumed
+1. Change translate_codepoint so it returns the number of UTF-16 code units consumed (1 for BMP codepoints, 2 for surrogate pairs).
+2. Replace the entire for-loop with:
+       pos += consumed
+   (No calls to code_point_at() or char_count() here.)
+3. This is simple and avoids any look-ahead reads. Confirm tests pass.
+
+Option B — Keep translate_codepoint returning number of codepoints, but advance correctly
+1. Keep translate_codepoint returning count of codepoints consumed.
+2. Replace the for-loop with a loop that reads each codepoint safely and advances only after reading it without looking beyond bounds. Example algorithm:
+   - For i in range(consumed):
+       cp = code_point_at(code_units, pos)          # safe because pos points to the start of a codepoint
+       pos += char_count(cp)
+   (Make sure code_point_at has bounds checks and does not read past end.)
+3. This requires ensuring code_point_at checks bounds and only reads a low surrogate if a high surrogate is present and there is a following code unit.
+
+Recommended (short)
+- The simplest, least error-prone change: have translate_codepoint return the number of UTF-16 code units consumed and then do pos += consumed. That removes the repeated look-ahead and fixes the IndexError with surrogate pairs.
+
+What to check after the fix
+- Run the provided unit tests (surrogate pair followed by a character, single surrogate pair, multiple surrogates, ASCII-only, empty).
+- Add a small debug/log immediately before advancing pos to confirm you never call code_point_at with pos == length-1 where a high surrogate would require a second unit.
+
+Summary in one sentence
+- The code advances pos by repeatedly calling code_point_at while modifying pos inside the loop; that combined with a mismatch about whether consumed counts codepoints or UTF-16 code units causes code_point_at to read past the end for surrogate pairs — fix by making consumed mean "UTF-16 code units" and do pos += consumed (or otherwise advance pos consistently and avoid look-ahead reads).

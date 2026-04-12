@@ -1,0 +1,58 @@
+What happened (root cause)
+- The failing assertion (Expected max_middle_index=1, got 3) shows the code picked the last item (index 3) as the max-middle item instead of the actual max-middle at index 1.
+- In TimePeriodValues._update_bounds the code computes each period's middle value and compares it to the stored max_middle. When it finds a new maximum it updates two things: max_middle and max_middle_index.
+- The bug is that the wrong index variable is written into max_middle_index. Instead of writing the current element's index (the variable that identifies the element being processed), the code writes some other index-like variable (for example a count/size variable or a different loop variable). That other variable has a value that corresponds to the end of the collection (or the current total count), so the method ends up storing 3 (the last index after 4 adds) instead of 1.
+
+Where it happens (what to look for)
+- Method: TimePeriodValues._update_bounds
+- Variables involved: max_middle, max_middle_index, middle (or mid), and the loop/index variables (commonly named i, index, idx, count, last_index, size, etc.).
+- The faulty line looks like:
+  max_middle_index = count   # or = size, = last_index, or some variable that is not the current loop index
+  instead of:
+  max_middle_index = index   # (the variable that refers to the current element)
+
+Why that produces the observed symptom
+- Suppose you add four periods. The mistaken variable holds 4 (or the size), which corresponds to index 3 after 0-based indexing, or the code runs such that the wrong variable equals the last index. Every time a new max_middle is detected the code assigns that wrong variable. Ultimately max_middle ends up correct but max_middle_index points to the wrong element (the last element seen), so get_max_middle_index() returns 3 instead of 1.
+
+How to reproduce/verify
+- The provided failing test is a minimal reproduction:
+  - Add periods with middles 50, 150, 25, 75 (indices 0..3). The max middle is 150 at index 1, but the broken code returns 3.
+- Add simple logging inside _update_bounds to print the index variable used to update max_middle_index to confirm it is not the active element index.
+
+Concrete fixes (step-by-step)
+1. Open hit04_timeperiod.py and find TimePeriodValues._update_bounds.
+2. Identify the loop that iterates the newly-added element(s). Find the variables used:
+   - the variable that holds the current element index (call it index or i)
+   - the variable used to write max_middle_index (currently wrong)
+3. Replace the wrong assignment with the current-element index. For example, change:
+   max_middle_index = count   # BUG
+   to:
+   max_middle_index = index  # FIX
+   or, if the code computes new_index = len(self._data) - 1 when adding a single element, use:
+   max_middle_index = new_index
+4. Make the same-kind check for min_middle_index, min_start_index, max_start_index, min_end_index, max_end_index — ensure each bound-index assignment uses the same "current element index" variable used when computing the metric.
+5. Run the provided tests.
+
+Suggested small patch example (conceptual)
+- If your loop is:
+    for i, period in enumerate(self._data):
+        middle = ...
+        if middle > max_middle:
+            max_middle = middle
+            max_middle_index = total_count  # <-- bad
+  change to:
+    for i, period in enumerate(self._data):
+        middle = ...
+        if middle > max_middle:
+            max_middle = middle
+            max_middle_index = i          # <-- correct
+
+Extra safeguard (optional)
+- Add an assertion right after updates to check index is within valid range:
+    assert 0 <= max_middle_index < len(self._data)
+- Add a unit test that inspects multiple update paths (the provided tests already do this).
+
+Why this explanation is definitive
+- The test description already says "wrong index variable is used for comparison." The symptom (always returning the last index or a value equal to the current size) matches exactly the behaviour when you assign a size/count variable instead of the current loop index. The fix is unambiguous: assign the index variable that corresponds to the element whose value you just compared.
+
+If you paste the _update_bounds method here I can point to the exact line and provide the precise one-line change.

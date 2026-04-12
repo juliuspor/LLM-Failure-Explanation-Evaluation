@@ -1,0 +1,37 @@
+What happened (where and why)
+- At the start of get_paint you correctly clamp the input value into v:
+  - Line: v = max(value, self._lower_bound)
+  - Line: v = min(v, self._upper_bound)
+- But the code that computes the gray level still uses value instead of the clamped v:
+  - Line: g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+Because value is used instead of v, an out-of-range input (for example value = -0.5) is not actually used for the interpolation. The un-clamped value produces a negative numerator / negative g which triggers the range check and raises ValueError. That is exactly why TestGrayPaintScale.test_lower_bound_clamping fails: value = -0.5 should be clamped to lower bound (v == self._lower_bound) and produce g == 0, but the code computes g from the original -0.5 and raises.
+
+Concrete reproduction
+- Call: gps.get_paint(-0.5)
+- After clamping: v == self._lower_bound (expected)
+- But computed: g = int(( -0.5 - lower_bound ) / ... * 255.0) -> negative -> triggers
+  if g < 0 or g > 255: raise ValueError(...)
+
+How to fix (explicit steps and exact lines to change)
+1. Use the clamped variable v when computing g:
+   Replace
+     g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+   with
+     g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+2. Guard against division by zero if lower and upper bounds are equal:
+   - Before computing g, check:
+       if self._upper_bound == self._lower_bound:
+           raise ValueError("lower_bound and upper_bound must differ")
+   (or handle it however your class contract requires)
+
+3. (Optional) Improve the error message to include the invalid value and channel name, e.g.:
+     raise ValueError(f"Color parameter out of range: g={g} (expected 0..255)")
+
+Why this will fix the tests
+- Using v ensures values below lower_bound and above upper_bound are actually clamped before the interpolation, so get_paint(-0.5) will compute g == 0 and return (0,0,0) instead of raising.
+- The division-by-zero guard prevents a crash if someone constructs GrayPaintScale with equal bounds.
+
+Summary
+The root cause is a simple variable mistake: the clamped value is stored in v but the interpolation uses the original value variable. Change value to v in the g calculation and add a check for upper==lower to fully fix the failure.

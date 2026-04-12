@@ -1,0 +1,49 @@
+What happened (root cause)
+- The code that computes the UTF-16 surrogate pair at lines 38–44 depends on two local names: code_units and index.
+- Those names are created inside to_utf16_code_units (line 10) but the surrogate-pair logic is shown in a separate slice. At runtime, when the surrogate-pair code runs, code_units and/or index are not defined in that scope, so the function fails with a NameError/UnboundLocalError (or, if index exists but code_units is a different variable, with incorrect behavior).
+- Concretely:
+  - Line 12 builds code_units (a local list inside to_utf16_code_units).
+  - Line 35 checks index, but there is no function signature shown that provides index to the block at 38–44. If index is not a parameter or local variable in the same function body, that check will itself fail or be meaningless.
+  - Lines 38–44 use code_units and index, but those names are not available there because they live in the other slice (the two slices were split and not composed correctly).
+
+Why that causes the failure
+- Python variables are looked up in the current function/local scope. Having code that assumes code_units and index exist while they exist only in another function body causes a runtime NameError/UnboundLocalError (or logical errors if a different variable shadows them).
+- The bounds check at line 35 only protects the rest of the code if index and code_units actually refer to the intended objects in the same scope; since they don’t, the check is ineffective.
+
+Where it occurs (exact lines)
+- code_units is created at line 12 (to_utf16_code_units).
+- index is checked at line 35.
+- The failing use happens at lines 38–44 (high = code_units[index], low = code_units[index + 1], and the surrogate-pair arithmetic).
+
+How to fix it (clear steps)
+Pick one of these definite fixes and implement it:
+
+1) Keep everything in one function (recommended)
+- Move the code at lines 35–44 into the body of to_utf16_code_units so code_units and index are in the same scope.
+- Ensure the function signature includes index (for example: def to_utf16_code_units(s: str, index: int) -> int: ), or if the function must produce the whole list, implement a separate function that accepts the list and index.
+
+2) Pass the necessary values explicitly
+- Create a function that computes the code point from UTF-16 code units and give it an explicit signature:
+  def code_point_from_units(code_units: List[int], index: int) -> int:
+      if index < 0 or index >= len(code_units):
+          raise IndexError(f"String index out of range: {index}")
+      high = code_units[index]
+      if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+          low = code_units[index + 1]
+          if 0xDC00 <= low <= 0xDFFF:
+              return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+      return high
+- Call it from to_utf16_code_units with the local code_units and the desired index.
+
+3) Return code_units and handle indexing outside
+- If to_utf16_code_units is intended to produce the list, let it return that list and do the index-based decoding elsewhere:
+  units = to_utf16_code_units(s)
+  cp = code_point_from_units(units, index)
+
+What to check after fixing
+- Verify that index is passed from call sites and is the value you expect.
+- Confirm code_units has the full list of UTF-16 code units (not UTF-32 code points) before you treat high/low as surrogates.
+- Add unit tests for edge cases: index at end of list (no low surrogate), negative index, valid surrogate pair, isolated surrogate code unit.
+
+Short summary
+The failure is caused by using code_units and index in a scope where they are not defined (the code was split across slices). Fix by colocating the code or passing code_units and index explicitly to the function that needs them.

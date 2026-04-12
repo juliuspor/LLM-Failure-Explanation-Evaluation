@@ -1,0 +1,51 @@
+What happened (where it fails)
+- Failure occurs in get_paint (definition starts at line 54). The code computes g at line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- If g is outside 0..255, line 75 raises a ValueError:
+  raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+
+Why it fails (root causes)
+1. Division-by-zero risk at line 71
+   - If self._upper_bound == self._lower_bound then (self._upper_bound - self._lower_bound) == 0 and the expression at line 71 raises ZeroDivisionError before you ever reach the check at line 74. This explains crashes when the instance was constructed with equal bounds.
+
+2. The error message at line 75 is useless/misleading
+   - The f-string is written as f"Color parameter outside of expected range: Red Green Blue" but does not include any variable interpolation. It does not show which value caused the problem, what the computed component(s) were, or what the configured bounds are. That leaves the developer guessing which of red/green/blue failed and what the actual numbers were.
+
+3. Single-component check and lack of validation before division
+   - The code only computes g at line 71 (no r, b shown in the slice) and then checks g at line 74. If red and blue are computed similarly elsewhere, the current check/message do not identify which component failed or the offending numeric values. There is no explicit validation of self._lower_bound/self._upper_bound in __init__ (lines 30–44), so invalid bounds can reach get_paint.
+
+Exact effects you will see
+- If upper_bound == lower_bound: ZeroDivisionError raised from line 71.
+- If value outside the bounds so g < 0 or g > 255: ValueError raised at line 75 with an unhelpful message "Color parameter outside of expected range: Red Green Blue" that gives no numeric context.
+
+How to fix it (step-by-step, with specific lines to change)
+1. Validate bounds in __init__ (lines 30–44)
+   - Add a check so upper > lower and raise ValueError with explicit values if not.
+   Example change around line 43–44:
+   if upper_bound <= lower_bound:
+       raise ValueError(f"upper_bound must be > lower_bound: got lower_bound={lower_bound}, upper_bound={upper_bound}")
+
+2. Avoid division by zero and provide useful error messages in get_paint (lines 54, 71–75)
+   - Before computing g at line 71, assert the denom is non-zero (or rely on __init__ validation as in step 1).
+   - When you check ranges at line 74–75, include the actual numbers in the exception so the caller knows what failed.
+   Replace lines 71–75 with something like:
+   denom = self._upper_bound - self._lower_bound
+   if denom == 0:
+       raise ValueError(f"Invalid bounds: lower_bound={self._lower_bound}, upper_bound={self._upper_bound}")
+   g = int((value - self._lower_bound) / denom * 255.0)
+   if g < 0 or g > 255:
+       raise ValueError(f"Green component out of range: value={value}, lower_bound={self._lower_bound}, upper_bound={self._upper_bound}, computed_g={g}")
+
+3. If you compute red/blue similarly, check each component separately and include their names and numeric values in any exception so the message is precise (e.g., "Red out of range: computed_r=..., expected 0..255").
+
+4. Optionally, clamp values instead of raising if that is acceptable:
+   - Instead of raising at line 74–75, do:
+     g = max(0, min(255, g))
+   - But only use clamping if it's correct behavior for your application.
+
+Summary of minimal concrete edits
+- Add bounds validation in __init__ (lines 30–44).
+- Before line 71 ensure denom != 0 (or rely on the __init__ check).
+- Replace the raise at line 75 with a message that includes variable names and values (e.g., value, lower_bound, upper_bound, computed_g).
+
+These changes remove the ZeroDivisionError cause, and make any ValueError informative so you can immediately see what failed and why.

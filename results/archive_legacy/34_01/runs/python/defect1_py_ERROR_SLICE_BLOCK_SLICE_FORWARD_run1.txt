@@ -1,0 +1,45 @@
+What happened (where it failed)
+- The code raised ValueError("Minutes out of range: -15") at lines 396–397:
+  - 396 |         if minutes_offset < 0 or minutes_offset > 59:
+  - 397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means minutes_offset held -15 when the range check ran.
+
+Why it happened (root cause)
+- The parser produced a negative minutes_offset (−15) before the range check. The range check expects minutes_offset to be a non‑negative minute value in the range 0..59, but minutes_offset already carried the sign (negative) from the input.
+- Later code (lines 402–405) treats minutes_offset together with hours_in_minutes to build the full offset in minutes:
+  - 402 |                 minutes_offset = hours_in_minutes - minutes_offset
+  - 404 |                 minutes_offset = hours_in_minutes + minutes_offset
+  - That shows the intended flow is to combine hours_in_minutes and minutes_offset to compute the signed total minutes. However the code checks the minutes value before it has been normalized/combined with the hour part.
+- In short: the check at lines 396–397 runs too early, against a signed minutes value. Because the parser keeps the sign on the minute component (e.g. parsing "-01:15" yields hours_in_minutes = -60 and minutes_offset = -15 or similar), the condition minutes_offset < 0 triggers and the code throws the exception instead of first combining/normalizing the parts.
+
+How to fix it (concrete steps)
+Pick one of these concrete fixes depending on how you want to handle parsing:
+
+Option A — validate absolute minutes (recommended if minutes string can carry sign)
+1. Change the range check to use the absolute value of minutes_offset. Replace lines 396–397 with:
+   if abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Keep the existing logic on lines 402/404 that merges minutes with hours. This accepts a signed minutes component but enforces it is within 0..59 magnitude.
+
+Option B — normalize minutes to non‑negative before checking
+1. Immediately after parsing minutes_offset from the input (the line where minutes_offset is set, earlier than 396), add:
+   minutes_offset = abs(minutes_offset)
+2. Keep the existing check at 396–397 (no change).
+3. Ensure the sign is applied only when combining with hours_in_minutes (on lines 402/404).
+
+Option C — move the range check after combination
+1. Remove the check at 396–397.
+2. After the code that computes the total minute offset (after line 404, where minutes_offset has been combined with hours_in_minutes), add:
+   if minutes_offset % 60 < 0 or minutes_offset % 60 > 59:  # or simpler: if abs(minutes_offset % 60) > 59
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   (or validate the absolute minute component extracted from the total)
+3. This ensures validation runs against the normalized signed total.
+
+Which to choose
+- If the input may contain a signed minute component (e.g. "-01:15") then Option A or B is simplest and least invasive: ensure the range check uses absolute minutes or normalize minutes to non‑negative before validating.
+- If you expect only unsigned minute components and a negative sign only applies to hours, instead ensure your parsing never attaches the sign to the minute part (make the parser set minutes_offset >= 0) and keep the original check.
+
+What to change in the code (exact lines)
+- Replace lines 396–397 with one of the changes in Option A, or modify the parsing just before line 396 to apply abs() to minutes_offset (Option B). If you choose Option C, remove lines 396–397 and add validation after line 404 where minutes_offset becomes the combined minute value.
+
+This is why you saw "Minutes out of range: -15": minutes_offset was negative at the time of the check because the sign was applied to the minute component before validation.

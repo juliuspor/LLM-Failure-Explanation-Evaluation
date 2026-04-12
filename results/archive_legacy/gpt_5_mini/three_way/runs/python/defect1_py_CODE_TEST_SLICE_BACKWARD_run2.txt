@@ -1,0 +1,74 @@
+What failed
+- The immediate failure comes from the minutes range check at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  This rejects negative minute values (e.g. -15), but your tests (and the intended behavior) use negative minutes like (0, -15) and (-2, -15). Because of that check the function raises ValueError early for many valid test cases.
+
+Why it happens (root cause)
+- The code enforces minutes to be between 0 and 59, but the intended range is -59..+59. The check uses minutes_offset < 0 rather than minutes_offset < -59, therefore any negative minutes are flagged as out of range and fail on entry (line numbers shown above).
+- There is an additional, separate logic bug in how the combined offset is computed:
+  - The code computes hours_in_minutes = hours_offset * 60, then reassigns minutes_offset using:
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+    This is confusing because it overwrites minutes_offset with a minutes total and mixes the roles of the two variables. It also produces wrong results for some sign combinations and makes the logic hard to reason about.
+
+Where it occurs
+- Validation failure: lines 396–397 (minutes validation) cause immediate ValueError for negative minutes.
+- Combination logic: the block starting with hours_in_minutes = hours_offset * 60 (a few lines later) incorrectly reuses minutes_offset and computes the total minutes in a confusing/wrong way.
+
+Concrete fixes (step-by-step)
+1) Fix the minutes range check (change lines 396–397)
+   - Replace
+       if minutes_offset < 0 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+     with
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   This allows negative minute values down to -59.
+
+2) Add the mixed-sign validation rule (to match intended behavior)
+   - If the design requires disallowing inputs where hours > 0 but minutes < 0 (your tests expect ValueError for (2, -15)), add:
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Month/minutes sign mismatch")  # use a suitable message
+     (Put this after the hours and minutes range checks.)
+
+   - If you also want to disallow hours < 0 and minutes > 0, skip this; your tests expect (-2, 15) to be valid, so only disallow the hours > 0 and minutes < 0 case.
+
+3) Compute the total offset in minutes without overwriting minutes_offset and without confusing signs
+   - Replace the existing combination code with explicit, clear logic. For example:
+
+       hours_in_minutes = hours_offset * 60
+       if hours_offset == 0:
+           total_minutes = minutes_offset
+       elif hours_offset > 0:
+           # hours positive, minutes must be >= 0 (we already validated)
+           total_minutes = hours_in_minutes + abs(minutes_offset)
+       else:
+           # hours negative: minutes may be positive or negative, both should increase magnitude
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+
+     Then convert to millis:
+
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   This keeps variables separate and makes the sign behavior explicit.
+
+Minimal alternative (compact)
+- A short, equivalent expression that covers sign logic once hours==0 is handled specially:
+
+      hours_in_minutes = hours_offset * 60
+      if hours_offset == 0:
+          total_minutes = minutes_offset
+      else:
+          sign = 1 if hours_offset > 0 else -1
+          total_minutes = hours_in_minutes + sign * abs(minutes_offset)
+
+- Then multiply total_minutes by MILLIS_PER_MINUTE.
+
+Summary
+- The test failures are caused first by the invalid minutes range check (rejecting any negative minutes). Fix that to allow -59..+59.
+- Also simplify and correct the offset calculation: don’t overwrite minutes_offset; compute total_minutes explicitly using abs(minutes_offset) and the sign of hours_offset (with special-case hours == 0). Add the intended mixed-sign validation (hours > 0 with minutes < 0 -> ValueError) to match test expectations.

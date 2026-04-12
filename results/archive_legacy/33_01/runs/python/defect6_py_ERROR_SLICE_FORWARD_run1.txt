@@ -1,0 +1,61 @@
+I can’t pinpoint the exact line and variable that produced 0 instead of -0.0 without seeing the code you ran. Please paste the minimal failing function (slice_forward), the test that fails, and the file/line numbers where the assertion is raised. That said, here is a precise, concrete explanation of the usual root cause, where to look, and step-by-step ways to confirm and fix it in Python (the shown traceback looks like Python's AssertionError):
+
+What happened (root cause)
+- The test expected a float value with a negative zero sign bit (literal -0.0). The function under test returned an integer 0 (or a float 0.0 with a positive sign bit). Python prints both as 0 or -0.0 depending on type and sign bit, but the test harness is doing a strict comparison that distinguishes -0.0 from 0 (for example by comparing bit patterns or using repr()).
+- Typical code paths that produce a positive 0 (or an integer 0) instead of negative zero:
+  - An arithmetic operation produced +0.0 where you expected -0.0 (e.g., subtracting two equal floats).
+  - An explicit conversion to int (int(x)) or rounding returned 0 (integer) instead of preserving a float -0.0.
+  - Using math.fabs, abs, or any sign-dropping operation that turns -0.0 into +0.0.
+  - Returning a sentinel 0 (integer) in an error/edge branch instead of returning the computed float.
+
+Where to look (concrete places to inspect)
+- The test file, the assertion line. Example: test_slice_forward.py line N -> assertEqual(expected, actual) or self.assertAlmostEqual(...). Note the exact assertion method; if it’s comparing repr() or bit patterns, that matters.
+- The slice_forward function body (the function you named in your message). Inspect:
+  - Any return statement(s): is it returning 0, 0.0, or a variable like result?
+  - Any branch that returns a literal 0 (common in early-exit/error branches).
+  - Calls to int(), round(), math.trunc(), or use of integer constants.
+  - Calls to abs(), math.fabs(), or operations that explicitly lose the sign bit.
+- Places where you assign or transform the computed value before return, e.g., result = some_expr; if result is later replaced or passed through int().
+
+Concrete steps to reproduce and confirm where the sign/ type was lost
+1) Re-run the failing test with a small change that prints types and bit patterns:
+   - Right before the return in slice_forward add (or temporarily log):
+     - print("slice_forward returning:", result, type(result))
+     - print("bits:", result.hex())  # for float -> shows sign bit as hex string
+   - Or use struct to inspect bit pattern:
+     - import struct
+     - print(struct.unpack('<Q', struct.pack('<d', result))[0])  # shows the 64-bit integer pattern
+   This will show whether you have int 0, float 0.0, or float -0.0.
+
+2) Search for int() or explicit 0 returns:
+   - grep for "return 0" or "return 0," or "int(" in slice_forward and its helper functions.
+   - If you see return 0 in an edge branch, change it to return -0.0 or preserve the original float type.
+
+3) If the value is computed then normalized by code like result = abs(result) or result = math.fabs(result):
+   - That will drop the negative sign on -0.0. Replace such calls or special-case the -0.0 need.
+
+4) If a conversion to int was done to test for zero, prefer checking sign without converting:
+   - Instead of if int(x) == 0: do if x == 0.0: then preserve sign if needed.
+
+Exact fixes (pick the one matching what you find)
+- If you inadvertently returned an integer 0:
+  - Change that return to a float preserving sign: return -0.0 (or return float_variable).
+  - Example: replace "return 0" with "return -0.0" (but only if you intended negative zero).
+- If a conversion to int dropped the sign:
+  - Stop converting to int. Use float operations and preserve result as float.
+  - If you must convert for other logic, keep a float copy for return: saved = result_float; int_val = int(result_float); ...; return saved
+- If you used abs() or math.fabs():
+  - Remove that call if you need to preserve sign-bit for zero.
+  - To force a negative zero when appropriate, use math.copysign(0.0, -1.0) or math.copysign(-0.0, x) as needed.
+    - Example: return math.copysign(0.0, -1.0)  # yields -0.0
+- If equality in the test is bitwise-sensitive:
+  - Make sure the function returns a float, not an int, and that the float has the expected sign bit.
+  - Alternatively change the test to compare numerically if sign of zero is irrelevant.
+
+How to validate after the fix
+- Re-run the failing test and print the returned value’s repr() and bit pattern:
+  - repr(-0.0) -> "-0.0"
+  - struct.pack/unpack should show the sign bit set (most significant bit 1).
+- Confirm the test no longer raises AssertionError.
+
+If you paste the exact slice_forward function and the test assertion (the file and line number shown in the traceback), I’ll point to the exact line to change and provide the minimal patch (with the exact replacement line) so you can fix it immediately.

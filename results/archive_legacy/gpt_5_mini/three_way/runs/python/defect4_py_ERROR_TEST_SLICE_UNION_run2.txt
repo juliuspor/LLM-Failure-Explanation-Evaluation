@@ -1,0 +1,34 @@
+What happened (root cause)
+- The failure (Expected max_middle_index=1, got 3) is caused by _update_bounds assigning the current loop index to the "best" index unconditionally, so the "best" index always ends up as the last item (index 3 in your test).
+- You can see the exact same pattern in the slice you provided for min_start_index: in _update_bounds there is an if that compares the new start to the stored min_start and sets self._min_start_index = index when it is smaller (line ~346), but then there is another unconditional assignment immediately after (line 349). That unconditional assignment overwrites the value even when the new item was not the new minimum.
+- The max_middle_index bug is the same error but for the middle-value case: the code either uses the wrong variable in the comparison or, more commonly, assigns self._max_middle_index = index outside the conditional that checks whether the new middle is larger. As a result, every call to _update_bounds ends with _max_middle_index equal to the most recently processed index (3 in your test), not the index that actually had the largest middle (1).
+
+Where it occurred
+- Method: TimePeriodValues._update_bounds
+- Variables involved: self._max_middle_index (and analogously self._min_start_index in the snippet), the loop-local index variable index, and the compared value (max_middle or min_start).
+- Exact lines visible in your slice show the problematic pattern for start: lines ~340–349:
+  - line 346: if start < min_start: self._min_start_index = index
+  - line 349: self._min_start_index = index  <-- unconditional overwrite
+- The max_middle_index code uses the same structure elsewhere in _update_bounds (not shown in your slice), and that is where the test fails.
+
+Why that produces the failing output
+- For your test the true maximum middle is at index 1 (middle 150). But because _update_bounds ends by unconditionally setting _max_middle_index to index for the last item processed (index 3), get_max_middle_index() returns 3 instead of 1.
+
+Concrete steps to fix
+1. Open TimePeriodValues._update_bounds.
+2. Find the block that updates the "max middle" index. It will look like:
+   - compute middle for the current period
+   - retrieve stored max_middle from the item at self._max_middle_index (if >= 0)
+   - compare: if middle > max_middle: self._max_middle_index = index
+   - But there will be an unconditional self._max_middle_index = index after that (or the comparison uses the wrong variable).
+3. Remove the unconditional assignment. Ensure assignment happens only inside the branch that proves the current item is the new best:
+   - If self._max_middle_index < 0: set self._max_middle_index = index (initialization)
+   - Else if middle > max_middle: set self._max_middle_index = index
+   - Do not assign self._max_middle_index = index anywhere else.
+4. Apply the same corrected pattern to the other bounds code (min_start_index, max_start_index, min_end_index, max_end_index, min_middle_index) if they have the same problem.
+5. Add / run tests: your provided unit tests (and add a case that appends items after the known maximum to ensure the index does not change to the last item).
+
+Why this fix is safe and sufficient
+- The bug was not a math error in computing mids or starts, it was a control flow error that overwrote the stored "best index" regardless of comparison. Restricting the assignment to the correct branch preserves the intended semantics: store the index only when the new value is strictly better (or initialize when no previous index exists).
+
+If you want, paste the _update_bounds method here and I will show the minimal patch (exact lines changed).

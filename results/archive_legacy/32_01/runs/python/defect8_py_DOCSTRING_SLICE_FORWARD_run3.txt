@@ -1,0 +1,56 @@
+What happened (where): In the to_locale method the code that builds the Locale is returning or slicing country/variant without first verifying the underscore at index 2. The relevant lines are shown in your slice:
+
+- Line 248: return Locale(locale_str[0:2], locale_str[3:5])
+- Line 250: if locale_str[5] != '_':
+- Line 252: return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why it fails (root cause):
+
+1. Missing check for the separator at index 2:
+   - The code slices locale_str[3:5] for the country without checking that locale_str[2] == '_'. That allows malformed inputs like "enGB" (no underscore) to be accepted and mis-parsed as language="en", country="GB", or produce an incorrect result for other malformed inputs. The method promises to validate "The separator must be an underscore" but does not enforce it before slicing.
+
+2. Fragile branching / wrong order of validations:
+   - The code returns at line 248 without first confirming the format that led to that return. Depending on the preceding length/branch logic (not shown), you can either accept invalid strings silently or hit index accesses later that raise exceptions. For example, if execution reaches the branch that checks locale_str[5] (line 250) for a too-short input, you'll get an IndexError. The code must check lengths and separator positions in a defined order before slicing.
+
+3. Mismatch between stated strict validation and actual checks:
+   - The docstring says language must be lowercase, country uppercase, and separator underscores. The lines shown never validate character case and do not consistently validate underscore positions before slicing.
+
+Concrete consequences you'll see:
+- Invalid input strings without the underscore at the expected position may be parsed into wrong Locale objects instead of raising ValueError.
+- Inputs shorter than expected can cause IndexError when code checks locale_str[5] without ensuring length >= 6.
+- The function can violate its own documented strict validation rules.
+
+How to fix it (step-by-step):
+
+1. Validate length first, explicitly branch on allowed lengths:
+   - If locale_str is None: return None
+   - If len == 2: handle language-only
+   - If len == 5: handle language + country
+   - If len > 5: handle language + country + variant
+   - Otherwise raise ValueError("Invalid locale format: ...")
+
+2. For each branch, validate separator positions before slicing:
+   - For len == 5: require locale_str[2] == '_' and validate cases of language and country.
+   - For len > 5: require locale_str[2] == '_' and locale_str[5] == '_' (if you require two underscores for variant form), or use the exact format your docstring defines.
+
+3. Validate character cases explicitly:
+   - Check locale_str[0:2].islower() and locale_str[3:5].isupper(), and raise ValueError if not.
+
+4. Only after all checks do the slicing and return the Locale object.
+
+Example of the checks to add (pseudocode):
+- if len(locale_str) == 2:
+    validate language case
+    return Locale(lang, "")
+- if len(locale_str) == 5:
+    if locale_str[2] != '_': raise ValueError
+    validate cases
+    return Locale(lang, country)
+- if len(locale_str) > 5:
+    if locale_str[2] != '_' or locale_str[5] != '_': raise ValueError
+    validate cases
+    return Locale(lang, country, variant)
+
+Referencing method/lines: to_locale must add the separator checks before the slice that happens at line 248, and must check bounds before the access at line 250 to avoid IndexError.
+
+This explains where (lines 248, 250, 252), why (missing underscore and length checks), and how to fix (validate lengths and separator positions then slice).

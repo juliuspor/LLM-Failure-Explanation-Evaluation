@@ -1,0 +1,44 @@
+What happened (where, what variable, and why)
+- Location: in the factory method that builds a DateTimeZone from hours_offset and minutes_offset. The failing check is on lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Variables: minutes_offset (and implicitly hours_offset).
+- Root cause: the code rejects any negative minutes_offset (minutes_offset < 0) outright. The docstring explicitly allows negative minute values in some cases (for example (0, -15) -> -00:15 and (-2, -15) -> -02:15). The current code therefore incorrectly raises ValueError for valid inputs like minutes_offset = -15.
+
+Why this is wrong (short, concrete)
+- The check treats negative minutes as always invalid, but the API permits minutes in -59..+59 depending on hours sign. The condition should validate magnitude (abs(minutes) <= 59) and enforce sign rules relative to hours_offset instead of banning negatives unconditionally.
+
+Exact fixes (minimal, concrete changes with code)
+1. Replace the range check to allow negative minutes within magnitude 59:
+   Replace lines 396–397 with:
+   if abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Add an explicit sign-combination check to disallow minutes negative when hours positive (per docstring):
+   Immediately after the new range check add:
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Minutes must not be negative when hours_offset is positive")
+
+3. (Optional but recommended) Keep or add the combined offset bound check that the docstring mentions, e.g. ensure resulting total seconds does not exceed +/- 23:59:59.000:
+   total_seconds = hours_offset * 3600 + minutes_offset * 60
+   if total_seconds > 23 * 3600 + 59 * 60 + 59 or total_seconds < -(23 * 3600 + 59 * 60 + 59):
+       raise ValueError("Resulting offset exceeds maximum allowed +/- 23:59:59.000")
+
+Why these changes fix it
+- abs(minutes_offset) > 59 enforces the magnitude rule (minutes must be between -59 and +59).
+- the hours_offset > 0 and minutes_offset < 0 check enforces the disallowed combination (positive hours with negative minutes) described in the docstring.
+- the total_seconds check enforces the overall range noted in the Raises section of the docstring.
+
+Tests to add or update
+- Valid cases to assert no error:
+  - (2, 15) -> allowed
+  - (2, 0) -> allowed
+  - (0, -15) -> allowed
+  - (-2, 15) -> allowed
+  - (-2, -15) -> allowed
+- Invalid cases to assert ValueError:
+  - (2, -15) -> must raise (positive hours with negative minutes)
+  - minutes outside magnitude 59, e.g. (0, 60) or (0, -60)
+  - offsets exceeding +/- 23:59:59.000, e.g. (24, 0) or (-24, 0)
+
+Summary
+- The failure is caused by the overly strict check on minutes_offset (lines 396–397) that forbids any negative minutes, contradicting the docstring. Change the check to use abs(minutes_offset) and add a specific rule forbidding negative minutes only when hours_offset is positive. Add/keep the combined-offset bound check.

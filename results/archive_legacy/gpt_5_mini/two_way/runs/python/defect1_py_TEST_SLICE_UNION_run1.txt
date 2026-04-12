@@ -1,0 +1,56 @@
+What happened (root cause)
+- The failure comes from DateTimeZone.for_offset_hours_minutes rejecting negative minute inputs at the range check on line 396:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- That check treats any negative minutes as out of range. But your tests (and the docstring you referenced) expect minutes in the allowed range -59..+59, and the method should accept negative minutes for offsets like (0, -15) and (-2, -15).
+- Because the code raises at line 396, calls such as DateTimeZone.for_offset_hours_minutes(0, -15) or DateTimeZone.for_offset_hours_minutes(-2, -15) fail immediately with ValueError. That is the direct cause of the test failures.
+
+Where the rest of the logic shows a second issue
+- Later code (lines 402–405) attempts to combine hours and minutes, but the earlier rejection prevents that code from handling negative minutes:
+  - Lines 402/404: minutes_offset = hours_in_minutes - minutes_offset or + minutes_offset
+  - Line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because negative minutes never get past the range check, the "combine hours and minutes" logic never gets a chance to run for negative-minute cases. That makes the behavior inconsistent with your tests/docstring.
+
+What happened to specific tests
+- test_zero_hours_negative_minutes (0, -15) hits the check at line 396 and raises ValueError, but the test expects a valid zone with id "-00:15".
+- test_negative_hours_negative_minutes (-2, -15) similarly raises at line 396, but the test expects a total offset of -(2h + 15m) and id "-02:15".
+- Any other cases that rely on minutes being negative (or on mixed sign handling per the docstring) are blocked by the same check.
+
+How to fix it (step-by-step, exact changes to make)
+1. Change the minutes range check so it allows negative minutes in -59..+59 instead of rejecting any negative value. Replace the check on line 396:
+   - Current: if minutes_offset < 0 or minutes_offset > 59:
+   - Replace with: if minutes_offset < -59 or minutes_offset > 59:
+   This will allow negative minutes through so they can be combined with hours.
+
+2. Implement explicit combination rules (replace or clarify the code at lines 402–405). Use clear, sign-aware arithmetic to compute total minutes. For example:
+   - Validate that mixed-sign combinations that should be invalid are rejected (e.g. +hours with -minutes if your API requires that).
+   - Otherwise compute total_minutes as:
+     - If hours >= 0 and minutes >= 0: total_minutes = hours * 60 + minutes
+     - If hours >= 0 and minutes < 0: (decide behavior — many APIs raise ValueError here)
+     - If hours < 0 and minutes >= 0: total_minutes = hours * 60 - minutes
+     - If hours < 0 and minutes < 0: total_minutes = hours * 60 - abs(minutes)  (equivalent to hours*60 - (-minutes))
+   - Then compute offset_millis = total_minutes * DateTimeConstants.MILLIS_PER_MINUTE (use FieldUtils.safe_multiply as the original code does).
+
+3. Keep the rest of the bounds checks already present (lines 407–408) to prevent offsets that are too large.
+
+Consolidated code sketch (replace the block around lines 396–405)
+- Validate minutes in range -59..59:
+  if minutes < -59 or minutes > 59:
+      raise ValueError(f"Minutes out of range: {minutes}")
+- Then combine with hours explicitly (pseudocode):
+  if hours > 23 or hours < -23:
+      raise ValueError(...)
+  if hours >= 0 and minutes < 0:
+      # if you want to treat +hours with -minutes as invalid:
+      raise ValueError("Mixed sign not allowed")
+  if hours >= 0:
+      total_minutes = hours * 60 + minutes
+  else:
+      # hours < 0: minutes increase magnitude regardless of sign
+      total_minutes = hours * 60 - abs(minutes)
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why these steps fix the failures
+- Allowing negative minutes past the range check means (0, -15) and (-2, -15) reach the combination logic instead of being rejected at line 396.
+- Explicit combination logic ensures the result matches the expected signs and magnitude: (-2, -15) becomes -(2*60 + 15) minutes, producing the expected -02:15 and correct offset in milliseconds.
+
+If you want, I can produce a concrete patch for the function showing exact lines to replace.

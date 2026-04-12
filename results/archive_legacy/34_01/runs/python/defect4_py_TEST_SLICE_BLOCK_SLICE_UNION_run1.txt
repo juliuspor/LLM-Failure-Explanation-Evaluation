@@ -1,0 +1,48 @@
+What happened
+- The test constructs a TimePeriodValues instance and adds four periods in this order:
+  1. SimpleTimePeriod(0,100) -> value 1.0
+  2. SimpleTimePeriod(100,200) -> value 2.0
+  3. SimpleTimePeriod(0,50) -> value 3.0
+  4. SimpleTimePeriod(50,100) -> value 4.0
+- The test expects get_max_middle_index() to return 1 (the period with middle 150 ms), but the code returns a wrong index (or raises) because the stored index in _max_middle_index is stale or wrong after some adds.
+
+Why it failed (root cause)
+- The getter get_max_middle_index (lines shown 449–451) simply returns the stored attribute self._max_middle_index. It does not recompute anything:
+  - 449 def get_max_middle_index(self) -> int:
+  - 450     """Returns the index of the time period with the maximum middle milliseconds."""
+  - 451     return self._max_middle_index
+- The class keeps the index of the item with the maximum middle in the variable _max_middle_index. That approach is fragile because adding items can change other items' indices.
+- In this test you inserted new items after the first two adds. The code that handles adding (the add/insert implementation) does not update _max_middle_index when an insertion shifts indices of existing entries.
+  - Example failure mode: Suppose the max-middle item was at index 1. You insert a new item at index 1 (or before index 1). The existing max item moves to index 2, but _max_middle_index remains 1. get_max_middle_index then returns 1 (wrong).
+- In short: _max_middle_index is stored as an index and is not adjusted whenever the underlying items list is mutated (insert/remove). The getter only returns the stored index and never recomputes, so it can be stale.
+
+Where it occurred (specific variables/methods/lines)
+- Variable: self._max_middle_index (the stored index of the maximum-middle period)
+- Method: get_max_middle_index (lines 449–451) — this only returns the stored index and does no validation/recomputation.
+- Operation causing the issue: add()/insert() calls that change the ordering/indices of the internal list but do not update self._max_middle_index accordingly.
+
+Concrete fixes (step-by-step)
+Pick one of these two safe approaches:
+
+Option A — adjust index on mutation (cheap, minimal change)
+1. In the add/insert method, determine the insertion index pos.
+2. If self._max_middle_index is not None and pos <= self._max_middle_index:
+     self._max_middle_index += 1
+   This preserves the correct index after insertion before or at the stored one.
+3. For removals, if removed_index < self._max_middle_index: decrement by 1; if removed_index == self._max_middle_index: recompute (see step 4).
+4. When you insert a new item, also compare the new item’s middle to the current max item’s middle and update _max_middle_index if the new one is larger.
+5. Ensure _max_middle_index is initialized (None or -1) when the series is empty, and handled consistently.
+
+Option B — recompute on demand (safer, small performance cost)
+1. Replace get_max_middle_index to recompute index each call:
+     if not self._items: return -1 or raise
+     return max(range(len(self._items)), key=lambda i: self._items[i].get_middle_millis())
+   (Or implement equivalent loop to find the index with the largest middle.)
+2. Remove any code that attempts to keep _max_middle_index in sync; or keep it as a cached value but invalidate it on any mutation and recompute when next requested.
+
+Which to choose
+- If adds/removes are frequent and performance is critical, use Option A with careful bookkeeping.
+- If correctness and simplicity matter more than tiny performance, use Option B: recompute on demand or invalidate cache on each mutation and recompute lazily.
+
+One-line summary
+The code stores the maximum-middle item as an index in self._max_middle_index but never updates that index when you insert or remove items, so get_max_middle_index (lines 449–451) returns a stale/wrong index. Fix by updating the stored index on mutations or by recomputing the max index when requested.

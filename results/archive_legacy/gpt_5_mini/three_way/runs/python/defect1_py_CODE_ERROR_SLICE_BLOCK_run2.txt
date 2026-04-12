@@ -1,0 +1,43 @@
+What happened (where it failed)
+- The ValueError was raised at lines 396–397:
+  ```
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+  ```
+  The test passed minutes_offset == -15 and the code rejected it immediately with "Minutes out of range: -15".
+
+Why this is wrong (root cause)
+- The method intends to build a single total offset in minutes from hours_offset and minutes_offset. For negative hour offsets the minutes part is supposed to be subtracted (e.g. -1 hour and 15 minutes -> -75 minutes), so it is legitimate for the minutes parameter to be thought of as positive 15 but combined into a negative total when hours_offset < 0.
+- But the code validates minutes_offset for being in [0, 59] before it applies the sign of hours_offset (the sign is applied later at lines where minutes_offset is reassigned):
+  ```
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  ```
+  Because validation happens earlier, any input with a negative minutes_offset (for example tests that pass -15 to indicate negative 15 minutes together with a negative hour) is rejected immediately. In short: the sign normalization is done after validation, so valid combinations are being rejected.
+
+How to fix it (concrete steps)
+Option A — accept a signed minutes param and validate its absolute range:
+1. Change the minutes validation to allow a negative minutes_offset when hours_offset is negative, or simply validate abs(minutes_offset) in [0,59]. Example rule:
+   - require 0 <= abs(minutes_offset) <= 59
+   - if hours_offset < 0 and minutes_offset > 0: treat minutes as negative when combining, or require the caller to pass signed minutes consistently.
+2. Implement by replacing the current check at lines 396–397 with:
+   ```
+   if abs(minutes_offset) < 0 or abs(minutes_offset) > 59:
+       raise ValueError(...)
+   ```
+   (More simply: if not (0 <= abs(minutes_offset) <= 59) raise.)
+3. Then when combining, use the sign of hours_in_minutes to compute total minutes correctly.
+
+Option B — normalize minutes after combination (preferred when API expects minutes as 0..59 always):
+1. Remove the early check of negative minutes entirely.
+2. Require callers to pass minutes_offset in 0..59 always. If minutes can be negative in your API, skip this option.
+3. Or, move the validation to after you compute the combined minutes value (the variable named minutes_offset is reused to hold total minutes), i.e. validate that the original minutes argument is in 0..59 OR that the final combined minutes are within allowable total-range constraints (depending on API intent).
+
+Concrete minimal code fix (example, keeps API where minutes param is 0..59 and sign comes from hours):
+- Move the minutes range check to use the original minutes value (rename parameter to minutes_part to avoid confusion) and validate 0..59; then when combining negate minutes only if hours_in_minutes < 0.
+
+Summary
+- The code validates minutes_offset before it applies the sign determined by hours_offset, so a test that supplies a negative minutes value (e.g. -15) is rejected even though the intended combination (with a negative hour) would be valid. Fix by validating the absolute minutes or by normalizing/combining before validating, depending on which calling convention you want.

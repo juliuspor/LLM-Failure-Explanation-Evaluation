@@ -1,0 +1,51 @@
+What happened
+- The function declared at line 10 is named and typed to return a list of UTF‑16 code units: def to_utf16_code_units(s: str) -> List[int]: (line 10).
+- Instead of producing a list, the body uses an undefined variable index and code that selects and returns a single code point for a given index (lines 35–44):
+  - It checks index bounds (lines 35–36).
+  - It reads a single "high" code unit and optionally the next "low" unit, and returns a combined code point (lines 38–44).
+- In short: the implementation is for "code point at index" (single-value logic) but the function signature and the caller expect "list of UTF‑16 code units".
+
+Why the test fails (root cause)
+- translate_string calls to_utf16_code_units expecting a List[int] of UTF‑16 code units for the whole string. Because to_utf16_code_units instead returns a single integer (or raises because index is undefined), translate_string operates on the wrong data shape and produces an incorrect result for the input '\U0001F630' (the emoji).
+- Concretely, the surrogate-pair-handling code (lines 38–44) returns a 32-bit code point when it finds a high/low pair, rather than returning two 16-bit code units in a list. That breaks downstream logic that assumes a list of 16‑bit units, so result != '\U0001F630'.
+
+Where it occurs
+- Function header: line 10.
+- Wrong logic / index checks: lines 35–36.
+- Reading code units and combining a surrogate pair into a single value: lines 38–44.
+- Caller (translate_string) fails because it expects the output shape from to_utf16_code_units.
+
+How to fix it (clear step-by-step)
+Choose one of these two correct implementations for to_utf16_code_units, and replace the existing function body with it.
+
+Option A — correct algorithm in Python (manual surrogate pairs)
+1. Remove the index-based logic (lines 35–44).
+2. Implement:
+
+   - Initialize code_units = [].
+   - For each code point cp = ord(ch) in the input string s:
+     - If cp <= 0xFFFF: append cp to code_units.
+     - Else: compute cp -= 0x10000; high = 0xD800 + (cp >> 10); low = 0xDC00 + (cp & 0x3FF); append high then low.
+   - Return code_units.
+
+This yields a List[int] of UTF‑16 code units. Use this if you want explicit 16-bit units regardless of Python build.
+
+Option B — use bytes encode and unpack (simpler, robust)
+1. Remove the index-based logic (lines 35–44).
+2. Implement:
+
+   - bs = s.encode('utf-16-le')  # little-endian without BOM
+   - code_units = [bs[i] | (bs[i+1] << 8) for i in range(0, len(bs), 2)]
+   - return code_units
+
+This directly returns 16-bit units and is less error-prone.
+
+Example replacement (Option B):
+- Replace body of to_utf16_code_units with the encode/unpack approach and return the list.
+
+Why these fixes work
+- They return the correct data shape: a List[int] where each int is a 16‑bit UTF‑16 code unit.
+- They handle supplementary characters (like U+1F630) by producing the two surrogate code units, so later code that expects that list will correctly reconstruct or process the original character and translate_string will return '\U0001F630' as expected.
+
+Summary
+The function body is the wrong implementation: it treats an index and returns a single combined code point (lines 35–44) instead of returning a list of UTF‑16 code units (line 10). Replace the body with one of the two provided implementations so to_utf16_code_units returns List[int] and the test will pass.

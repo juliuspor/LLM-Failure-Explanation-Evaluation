@@ -1,0 +1,32 @@
+What happened (where): The failure was raised inside to_locale(cls, locale_str: str) — see the method header at line 188. The code reads locale_str into length (line 222) and then later reads characters at fixed indexes ch3 = locale_str[3] and ch4 = locale_str[4] (lines 237–238). The ValueError("Invalid locale format: fr__POSIX") is raised at line 240 when those characters do not fall between 'A' and 'Z'.
+
+Why it happened (root cause):
+- The input string is "fr__POSIX".
+  - Index positions: 0='f', 1='r', 2='_', 3='_', 4='P', ...
+- The code is expecting a two-letter language followed by an underscore and a two-letter country code (e.g. "fr_FR"). That expectation is enforced by the test at lines 237–240 which requires ch3 and ch4 to be uppercase A–Z.
+- "fr__POSIX" uses an empty country code and a variant after a double underscore (language + empty country + variant). At index 3 you have '_' (underscore), not an uppercase letter, so the check ch3 < 'A' or ch3 > 'Z' is true and the code raises the ValueError. In short: the parser does not accept the empty-country + variant form ("fr__POSIX") and treats the underscore at index 3 as an invalid country letter.
+
+Concrete fixes (step-by-step):
+1. Decide the accepted forms you want to support:
+   - language only: "fr"
+   - language + country: "fr_FR"
+   - language + empty country + variant: "fr__POSIX" (this is the form you are encountering)
+   - language + country + variant: "fr_FR_POSIX"
+2. Update the parsing logic to check lengths and characters before indexing:
+   - Before reading locale_str[3] and locale_str[4], ensure length >= 5 (or otherwise verify those positions exist).
+   - Do not assume a country is always present; explicitly detect the double-underscore case.
+3. Implement explicit branches:
+   - If locale_str contains "__" at positions 2–3, treat country as empty and parse variant = locale_str[4:].
+   - Else if there is a single '_' at position 2, validate that positions 3–4 are uppercase A–Z (country) and optional variant follows an underscore.
+4. Replace the single character-range check with a small routine that accepts underscores for missing country and only enforces A–Z when a country is present. For example:
+   - if locale_str.startswith(('??'_placeholder)): (example logic)
+   - Or use a regex to validate and capture groups, e.g. ^([a-z]{2})(?:_([A-Z]{2}))?(?:_([A-Za-z0-9]+))?$ and handle the empty-country case separately (detect "__").
+5. Add a unit test for "fr__POSIX" and other edge cases ("fr", "fr_FR", "fr_FR_POSIX") to prevent regressions.
+
+Minimal example of the specific code change:
+- Before accessing ch3/ch4, check:
+  - if length >= 5 and locale_str[2] == '_' and locale_str[3] != '_' then validate ch3/ch4 are A–Z (country present).
+  - elif length >= 4 and locale_str[2:4] == '__' then treat country = "" and variant = locale_str[4:].
+  - else handle language-only or other valid shapes.
+
+Summary: The parser assumed a two-letter country at indices 3–4 and rejected an underscore there. The input "fr__POSIX" has an empty country (double underscore) and a variant; the code must explicitly detect and accept that form (and avoid unguarded indexing) to fix the ValueError.

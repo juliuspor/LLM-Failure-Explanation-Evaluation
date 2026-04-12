@@ -1,0 +1,58 @@
+What happened (root cause)
+- On line "if array is not None: inferred_type = type(array)" you take the Python type of the list object itself (which is list) instead of the element/component type. That is the wrong thing to inspect when you want the list's element type.
+- Separately, when both array and element are None you set "inferred_type = object". Later, the code unconditionally raises a TypeError when inferred_type == object and expected_type != object (the raise is in the block starting with "if expected_type is not None: ... raise TypeError"). That makes the function fail whenever the inputs give you an object-typed result but the caller provided an expected element type (for example expected_type=str).
+
+How that produced the observed error
+- In your failing call: array was None and element was None (or otherwise you ended up with inferred_type == object). expected_type was str.
+- _copy_list_grow1 returned a new list whose component type is treated as object.
+- Because inferred_type == object and expected_type != object, the code executes the raise and you get:
+  TypeError: Cannot cast object list to str list (ClassCastException: ...)
+
+Why this is wrong / surprising
+- The code's docstring promises that when element is None the return type is List[object]. Raising a TypeError when the caller explicitly set expected_type to str violates that expectation — especially because the function never tried to use expected_type to construct or coerce the new list.
+- The first bug (using type(array)) also prevents correctly inferring element/component type when array is non-empty: you should be inspecting an element's type, not the list object's type.
+
+Exact lines to fix
+1) Wrong inference:
+   - Current: inferred_type = type(array)
+   - Should instead examine the component type inside the array, e.g.:
+     - if array is not None and len(array) > 0: inferred_type = type(array[0])
+     - elif element is not None: inferred_type = type(element)
+     - else: inferred_type = object
+
+   This fixes wrong inference when array is provided.
+
+2) Wrong error condition:
+   - Current raise block:
+     if expected_type is not None:
+         if inferred_type == object and expected_type != object:
+             raise TypeError(...)
+   - Problems:
+     - It unconditionally rejects a request for an expected_type when only information available is "object".
+     - It does not consider whether element is None or whether expected_type could be used to construct the new list.
+   - Fix options (pick one depending on intended semantics):
+     a) Allow expected_type to set the component type when both array and element are None:
+        if inferred_type == object and element is None and expected_type is not None:
+            inferred_type = expected_type
+        # then create list with inferred_type and do not raise
+
+     b) Or only raise when you actually cannot produce a list of expected_type given the inputs (for example when array is non-empty and some element cannot be cast to expected_type). That requires checking elements:
+        if expected_type is not None:
+            for v in (array or []):
+                if v is not None and not isinstance(v, expected_type):
+                    raise TypeError(...)
+            # accept None elements as compatible with expected_type
+
+Suggested minimal fix (code outline)
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        # no info from inputs; if expected_type provided, use it as the inferred type
+        inferred_type = expected_type if expected_type is not None else object
+
+    # then optionally validate existing elements vs expected_type, but do not blindly raise just because inferred_type == object
+
+Summary
+- The code fails because it infers the wrong type from the list object instead of its elements and because it unconditionally raises when it detects "object" as the inferred type while an expected_type was supplied. Fix the type inference (use array[0] or inspect elements) and change the error logic so expected_type is used to choose or validate the component type rather than always raising.

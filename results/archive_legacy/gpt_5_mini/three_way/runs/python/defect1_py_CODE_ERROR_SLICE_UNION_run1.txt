@@ -1,0 +1,54 @@
+What happened (where it failed)
+- The code raises ValueError at line 396: the check
+  if minutes_offset < 0 or minutes_offset > 59:
+    raise ValueError(f"Minutes out of range: {minutes_offset}")
+  is rejecting a negative minutes_offset (the error shows -15). That exception is thrown before any combination with hours is done.
+
+Why it failed (root cause)
+- The validation at line 396 forbids negative minute values unconditionally. But the code later at lines 402–405 expects to combine hours and minutes with a sign:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+    else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- That combination assumes minutes_offset is a positive minute quantity that should be subtracted when the hours are negative. If the caller supplies minutes_offset as negative (for example to indicate a negative offset like -1 hour 15 minutes), the early check rejects it and throws the "Minutes out of range" error.
+- In short: the code both (a) enforces minutes_offset >= 0 at line 396 and (b) treats minutes_offset as a signed quantity later. Those two assumptions conflict, so certain valid inputs (like negative combined offsets expressed as negative minutes) are rejected before combination.
+
+Exactly where to change (concrete steps)
+1. Decide one canonical API contract:
+   - Option A (recommended): require minutes_offset to be non-negative (0..59) and derive sign only from hours_offset. In that case callers must pass minutes as positive and set hours_offset negative when the total offset is negative.
+   - Option B: accept minutes_offset with sign and allow minutes_offset in -59..59; combine using the sign of minutes if hours is zero.
+
+2. Implement the chosen rule and fix these two problems:
+   - Update the validation at line 396 to match the contract (for Option A: keep 0..59; for Option B: check abs(minutes_offset) <= 59).
+   - Do not reuse the minutes_offset variable for the combined-minute result. Compute a new variable total_minutes (or combined_minutes). This avoids confusion and makes the code easier to reason about.
+
+3. Example concrete fix for Option A (require minutes positive and use hours sign):
+   - Change the combination into:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           total_minutes = hours_in_minutes - minutes_offset
+       else:
+           total_minutes = hours_in_minutes + minutes_offset
+   - Keep the validation at line 396 as current (0..59).
+   - Use total_minutes for further computation (safe_multiply).
+
+4. Example concrete fix for Option B (allow signed minutes):
+   - Replace the validation at line 396 with:
+       if abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Compute total_minutes as hours_in_minutes + minutes_offset (both signed), or if you need to prefer hours sign when both are present, normalize using sign rules:
+       if hours_offset < 0 and minutes_offset > 0:
+           minutes_offset = -minutes_offset
+       total_minutes = hours_in_minutes + minutes_offset
+   - Again, use a separate variable total_minutes.
+
+Why these fixes solve it
+- They remove the contradictory assumptions: either enforce minutes always non-negative and treat sign in hours, or allow signed minutes and validate by absolute value. Using a separate total_minutes variable prevents accidental reuse of minutes_offset and makes the flow clear.
+
+Where it occurred in your code
+- The immediate rejection happens at the validation on line 396 (Minutes out of range).
+- The contradictory expectation occurs at lines 402–405 where minutes_offset is recomputed relative to hours_in_minutes.
+- The overflow check and final use occur at line 405 (FieldUtils.safe_multiply) and the return at 408.
+
+If you tell me which API contract you want (minutes must be positive, or minutes may be signed), I can provide the exact patched code for the chosen option.

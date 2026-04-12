@@ -1,0 +1,47 @@
+What happened
+- The IndexError comes from these lines in to_utf16_code_units:
+  - Line 35–36: the function checks if index is out of range and raises IndexError(f"String index out of range: {index}") when index >= len(code_units).
+- The raised exception says index is 2, which means len(code_units) is <= 2. The caller expected code_units[2] to exist, but it doesn't.
+
+Why this happens (root cause)
+- The list code_units is supposed to contain UTF‑16 code units (one 16‑bit value per UTF‑16 code unit). For characters outside the Basic Multilingual Plane (code points > U+FFFF) a single character must be represented by a surrogate pair (two UTF‑16 code units).
+- The function that builds code_units (the part not shown except for initialization at line 12) produced fewer entries than the caller expects. Most commonly this happens because the builder appended Python string code points (ord(ch)) directly instead of producing UTF‑16 code units:
+  - If you do code_units.append(ord(ch)) for each character ch in a Python str, you get Unicode scalar values (code points) like U+1F600 (128512) as a single list item, not two 16‑bit surrogate code units. That makes len(code_units) smaller than the number of UTF‑16 code units the caller assumes. When the caller then tries to read code_units[2], it can be out of range.
+- In short: code_units doesn't actually contain UTF‑16 code units in the expected form, so the index check at line 35 fails.
+
+Where it occurs
+- The problem is in the construction of code_units in to_utf16_code_units (lines around 10–14 and the code that appends values). The check at line 35 detects the symptom (index >= len(code_units)) and raises the IndexError at line 36.
+
+How to fix (clear step-by-step fixes)
+Option A — build proper UTF‑16 code units using encoding (recommended)
+1. Replace the existing code_units construction with a UTF‑16 encoding and split into 16‑bit code units. Example implementation (Python):
+   - bytes_le = s.encode('utf-16-le')  # little-endian without BOM
+   - code_units = [b0 | (b1 << 8) for (b0, b1) in zip(bytes_le[0::2], bytes_le[1::2])]
+2. This produces one 16‑bit integer per UTF‑16 code unit, so surrogate pairs become two integers.
+3. Then the existing code at lines 35–44 will behave correctly.
+
+Option B — construct surrogate pairs manually from code points
+1. For each code point cp = ord(ch):
+   - If cp <= 0xFFFF: append cp to code_units.
+   - Else (cp > 0xFFFF): compute surrogate pair:
+     - cp' = cp - 0x10000
+     - high = 0xD800 + (cp' >> 10)
+     - low  = 0xDC00 + (cp' & 0x3FF)
+     - append high, then low
+2. This also guarantees code_units contains the proper 16‑bit units.
+
+Verification step
+- After building code_units, assert its length and content before using it:
+  - assert all(0 <= cu <= 0xFFFF for cu in code_units)
+  - For a test string containing an astral character (e.g., "A\U0001F600B"), verify code_units has length 4 (A, high surrogate, low surrogate, B) not 3.
+
+Why these fixes work
+- The check at line 35 assumes code_units is UTF‑16 code units. Encoding to UTF‑16 or forming surrogate pairs ensures that assumption is true, so index 2 will be valid when the caller expects a second code unit of a surrogate pair.
+
+Concrete minimal replacement (if you want a drop‑in)
+- Replace whatever builds code_units with:
+
+  bytes_le = s.encode('utf-16-le')
+  code_units = [bytes_le[i] | (bytes_le[i+1] << 8) for i in range(0, len(bytes_le), 2)]
+
+This will stop the IndexError at line 36 because code_units will have the correct number of UTF‑16 units.

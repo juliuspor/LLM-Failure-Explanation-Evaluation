@@ -1,0 +1,54 @@
+What happened (what failed)
+- The test called cc.add_number(-0.0). The MockCodeConsumer produced "0" instead of the expected "-0.0".
+- The failure point is in MockCodeConsumer.add (line 126) which ends up calling self.append(newcode) at line 138. Somewhere between those two lines a negative zero value was coerced into a plain zero string, losing its sign.
+
+Why it happened (root cause)
+- The code in add (line 126) is treating numeric zeros the same regardless of sign. That typically happens when code uses a boolean/truthiness check or an equality check like:
+  - if not newcode: ...  (this treats -0.0 as false)
+  - if newcode == 0: ...  (this treats -0.0 equal to  positive 0)
+  - or when it normalizes numbers (e.g. int(newcode) or format that drops the sign).
+- Negative zero is a distinct float value (-0.0) that preserves a negative sign when converted to a string by repr/str in Python only if you don't first coerce it away. The current logic collapses -0.0 to 0 before append, so append gets 0 (or "0"), and you see "0" in the output.
+- Concretely: add (line 126) is the place that applies the coercion/normalization; append (line 138) then writes the already-lost value. The sign loss therefore occurs between lines 126 and 138, inside add.
+
+Where it occurred (lines / variables)
+- Method: add(self, newcode) at line 126 — this method contains the logic that changes newcode.
+- Call: self.append(newcode) at line 138 — append receives the post-coercion value.
+- Variable: newcode — it holds -0.0 coming into add, but holds plain 0 (or "0") when passed to append.
+
+How to fix (clear steps)
+1. Stop treating -0.0 the same as 0.0 inside add.
+   - Replace any truthiness or equality test that collapses sign (like if not newcode or if newcode == 0) with explicit checks that preserve floats and their sign.
+2. When converting floats to strings for append, use a conversion that preserves the sign of negative zero:
+   - Option A (recommended): use repr(newcode) or format with a specifier that preserves sign for floats. Example:
+     - s = repr(newcode)  # repr(-0.0) -> '-0.0'
+   - Option B (explicitly detect negative zero): use math.copysign to detect sign and then format:
+     - import math
+     - if isinstance(newcode, float) and newcode == 0.0 and math.copysign(1.0, newcode) < 0:
+         s = "-0.0"
+       else:
+         s = str(newcode)
+3. Make the change at or before the call to self.append(newcode) so append receives the correct string. For example, modify add at line 126 to build s (string) without collapsing -0.0 to "0" and then call self.append(s) at line 138.
+4. Add a unit test to cover negative zero (the one you already have) to prevent regressions.
+
+Minimal concrete patch sketch
+- Before (pseudocode showing the bug):
+  def add(self, newcode):
+      if not newcode:
+          newcode = 0
+      self.append(newcode)
+- After (preserves sign):
+  import math
+  def add(self, newcode):
+      if isinstance(newcode, float):
+          if newcode == 0.0 and math.copysign(1.0, newcode) < 0:
+              s = '-0.0'
+          else:
+              s = repr(newcode)
+      else:
+          s = str(newcode)
+      self.append(s)
+
+Why this will fix it
+- This ensures newcode is not collapsed by truthiness/equality tests, explicitly preserves the negative sign of -0.0, and passes a string that append will output exactly as expected by the test.
+
+If you want, paste the current body of add (lines ~120–140) and I will produce an exact one-line or multi-line patch that you can apply.

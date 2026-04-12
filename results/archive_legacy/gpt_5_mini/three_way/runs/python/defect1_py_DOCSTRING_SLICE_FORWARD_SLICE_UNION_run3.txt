@@ -1,0 +1,53 @@
+What happened (root cause)
+- The code mutates minutes_offset using hours_in_minutes (hours * 60) with the wrong sign logic at lines 402 and 404:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- hours_in_minutes is already hours * 60. By writing back into minutes_offset you confuse "minutes part" with "total minutes", and the subtraction/addition logic is wrong for several sign cases. That produces an incorrect total minutes value (sometimes double-counting or reversing sign), which then gets multiplied by MILLIS_PER_MINUTE (line 405) to produce a wrong millisecond offset. A wrong value can exceed the allowed range, causing the "Offset is too large" ValueError (line 407) or producing the wrong zone.
+
+Where it occurs
+- The faulty assignments are at the slice you showed:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- The incorrect multiplication is at line 405:
+  - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  Here minutes_offset by then is supposed to be total minutes since UTC, but because of the wrong earlier math it is not correct.
+
+Why it fails (concrete example)
+- Suppose hours_offset = 2 (hours_in_minutes = 120) and minutes_offset = 15.
+  - Code path uses line 404: minutes_offset = hours_in_minutes + minutes_offset → minutes_offset becomes 135 (this is OK if interpreted as total minutes).
+- But suppose hours_offset = -2 (hours_in_minutes = -120) and minutes_offset = 15 (positive minutes with negative hours).
+  - Correct total minutes should be -120 + 15 = -105 (i.e. -01:45? actually -1h45), but the intended semantics per doc is -02:15 (total -135) — the code's sign handling is ambiguous and inconsistent across cases.
+- Suppose hours_offset = 2 and minutes_offset = -15 (which should be invalid and already rejected), but the code paths mixing subtraction/addition make it hard to guarantee the documented allowed sign combinations.
+- In short: the code treats minutes_offset sometimes as “minutes part” and sometimes as “total minutes”, and uses hours_in_minutes with the wrong sign rule. That yields incorrect offset values and triggers errors.
+
+How to fix it (explicit steps)
+1. Keep the minute part and total minute calculations separate. Do not overwrite minutes_offset until you have computed a correct total_minutes variable.
+2. Determine the sign of the minute part relative to the hour part explicitly:
+   - If hours_offset > 0:
+     - minutes must be >= 0 (already validated); total_minutes = hours_offset * 60 + minutes_offset
+   - If hours_offset < 0:
+     - minutes must be >= 0 (per doc positive minutes with negative hours yields -HH:MM); total_minutes = hours_offset * 60 - minutes_offset
+       (or equivalently total_minutes = -(abs(hours_offset) * 60 + minutes_offset))
+   - If hours_offset == 0:
+     - total_minutes = minutes_offset (minutes_offset can be positive, zero, or negative; sign is taken directly)
+3. Replace lines 402 and 404 with a single, clear assignment to total_minutes. Example (pseudocode):
+   - hours_in_minutes = hours_offset * 60
+   - if hours_offset > 0:
+       total_minutes = hours_in_minutes + minutes_offset
+     elif hours_offset < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+     else:  # hours_offset == 0
+       total_minutes = minutes_offset
+4. Use total_minutes for the multiplication at line 405:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+5. Keep the existing range checks (minutes in 0..59 or -59..59 depending on policy) and the final bounds check on offset.
+
+What to change in code (precise lines)
+- Remove or stop overwriting minutes_offset at lines 402 and 404.
+- Introduce total_minutes (or reuse a properly named variable) assigned as above before line 405.
+- Multiply total_minutes by MILLIS_PER_MINUTE at line 405.
+
+Why this fix works
+- It makes the math unambiguous: hours_in_minutes always means hours*60; minutes_offset remains the minute component; total_minutes is computed once with explicit sign logic. That prevents double-counting or inverted signs that produced bad offsets and ValueError("Offset is too large").
+
+If you want, paste the surrounding 10–15 lines and I will provide the exact corrected code snippet to drop into your file.

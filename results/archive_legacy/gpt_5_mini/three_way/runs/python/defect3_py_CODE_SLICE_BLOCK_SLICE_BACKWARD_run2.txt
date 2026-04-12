@@ -1,0 +1,52 @@
+What happened (what failed)
+- The failure is an IndexError raised at to_utf16_code_units(...) line 35 ("String index out of range: {index}"). That happens because code_point_at(code_units, pos) is called with pos equal to len(code_units), i.e. an out-of-range index.
+
+Where it happened (exact places)
+- In translate(...):
+  - After translate_codepoint(...) returns a non-zero consumed, execution enters the for pt in range(consumed): loop (the loop immediately after the comment "Contract with translators...").
+  - Inside that loop you call code_point_at(code_units, pos) and then char_count(...) to increment pos.
+- The IndexError is thrown by code_point_at at its bounds check (the lines you showed from to_utf16_code_units around line 35).
+
+Why it happened (root cause)
+- There's a mismatch between what translate_codepoint(...) returns (the meaning of consumed) and how the translate(...) method advances pos:
+  - translate_codepoint(...) returns consumed (the code is written under the comment "Contract with translators is that they have to understand codepoints and they just took care of a surrogate pair"). That implies consumed counts codepoints handled (or possibly code units), but the loop treats consumed as a count of codepoints and for each one calls code_point_at(code_units, pos) to find how many UTF-16 code units to skip.
+  - If consumed actually counts code units (1 or 2), the loop runs 1 or 2 times but calls code_point_at for the second iteration when pos has already been advanced past the real code unit boundaries — eventually pos reaches len(code_units) and code_point_at raises IndexError.
+  - If consumed counts codepoints but translate_codepoint already consumed those code units, calling code_point_at repeatedly starting at the same pos can still reach end-of-array; specifically, the loop uses pos that is being advanced inside the loop, but if consumed is larger than the remaining codepoints, the loop will call code_point_at with an invalid pos.
+- In short: you either ran the loop too many times, or you called code_point_at at a position that is already beyond the end because the semantics of consumed were misunderstood. That leads directly to the out-of-range call at line 35.
+
+How to fix (clear, concrete steps)
+1) Decide what translate_codepoint(...) must return (pick one and enforce it):
+   - Option A (recommended if translator reports code units): Make consumed be the number of UTF-16 code units consumed (1 or 2). Then replace the whole loop with a single advance:
+     - Replace:
+         for pt in range(consumed):
+             pos += char_count(code_point_at(code_units, pos))
+       With:
+         pos += consumed
+     - Rationale: if consumed counts code units, advancing by consumed moves pos past exactly those code units without rereading code_point_at.
+
+   - Option B (if consumed must count codepoints): Keep consumed as number of codepoints translated, but make sure you never call code_point_at with an out-of-range index. Two fixes:
+     - Before entering the loop, check that there are at least consumed codepoints remaining (or at least enough code units):
+         if not enough remaining:
+             raise ValueError("translate_codepoint returned too large consumed")
+     - Or change the loop to guard code_point_at:
+         for pt in range(consumed):
+             if pos >= length:
+                 raise IndexError("translate_codepoint consumed more codepoints than available")
+             pos += char_count(code_point_at(code_units, pos))
+
+2) Audit translate_codepoint implementations to ensure they obey the chosen contract (return number of code units OR number of codepoints). Make this contract explicit in comments and unit tests.
+
+3) Add defensive checks in translate(...) before calling code_point_at:
+   - After getting consumed, verify that pos + consumed <= length if consumed counts code units, or that there are at least consumed codepoints remaining if it counts codepoints. If not, raise a clear error (not a raw IndexError) describing which translator violated the contract and what pos/length/consumed were.
+
+Minimal concrete code change (if you choose Option A: consumed is code units)
+- Replace the for-loop block:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  With:
+    pos += consumed
+
+That change eliminates the out-of-range code_point_at calls and matches the common surrogate-handling behavior where a translator returns the number of UTF-16 code units it consumed.
+
+Summary
+- The immediate cause is calling code_point_at(code_units, pos) with pos == len(code_units). The underlying cause is a mismatch between what translate_codepoint returns (consumed) and how translate(...) advances pos. Fix by choosing and enforcing a single contract (consumed = code units is simplest) and adjusting the pos advancement accordingly, plus adding defensive checks so future violations produce a clear error.

@@ -1,0 +1,36 @@
+What happened (root cause)
+- The code converts the incoming float x to an int at line 177 (value = int(x)). That conversion destroys the sign bit for negative zero: int(-0.0) becomes 0, so the code no longer knows the number was negative zero.
+- Later the routine prints the integer-derived value (value or mantissa) instead of preserving the original float sign. Those code paths (lines 180–194) therefore end up emitting "0" (or otherwise a non-signed representation) for -0.0 instead of "-0.0".
+- In short: taking int(x) too early removes the information that x was -0.0, and the code uses that integer result when producing the output.
+
+Where it occurs (file/lines)
+- The problematic conversion is at line 177: value = int(x)
+- The integer-derived values are used in the subsequent formatting decisions (lines ~180–194). Those branches can call:
+  - self.add(str(mantissa) + "E" + str(exp)) (line 190)
+  - self.add(str(value)) (line 192)
+  - and finally a fallback self.add(str(x)) (line 194)
+  Because the code has already lost the negative-zero sign by using value/mantissa, it prints the unsigned form.
+
+Why that's wrong
+- Negative zero is a distinct IEEE-754 value with a sign bit; converting to int loses the sign information.
+- The code only checks/prints the integer form after conversion, so negative-zero becomes indistinguishable from positive zero and gets printed incorrectly.
+
+Concrete steps to fix (explicit edits you can make)
+1. Detect negative zero before any integer conversion:
+   - Add a guard at the start of add_number:
+     - if CodeConsumer.is_negative_zero(x): self.add("-0.0"); return
+   - (Or use math.copysign: if x == 0.0 and math.copysign(1.0, x) < 0: self.add("-0.0"); return)
+2. Only call value = int(x) after you know x is not negative zero (and after you've handled NaN/inf as appropriate).
+3. Alternatively, avoid deriving print text from value/mantissa when x is exactly 0.0 — use str(x) in that case so the original sign (if any) is preserved.
+
+Why these steps work
+- Checking is_negative_zero (or math.copysign) before int(x) preserves the sign bit and lets you explicitly emit "-0.0".
+- If you do the check up front, the rest of the integer-based simplifications can run unchanged for non-zero inputs.
+
+Minimal example patch (illustrative)
+- At top of add_number (before line 177):
+  if x == 0.0 and math.copysign(1.0, x) < 0:
+      self.add("-0.0")
+      return
+
+This ensures -0.0 is handled explicitly and prevents the int(x) conversion from erasing the sign.

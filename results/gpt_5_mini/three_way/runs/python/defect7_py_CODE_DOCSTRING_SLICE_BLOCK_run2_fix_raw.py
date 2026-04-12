@@ -1,0 +1,13 @@
+@classmethod
+def to_class(cls, array: Optional[List[Any]]) -> Optional[List[Type]]:
+    if array is None:
+        return None
+    elif len(array) == 0:
+        return ArrayUtils.EMPTY_CLASS_ARRAY.copy()
+
+    classes = []
+    for i in range(len(array)):
+        # Previously attempted to call .upper() on each element which fails for non-strings.
+        # We only need the type of each element, so avoid calling .upper().
+        classes.append(type(array[i]))
+    return classes

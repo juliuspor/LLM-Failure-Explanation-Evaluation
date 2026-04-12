@@ -1,0 +1,52 @@
+What happened (root cause)
+- At line `inferred_type = type(array)` you are taking the Python type of the list object (for example `<class 'list'>`), not the element type you intended to infer.
+- When `array` is empty or when `_copy_list_grow1` is given an incorrect type, `_copy_list_grow1` ends up creating a list whose element-type marker is treated as `object` (your code then sets `inferred_type = object` in the `else` branch or `_copy_list_grow1` effectively returns an object-typed list).
+- Later you hit the `if inferred_type == object and expected_type != object:` branch and raise the TypeError. That is why the test fails with:
+  "Cannot cast object list to str list …"
+
+Why that causes the failure (step-by-step, with line references)
+1. Line with `if array is not None:` uses `inferred_type = type(array)` — this returns `list` (the list class), not the element class. You intended the element type but got the container type.
+2. If `array` is empty or `_copy_list_grow1` expects an element class and you gave it `list` (or `None`), `_copy_list_grow1(array, inferred_type)` will create/return a list typed as `object` (effectively losing element typing).
+3. The code then checks `if inferred_type == object and expected_type != object:` and raises the TypeError (the exact line that produced the error is the raise inside that if).
+4. The message complains about casting an object list to a str list because the code believes the existing/new list is "object-typed" while the caller asked for `expected_type = str`.
+
+Why the current inference is incorrect
+- `type(array)` tells you the type of the container (list), not the item type.
+- Using the `elif element is not None: inferred_type = type(element)` branch can fix the element type only when element is present; but if the array exists and you don't inspect its contents, you never learn the element type.
+- If `array` is non-empty, you should inspect its elements to infer their type; if empty you must rely on `element` or `expected_type`.
+
+Specific places to change
+- Change line `inferred_type = type(array)` to infer the element type, not the list type.
+- If you want the element type from an existing list, inspect list contents (e.g., use `array[0].__class__` if you can rely on homogenous lists).
+- If the array is empty, prefer `element.__class__` (when element is non-None), otherwise fall back to `expected_type` or `object` as last resort.
+
+Concrete fixes (step-by-step)
+Option A — prefer element, then first element of array, then expected_type:
+1. Replace the inference block with:
+   - if element is not None: inferred_type = type(element)
+   - elif array is not None and len(array) > 0: inferred_type = type(array[0])
+   - elif expected_type is not None: inferred_type = expected_type
+   - else: inferred_type = object
+2. Pass that inferred_type to `_copy_list_grow1`.
+3. Keep the existing check that raises when you end up with object but expected is more specific.
+
+Option B — use expected_type when present (safer when array is empty):
+1. If expected_type is provided, use it as the priority: `inferred_type = expected_type` if `expected_type` is not None.
+2. Then fall back to element or array[0] as needed.
+
+Minimal corrected code sketch (replace inference block):
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif element is not None:
+        inferred_type = type(element)
+    elif array:
+        inferred_type = type(array[0])
+    else:
+        inferred_type = object
+
+Why this will fix it
+- You will pass an actual element type to `_copy_list_grow1`, so it will create a list with the proper component type.
+- The `if inferred_type == object and expected_type != object:` check will no longer trigger incorrectly because `inferred_type` will reflect the intended element type (or expected_type when provided).
+
+One last note
+- If lists can hold mixed element types, you must decide a policy (homogeneous only, or always use expected_type), because runtime inference from array[0] is unreliable if elements may differ.

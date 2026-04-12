@@ -1,0 +1,46 @@
+What fails
+- Line "if array is not None: inferred_type = type(array)" (first branch) is wrong: it takes the Python type of the list object itself (e.g. list) instead of the type of the list's elements (e.g. int). Passing the list class to ArrayUtils._copy_list_grow1 produces the wrong component type and leads to type/cast errors later when the code treats the result as a list-of-T.
+- This also breaks the empty-list case: when array is an empty list, you must not infer element type from the list object (list), you need to fall back to element or object; the current code always uses type(array) and so loses element-type information.
+- The expected_type check (if inferred_type == object and expected_type != object) assumes inferred_type will be object when unknown. But because inferred_type is often list (from the bug above), that check will not trigger when it should.
+
+Where it happens (specific lines)
+1. if array is not None:
+       inferred_type = type(array)
+   - This is the root mistake: using type(array) instead of the element/component type. (Lines 2–4 in your snippet.)
+2. new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+   - Passing the wrong inferred_type here results in a new list allocated with the incorrect component type.
+3. if expected_type is not None:
+       if inferred_type == object and expected_type != object:
+           raise TypeError(...)
+   - This check will miss cases where inferred_type is wrong (e.g. list), so the function either fails later or fails to raise the intended TypeError.
+
+Why that causes a failure (concrete example)
+- Call add([1, 2], 3). The code sets inferred_type = type([1,2]) == list. _copy_list_grow1 receives inferred_type=list (not int). If that helper expects a component type it will create a wrong-typed array/list; later code that depends on having an int component type will fail or raise a cast/assignment error. If the original array is [], calling add([], 1) sets inferred_type = list (not int), even though element is 1 and the returned list should have component type int or at least be inferred from the element.
+
+How to fix it (concrete steps and exact replacements)
+1. Use element type when array is None or when array is empty:
+   - Replace
+       if array is not None:
+           inferred_type = type(array)
+     with
+       if array is not None and len(array) > 0:
+           inferred_type = type(array[0])
+       elif element is not None:
+           inferred_type = type(element)
+       else:
+           inferred_type = object
+   This ensures you infer the element/component type from the first element of a non-empty array, otherwise from the element, otherwise object.
+
+2. Update the expected_type check to compare component types, not the list class:
+   - After computing inferred_type as above, your existing check
+       if inferred_type == object and expected_type != object:
+           raise TypeError(...)
+     will now correctly detect the unknown-component case. If you also need to validate that the inferred_type is compatible with expected_type, consider adding an explicit compatibility check such as:
+       if expected_type is not None and inferred_type is not object and not issubclass(inferred_type, expected_type):
+           raise TypeError(f"Inferred element type {inferred_type.__name__} is not compatible with expected {expected_type.__name__}")
+
+3. If ArrayUtils._copy_list_grow1 expects a component/type object different from Python's type system, make sure the inferred_type you pass matches what it expects (e.g. pass the element's class object, not the list class).
+
+Summary
+- Root cause: inferred_type is set to type(array) (the list's class) instead of the element type. That propagates a wrong component type into _copy_list_grow1 and breaks empty-list handling and expected_type checks.
+- Fix: infer element type from array[0] when array is non-empty; otherwise use type(element) or object. Add/adjust compatibility checks against expected_type as needed.

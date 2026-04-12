@@ -1,0 +1,44 @@
+What happened (root cause)
+- At line 176 you check if x == int(x). If true you do value = int(x) (line 177).
+- For x == -0.0 that test is true, and int(-0.0) produces 0 (line 177). Converting -0.0 to an int loses the negative-zero sign.
+- Later you emit string forms that use value (line 192) or mantissa (line 190) instead of the original float x. Those produced "0" (or "0.0") instead of the expected "-0.0".
+- The test failed because the code canonicalized -0.0 to 0 by using int(x) and then adding str(value) / str(mantissa), so the sign information of negative zero was lost.
+
+Exactly where to look
+- Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- Line 177: value = int(x)         <-- here sign of -0.0 is lost
+- Line 178: mantissa = value
+- Line 190 / 192: self.add(str(mantissa) + "E" + str(exp)) and self.add(str(value))   <-- these emit the integer-based strings
+- Line 194: self.add(str(x))  <-- this would preserve "-0.0", but it may not be reached or the earlier emissions are used by the test
+
+Why this is the specific problem
+- IEEE-754 has a distinct negative zero for floats. int(-0.0) == 0, so casting to int removes the negative sign. The code assumes int(x) round-trip preserves formatting, but it does not for negative zero.
+
+Concrete fixes (explicit steps)
+1. Detect negative zero before casting:
+   - Add a check before line 177:
+     - if x == 0.0 and math.copysign(1.0, x) < 0:
+         preserve_neg_zero = True
+       else:
+         preserve_neg_zero = False
+   - Then when emitting strings that would otherwise come from value or mantissa, use the original float string when preserve_neg_zero is True:
+     - if preserve_neg_zero:
+         self.add("-0.0")  (or self.add(str(x)))
+       else:
+         self.add(str(value))
+
+2. Or avoid casting to int for exact-zero case:
+   - Replace the cast on line 177 with:
+       if x == 0.0:
+           value = 0
+       else:
+           value = int(x)
+     and use math.copysign to decide whether to output "-0.0" when value == 0 and x was negative.
+
+3. Or always prefer formatting from the original float when x is an exact integer but equals 0.0 with negative sign:
+   - Before adding str(value) or str(mantissa), check if x == 0.0 and math.copysign(1.0, x) < 0 and use str(x) instead.
+
+Pick one of these options and change the code around lines 176–178 and the spots where you call self.add(str(value)) / self.add(str(mantissa) + "E" + str(exp)) (lines 190, 192). The minimal safe change is to detect negative zero using math.copysign and emit str(x) instead of str(value) when x is negative zero.
+
+Why this fix works
+- math.copysign preserves the sign bit of the float; str(x) for x == -0.0 yields "-0.0" in Python, so by emitting str(x) when x is negative zero you preserve the expected representation.

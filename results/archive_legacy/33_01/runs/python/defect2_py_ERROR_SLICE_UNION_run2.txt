@@ -1,0 +1,58 @@
+What happened (where it failed)
+- Failure occurs inside get_paint (method name shown at SLICE_UNION line 54).
+- The code that computes g is at line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- At lines 74–75 the method tests g and raises:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- So the method raises ValueError because g is outside the allowed 0..255 range.
+
+Why it happened (root cause)
+- The expression that builds g uses three variables: value, self._lower_bound, and self._upper_bound.
+- If value is outside the interval [self._lower_bound, self._upper_bound] (or if the bounds are reversed), the computed ratio can be < 0 or > 1, so g can be < 0 or > 255, which triggers the ValueError at line 74.
+- A secondary root cause: there is no validation of the inputs before computing g:
+  - The code does not check for self._upper_bound == self._lower_bound (this would produce ZeroDivisionError before reaching the ValueError).
+  - The code does not check that self._lower_bound <= self._upper_bound (reversed bounds make the ratio sign inverted and produce out-of-range g).
+  - The ValueError message is unhelpful ("Red Green Blue") and provides no numeric context about which variable or value caused the problem.
+
+Precise reproduction conditions
+- Any call get_paint(value) where value < self._lower_bound or value > self._upper_bound will set g outside 0..255 and raise the ValueError at lines 74–75.
+- Also, if self._upper_bound == self._lower_bound you will get ZeroDivisionError at line 71 instead of this ValueError.
+
+Concrete fixes (step-by-step, with exact places to change)
+1. Validate bounds before the calculation (add at start of get_paint, e.g. after line 54):
+   - If self._upper_bound == self._lower_bound: raise ValueError("get_paint: upper_bound equals lower_bound; division by zero would occur")
+   - If self._upper_bound < self._lower_bound: raise ValueError(f"get_paint: upper_bound ({self._upper_bound}) < lower_bound ({self._lower_bound})")
+2. Decide how to handle value outside bounds and implement one of these behaviors explicitly:
+   Option A — clamp the input (preferred if you want a color for any value):
+   - Compute ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+   - Clamp ratio to [0.0, 1.0] before scaling:
+       ratio = max(0.0, min(1.0, ratio))
+   - Then g = int(round(ratio * 255.0))
+   Option B — reject out-of-range value with a clear error:
+   - If value < self._lower_bound or value > self._upper_bound:
+       raise ValueError(f"get_paint: value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+3. Replace the current g-range check and vague error message (lines 74–75) with the clearer behavior above.
+4. Optional: use int(round(...)) instead of int(...) to avoid systematic truncation.
+
+Minimal example patch (replace the computation and check around lines 71–75):
+
+    # validate bounds (put near start of get_paint)
+    if self._upper_bound == self._lower_bound:
+        raise ValueError(f"get_paint: upper_bound ({self._upper_bound}) equals lower_bound ({self._lower_bound})")
+    if self._upper_bound < self._lower_bound:
+        raise ValueError(f"get_paint: upper_bound ({self._upper_bound}) < lower_bound ({self._lower_bound})")
+
+    # compute ratio and clamp it
+    ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+    ratio = max(0.0, min(1.0, ratio))   # clamp to [0,1]
+    g = int(round(ratio * 255.0))
+
+    # no need for the previous vague check/raise
+
+Why this will fix it
+- Validating bounds prevents division-by-zero or inverted-interval surprises.
+- Clamping or explicitly rejecting out-of-range value ensures g cannot be outside 0..255, so you won’t hit the ValueError at lines 74–75.
+- Clear error messages show exactly which variable and numeric values caused the problem, so you (or callers) can fix inputs quickly.
+
+If you want, tell me which behavior you prefer (clamp input vs. raise when out of bounds) and I’ll give the exact updated get_paint body ready to paste in.

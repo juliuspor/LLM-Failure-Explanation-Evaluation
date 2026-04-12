@@ -1,0 +1,44 @@
+What happened (where):
+- The failure happens inside the method that builds a timezone offset from hour and minute parts (the method containing lines 400–412 in your snippet). The immediate exception is raised at lines 400–401:
+  - 400 |         if minutes_offset < 0 or minutes_offset > 59:
+  - 401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later the same method treats minutes_offset as if it could be negated / combined with an hours value (lines 406 and 408):
+  - 406 |                 minutes_offset = hours_in_minutes - minutes_offset
+  - 408 |                 minutes_offset = hours_in_minutes + minutes_offset
+- Finally the method converts the computed minutes into milliseconds and returns cls.for_offset_millis(offset) (around lines 409–412).
+
+Why it fails (root cause):
+- The code validates minutes_offset (line 400) before handling a negative sign. If the caller supplies a negative minute value to indicate a negative offset (for example -30 for “-0:30”), the check at line 400 sees minutes_offset < 0 and immediately raises ValueError.
+- But later logic expects to combine minutes_offset with the hours part while taking sign into account (lines 406/408). That later logic assumes minutes_offset is a magnitude (0..59) and applies subtraction or addition against hours_in_minutes. Because the negative-minute case was rejected too early, valid negative offsets like “-0:30” (or parsing results where minutes were negative before sign normalization) generate the ValueError at line 400 instead of being normalized and combined.
+
+Exactly where to change it (concrete steps):
+1. Validate the magnitude of minutes, not its signed value. Replace the check at lines 400–401 with a check on the absolute value:
+   - Replace:
+     - if minutes_offset < 0 or minutes_offset > 59:
+     -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With:
+     - if abs(minutes_offset) > 59:
+     -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Ensure minutes_offset is turned into a non-negative magnitude before combining with hours. Immediately before the calculations at lines 406/408, add:
+   - minutes_magnitude = abs(minutes_offset)
+   - and then use minutes_magnitude in the arithmetic (instead of minutes_offset) when computing hours_in_minutes +/- minutes. This avoids mixing sign logic into the magnitude.
+
+3. Apply sign separately to the final minutes total (the code that sets offset). For example:
+   - Determine sign = -1 if the overall offset is negative else +1
+   - Compute total_minutes = sign * (hours_in_minutes +/- minutes_magnitude) as appropriate
+   - Then do offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - Finally return cls.for_offset_millis(offset)
+
+Why these fixes work (short):
+- Using abs() for validation accepts inputs where minutes are temporarily negative because the sign should be handled separately. Converting minutes to a magnitude before combining with hours prevents the arithmetic at lines 406/408 from producing wrong results or being applied to a negative minute value. Applying sign only once, to the final total, removes the double-sign / early-rejection bug that produced the ValueError.
+
+Example patch summary (what to change by line):
+- Change lines 400–401 to:
+  - if abs(minutes_offset) > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Before line 406, add:
+  - minutes_magnitude = abs(minutes_offset)
+  - ...then replace uses of minutes_offset in the math at 406/408 with minutes_magnitude, and apply the overall sign to the final offset before calling cls.for_offset_millis(offset).
+
+If you want, paste the surrounding method and I will produce a precise one-file patch with exact line replacements.

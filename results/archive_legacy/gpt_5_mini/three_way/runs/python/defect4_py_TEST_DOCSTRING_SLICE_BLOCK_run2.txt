@@ -1,0 +1,59 @@
+What happened (brief)
+- The bug is in TimePeriodValues._update_bounds(): when a new period becomes the current maximum (or minimum) by middle, the code assigns the wrong variable to the index field. Instead of storing the incoming index argument, it stores some other index variable (e.g. max_middle_index / min_middle_index or a start/end index variable). That causes get_max_middle_index() to return a wrong index (the last wrong-assigned value, e.g. 3) instead of the index of the actual maximum middle (1).
+
+Where it occurs (exact places to look)
+- Method: TimePeriodValues._update_bounds(...)
+- Symptoms shown by tests: test_max_middle_index_simple() in your TEST file — expected max_middle_index == 1 but the method returns 3.
+- You can also see a related accessor at lines 437–439:
+  437 |     def get_min_start_index(self) -> int:
+  438 |         """Returns the index of the time period with the minimum start milliseconds."""
+  439 |         return self._min_start_index
+  That accessor returns the stored index variable (self._min_start_index). The stored index is wrong because _update_bounds wrote the wrong variable.
+
+Why this happens (root cause)
+- _update_bounds computes candidate values (start, end, middle) and compares them to stored extrema.
+- When it finds a new maximum middle, instead of doing:
+    self._max_middle = middle_value
+    self._max_middle_index = index
+  it does something like:
+    self._max_middle = middle_value
+    self._max_middle_index = max_middle_index   # WRONG variable used
+  or mistakenly uses another index variable (e.g. self._max_start_index) when assigning.
+- That wrong assignment sets the max_middle index to an unrelated index value that was in-scope previously (often the index of the last processed element), producing the wrong result reported by your tests.
+
+Concrete example of the likely buggy lines (pseudo-/near-real code)
+- Buggy pattern you need to find in _update_bounds:
+    if middle > self._max_middle:
+        self._max_middle = middle
+        # WRONG: assigns some other index variable instead of the incoming index
+        self._max_middle_index = max_middle_index  # <- should not reference this
+- Correct pattern:
+    if middle > self._max_middle:
+        self._max_middle = middle
+        self._max_middle_index = index            # <- assign the current item's index
+
+How to fix it (exact steps)
+1. Open TimePeriodValues._update_bounds(...) and locate the blocks that update middle-related extrema:
+   - the "max middle" update block
+   - the "min middle" update block
+2. Replace any assignment that writes self._max_middle_index or self._min_middle_index using any variable other than the function parameter index with index itself.
+
+Specifically:
+- Change any line like
+    self._max_middle_index = max_middle_index
+  to
+    self._max_middle_index = index
+- Change any line like
+    self._min_middle_index = min_middle_index
+  to
+    self._min_middle_index = index
+
+3. Also scan other extrema-update blocks (start/end min/max) to ensure they assign the incoming index variable "index" into their *_index fields. The same mistake can occur for start/end indices; correct all such occurrences.
+
+Why this fix works
+- The accessor methods (e.g. get_max_middle_index(), get_min_start_index()) simply return stored index fields like self._max_middle_index and self._min_start_index (see lines 437–439 for min_start). Those fields must hold the index of the period that produced the extrema. Writing the wrong variable breaks that invariant. Assigning the method parameter index restores the correct mapping between the extrema value and the period index.
+
+Quick test to confirm
+- After making the changes above, run the test suite you provided. test_max_middle_index_simple() should pass (get_max_middle_index() returns 1). The other tests checking min/max start/end and generic time periods should also pass if no other incorrect index assignments remain.
+
+If you want, paste the current body of _update_bounds here and I will point out the exact lines to change.

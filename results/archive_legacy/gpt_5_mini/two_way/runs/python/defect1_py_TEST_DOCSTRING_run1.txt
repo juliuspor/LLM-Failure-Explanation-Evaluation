@@ -1,0 +1,77 @@
+What happened (the root cause)
+- The tests fail because DateTimeZone.for_offset_hours_minutes combines hours and minutes without treating their signs the way the docstring and the tests expect.
+- The implementation computes the total offset like:
+  offset_millis = hours * MILLIS_PER_HOUR + minutes * MILLIS_PER_MINUTE
+  and it also rejects some sign combinations instead of treating negative hours as "negative magnitude plus minutes".
+- That causes two concrete bad behaviors the tests hit:
+  1. For hours < 0 and minutes > 0 (e.g. for_offset_hours_minutes(-2, 15)), the implementation either raises ValueError or computes the wrong total (e.g. -2h + 15m = -1h45m) instead of -2h - 15m = -2:15. The docstring and tests expect (-2, 15) -> -02:15 (i.e. total = -(2h + 15m)).
+  2. For hours > 0 and minutes < 0 (e.g. (2, -15)) the code may accept and compute an offset, while the docstring says this should be rejected (ValueError). Or conversely, the code might reject (-2, 15) erroneously while the docstring allows it.
+
+Where it occurs (what to look for in your file)
+- Open hit01_timezone.py and find the method DateTimeZone.for_offset_hours_minutes (the factory described in the DOCSTRING you pasted).
+- Inside that method look for:
+  - range checks for hours and minutes (should be -23..+23 and -59..+59).
+  - sign checks that raise ValueError when hour and minute signs differ.
+  - the arithmetic that builds the millisecond offset:
+    offset = hours * MILLIS_PER_HOUR + minutes * MILLIS_PER_MINUTE
+  That arithmetic is the immediate cause of wrong totals when hours and minutes have different signs.
+
+Why that arithmetic is wrong
+- Consider (-2, 15):
+  - Correct total per docstring/tests: -(2h + 15m) = -(7200000 + 900000) = -8100000 ms => "-02:15".
+  - Naive sum gives -7200000 + 900000 = -6300000 ms => "-01:45" (wrong).
+- The method must treat the minute magnitude as extending the hours’ sign when hours is non-zero (per the docstring examples).
+- Likewise, when hours is positive and minutes negative, the docstring requires a ValueError; code must enforce that.
+
+Precise, actionable fix (steps and code)
+1. Validate ranges exactly:
+   - if not (-23 <= hours <= 23): raise ValueError
+   - if not (-59 <= minutes <= 59): raise ValueError
+2. Enforce sign rules:
+   - If hours > 0 and minutes < 0: raise ValueError (docstring requires this)
+   - If hours < 0 and minutes > 0: treat minutes as part of the negative magnitude (i.e. total is -(abs(hours)*60 + abs(minutes)) minutes)
+   - If hours == 0: sign of minutes decides sign of offset (0, -15 => negative) — no special rule.
+3. Compute total millis using absolute magnitudes then apply final sign:
+
+Example code to replace the buggy part (insert inside DateTimeZone.for_offset_hours_minutes):
+
+    # validate ranges
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError("Hours out of range: %r" % hours_offset)
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError("Minutes out of range: %r" % minutes_offset)
+
+    # invalid combination: positive hours with negative minutes
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must not be negative when hours are positive")
+
+    # compute total minutes as magnitude then apply sign
+    if hours_offset < 0:
+        total_minutes = -(abs(hours_offset) * 60 + abs(minutes_offset))
+    elif hours_offset > 0:
+        total_minutes = hours_offset * 60 + abs(minutes_offset)  # minutes_offset is >= 0 here
+    else:  # hours_offset == 0
+        total_minutes = minutes_offset  # can be positive, zero, or negative
+
+    total_millis = total_minutes * MILLIS_PER_MINUTE
+
+    # then return or cache DateTimeZone for that total_millis, and set the id in "+HH:MM"/"-HH:MM" format
+
+Notes and exact variables
+- Use the same parameter names the file uses (I used hours_offset and minutes_offset to match the DOCSTRING but adjust to your actual parameter names).
+- MILLIS_PER_MINUTE = 60000 and MILLIS_PER_HOUR = 3600000 (you can compute total_millis from total_minutes * 60000).
+- Make sure the zone ID string is formatted with absolute hours and minutes padded to two digits and the overall sign determined from total_minutes (treat zero as "UTC" or "+00:00" per your class’ conventions).
+
+How this fixes the failing tests
+- (-2, 15): hours_offset < 0 path, total_minutes = -(2*60 + 15) = -135 -> total_millis = -135 * 60000 = -8100000 => "-02:15" (passes tests).
+- (2, -15): hours_offset > 0 and minutes_offset < 0 causes ValueError (matches test_mixed_signs_invalid).
+- (0, -15): hours==0 path uses minutes_offset sign, => -15 minutes => "-00:15" (passes test_zero_hours_negative_minutes).
+- Other boundary checks (ranges ±23, ±59) are enforced explicitly.
+
+Final checklist to verify after applying the fix
+- Run the unit tests.
+- Confirm zone.get_offset(0) equals expected_millis in every test.
+- Confirm zone.get_id() returns "UTC" for (0,0) and formatted "+HH:MM"/"-HH:MM" for others.
+- Ensure you didn't change unrelated code paths that return cached DateTimeZone instances — only change logic inside for_offset_hours_minutes.
+
+If you want, paste the current implementation of DateTimeZone.for_offset_hours_minutes from hit01_timezone.py and I will show the exact minimal patch (with line-level edits) to make the tests pass.

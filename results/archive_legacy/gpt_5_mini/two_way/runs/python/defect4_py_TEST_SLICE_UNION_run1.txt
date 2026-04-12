@@ -1,0 +1,57 @@
+What happens
+- In the _update_bounds method the code always overwrites the "best" index with the current index, even when the new period is not better. Concretely, after the comparison that is supposed to update _min_start_index only when start < min_start, there is an unconditional assignment that sets _min_start_index = index every time (slice lines shown below).
+  - Conditional update:
+    - if start < min_start:
+      - self._min_start_index = index  (line 346–347 in your slice)
+  - Unconditional overwrite immediately after:
+    - self._min_start_index = index  (line 349 in your slice)
+- Because of that stray assignment, _min_start_index always ends up as the most recently added index instead of the index with the smallest start. That explains failing tests that expect a particular min start index.
+
+Where it occurs (file/lines)
+- In the posted slice for _update_bounds:
+  - The conditional comparison and assignment appear around lines 340–347:
+    - line 340: if self._min_start_index >= 0:
+    - line 341–345: load min_start from the current stored min_start_index
+    - line 346: if start < min_start:
+    - line 347:     self._min_start_index = index
+  - Then at line 349 there is a plain:
+    - self._min_start_index = index
+  - That unconditional assignment at line 349 is the bug.
+
+Why this causes your observed failure
+- Because line 349 runs for every added TimePeriod, it replaces whatever was previously recorded as the min start, so get_min_start_index() returns the last-added index, not the index with the smallest start. The same kind of logic error (wrong index variable or unconditional overwrite) will produce wrong results for other bound indexes (max_middle_index, max_start_index, etc.) if implemented similarly.
+
+How to fix it (concrete steps)
+1. Remove the unconditional assignment at line 349 so the index is changed only when the comparison indicates the new period is better:
+   - Delete the line:
+     - self._min_start_index = index
+   - Keep only the conditional block:
+     - if start < min_start:
+         self._min_start_index = index
+2. If the unconditional assignment was intended as the "first-time" initialization (i.e., when _min_start_index < 0), make that explicit:
+   - Before the comparison branch, handle initialization:
+     - if self._min_start_index < 0:
+         self._min_start_index = index
+       else:
+         # compare existing min_start and update only if current start is less
+         if start < min_start:
+             self._min_start_index = index
+3. Audit the other bound-updating code paths (max_middle_index, min_middle_index, max_start_index, max_end_index, min_end_index) for the same error:
+   - Ensure you compare the new value with the stored best value and only assign the stored index when the new value is better.
+   - Ensure you do not use a wrong variable name (e.g., comparing against a middle value but assigning a different index variable). Use consistent variable names: index (current), stored_index (current best), stored_value (value for stored_index).
+4. Add unit tests that exercise:
+   - Adding items in orders that would reveal incorrect unconditional assignments (your provided tests already do this).
+   - Mixed types (SimpleTimePeriod vs other TimePeriod implementations) to hit both branches.
+
+Short example replacement (conceptual)
+- Replace the problematic block with:
+
+    if self._min_start_index < 0:
+        self._min_start_index = index
+    else:
+        # compute min_start from existing recorded index
+        if start < min_start:
+            self._min_start_index = index
+
+Summary
+- Root cause: an unconditional assignment (self._min_start_index = index at line 349) overwrites the correct index every time, so min-start selection fails. Fix by removing that unconditional assignment and using an explicit initialization + conditional update. Audit the rest of _update_bounds for the same pattern to prevent the other failing tests (e.g., max_middle_index) from similar mistakes.

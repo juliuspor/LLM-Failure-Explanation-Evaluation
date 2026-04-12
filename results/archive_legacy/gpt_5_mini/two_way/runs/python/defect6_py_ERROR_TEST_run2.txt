@@ -1,0 +1,46 @@
+What happened
+- The test failed because add_number produced "0" for -0.0. The negative sign on the IEEE-754 negative zero was dropped, so the test expected "-0.0" but got "0".
+
+Why it happened (root cause)
+- In CodeConsumer.add_number you have a branch that detects whole numbers and prints them as integers. That branch looks like (pseudocode taken from the bug pattern):
+  if value == int(value):
+      s = str(int(value))
+      self.append(s)
+- For -0.0, value == int(value) is true (both compare equal to 0), and int(-0.0) → 0. Converting that to string yields "0", so the sign bit is lost. The code never checks for the special case of negative zero before the integer formatting branch.
+- In other words: the code uses numeric equality / int conversion to choose an integer representation, and that path obliterates the negative-zero sign bit.
+
+Where it occurs
+- In CodeConsumer.add_number: the integer-formatting branch that runs when you test "value == int(value)" (or equivalent) is the exact place the sign is lost. The responsibility for detecting negative zero belongs before that branch.
+- The utility CodeConsumer.is_negative_zero exists in the tests; the fix must use that (or math.copysign/signbit) to detect negative zero before turning the value into an int/string.
+
+Concrete fixes (step-by-step)
+1. Add an explicit negative-zero check at the start of add_number, before any integer formatting:
+   - Example change (pseudo-Python; insert this before the int-branch):
+     if self.is_negative_zero(value):
+         # preserve sign of negative zero
+         self.append("-0.0")
+         return
+2. If you don't want to return early, ensure subsequent logic preserves the negative-zero string instead of converting to int:
+   - Example: if value == 0.0 and math.copysign(1.0, value) < 0:
+         s = "-0.0"
+     else if value == int(value):
+         s = str(int(value))
+     else:
+         s = float-formatting...
+     self.append(s)
+3. If you use an is_negative_zero helper, implement it like:
+     @staticmethod
+     def is_negative_zero(x):
+         return x == 0.0 and math.copysign(1.0, x) < 0
+   (This reliably detects the negative-zero sign bit.)
+4. Add or keep a unit test for is_negative_zero (already present) and ensure negative zero test runs before the integer branch.
+
+Why these steps fix it
+- They ensure the negative-zero case is handled before any integer conversion that would erase the sign bit. Either you print "-0.0" explicitly, or you avoid int(value) for zeros with a negative sign.
+
+Notes / alternatives
+- Another approach is to always format zeros as floats (e.g., format with "{:.1f}") rather than converting to int; but that changes the output for values that you want as integers (42.0 → "42" vs "42.0"). The safer minimal change is to detect negative zero first and only special-case that.
+
+Summary
+- Root cause: integer-branch converts -0.0 to int(−0.0) → 0 and prints "0" before any test for negative zero.
+- Fix: detect negative zero (using is_negative_zero or math.copysign) before the integer-formatting branch and append "-0.0".

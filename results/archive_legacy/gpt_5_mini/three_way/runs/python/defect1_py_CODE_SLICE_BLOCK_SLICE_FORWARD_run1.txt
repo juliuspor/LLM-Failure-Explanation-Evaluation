@@ -1,0 +1,38 @@
+What fails
+- The method rejects inputs where minutes_offset is negative (the check on line 396: "if minutes_offset < 0 or minutes_offset > 59") but the rest of the code treats minutes as part of a signed offset that can produce a negative total.
+- If a caller passes a negative minutes value (for example wanting "-1 hour 30 minutes" as for_offset_hours_minutes(-1, -30)), the method throws ValueError at line 396 ("Minutes out of range") even though the caller intended a valid negative offset. The stack trace therefore points at the range check, but the real problem is an inconsistency between the validation and how minutes are used later.
+
+Why this happens (root cause)
+- The method enforces 0..59 for minutes_offset (line 396) but then combines hours and minutes into a signed total by reusing the same variable minutes_offset (lines 402 and 404). That means:
+  - The API currently requires minutes to be non-negative, yet callers reasonably expect to supply a negative minute component when they want a negative offset.
+  - Reusing minutes_offset to hold the computed total minutes is confusing and error-prone; it hides the original input and makes the code harder to reason about and maintain.
+
+Where it occurs (lines)
+- Validation that rejects negative minutes: line 396
+- Combining hours and minutes into a signed total (and overwriting the minutes parameter): lines 402 and 404
+- Multiplying to millis: line 405
+
+Concrete examples that demonstrate the failure
+- for_offset_hours_minutes(-1, -30) -> fails at line 396 with ValueError("Minutes out of range: -30"), even though the intended total offset (-90 minutes) is valid.
+- for_offset_hours_minutes(1, 30) -> accepted and works (minutes are positive).
+- for_offset_hours_minutes(-1, 30) -> accepted and works because the code applies the sign from hours; but the API is inconsistent: sometimes minutes must be positive, sometimes you might want negative minutes.
+
+How to fix it (step-by-step)
+1. Stop validating minutes as possibly negative if you want to allow callers to pass a signed minute component. Decide one consistent API:
+   - Option A (recommended): Require minutes be 0..59 and apply sign coming from hours_offset. That is, callers always give a non-negative minutes magnitude and the sign comes from the hours parameter.
+   - Option B: Allow minutes_offset to be signed (range -59..59) and compute the total minute offset as hours_offset*60 + minutes_offset.
+
+2. Use a separate variable for the total minutes instead of overwriting the input parameter. This makes the code clearer and prevents accidental misuse:
+   - Example for Option A:
+     - if hours_offset < 0: total_minutes = hours_offset*60 - minutes_offset
+     - else: total_minutes = hours_offset*60 + minutes_offset
+   - Example for Option B:
+     - if abs(minutes_offset) > 59: raise ...
+     - total_minutes = hours_offset*60 + minutes_offset
+
+3. Keep the bounds checks on hours (line 393) and minutes (adjusted per your chosen option). After computing total_minutes, then convert to milliseconds and check for overflow as before.
+
+4. Replace the in-place reuse of minutes_offset (lines 402/404) with a fresh variable name like total_minutes and use that in FieldUtils.safe_multiply.
+
+Summary
+- The method currently mixes two different expectations about the sign of minutes and also overwrites the minutes_offset input variable with the computed total. This causes valid signed offsets like (-1, -30) to be rejected at the range check on line 396. Fix by choosing one consistent input convention (signed minutes or unsigned minutes with hours holding sign), and compute the total into a separate variable (total_minutes) before converting to milliseconds.

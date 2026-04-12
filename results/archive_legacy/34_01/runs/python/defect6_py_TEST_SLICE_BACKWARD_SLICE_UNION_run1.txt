@@ -1,0 +1,32 @@
+What happened (where and what): The test passed -0.0 into MockCodeConsumer.add_number, which eventually calls MockCodeConsumer.add (line 126) and then MockCodeConsumer.append (line 138). Inside add/append the code treats “zero” specially (it does an equality check or normalizing assignment) and replaces any value that compares equal to 0.0 with a plain positive 0.0. That step converts -0.0 to 0.0, so cc.get_code() yields "0.0" and the assertion expecting "-0.0" fails.
+
+Why this happens (root cause): In IEEE floats -0.0 != 0.0 is false (they compare equal), so any code that does something like
+- if newcode == 0.0: newcode = 0.0
+or
+- newcode = float(newcode) followed by normalizing code that sets zero values to +0.0
+will discard the sign bit of negative zero. The equality check/newcode reassignment is located in the path from add (line 126) to append (line 138), so the sign is lost before the string conversion or storage.
+
+Concrete, actionable fixes (steps you can apply):
+1. Find the zero-normalizing line(s) in add (line 126) or append (line 138). Look for comparisons like newcode == 0 or assignments newcode = 0.0 done to handle zeros.
+2. Remove or change the normalization so it does not overwrite the sign of zero. Two safe options:
+   - Preserve the original value and only normalize when you actually need the positive zero: avoid unconditional newcode = 0.0 when newcode == 0.0.
+   - Detect sign explicitly and preserve it:
+     - In Python, use math.copysign or repr for string conversion. For example:
+       - To check sign: sign = math.copysign(1.0, newcode)  (sign is 1.0 for +0.0, -1.0 for -0.0)
+       - To convert without losing sign use repr(newcode) (repr(-0.0) -> "-0.0") instead of forcing a normalization to 0.0.
+3. If you must normalize numeric semantics but want textual fidelity, store the numeric value and also store the original string or sign bit, and use that when producing code via get_code().
+
+Minimal example fix in Python-style terms:
+- Replace any code that does:
+    if newcode == 0.0:
+        newcode = 0.0
+  with:
+    # preserve sign of zero
+    if newcode == 0.0:
+        # keep as-is, or use math.copysign(0.0, newcode) when you need a zero with the same sign
+        newcode = math.copysign(0.0, newcode)
+
+Test after fix:
+- Run the original test cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0' to verify the negative zero is preserved.
+
+Why this explanation is precise: the loss occurs because of an equality-based zero normalization in add (line 126) / append (line 138). That normalization replaces -0.0 with +0.0; preserving the sign or using a string conversion that retains sign (repr) fixes the failing test.

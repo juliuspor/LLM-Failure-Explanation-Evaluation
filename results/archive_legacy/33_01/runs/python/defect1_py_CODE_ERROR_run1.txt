@@ -1,0 +1,67 @@
+What happened (where it failed)
+- The failure occurs at the minutes validation check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset})
+  In the stack trace you saw: ValueError: Minutes out of range: -15. That means minutes_offset was -15 when that check ran, so the code raised immediately from that line.
+
+Why it happened (root cause)
+- The method currently treats minutes_offset as required to be in the 0..59 range (the validation enforces that).
+- The caller passed minutes_offset = -15 (probably to represent an offset of -3 hours 15 minutes), so the validation fails.
+- The later code tries to combine hours and minutes into a total-minute value:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic assumes minutes_offset is non-negative (0..59). But the code rejects negative minutes before this combination step, so the method never reaches the combining logic when minutes are negative. In short: the validation forbids negative minute values even though the combination logic (and caller expectation) allow specifying a negative minutes component.
+
+Where to look in the code
+- Validation lines at the top of for_offset_hours_minutes:
+  - if hours_offset == 0 and minutes_offset == 0: ...
+  - if hours_offset < -23 or hours_offset > 23: raise ValueError(...)
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)  <-- the failing line
+- Combination lines afterwards:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+
+How to fix it (concrete steps)
+Option A — Accept signed minutes and compute total correctly (recommended if callers may pass negative minutes):
+1. Change the minutes validation to allow negative minutes in the -59..59 range:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total minutes explicitly in a separate variable (don't overwrite minutes_offset before validation):
+     hours_in_minutes = hours_offset * 60
+     total_minutes = hours_in_minutes + minutes_offset
+   Or, if you intend that minutes always have the same sign as hours (e.g. -3 hours 15 minutes means -3h -15m), normalize like:
+     if hours_offset < 0 and minutes_offset > 0:
+         total_minutes = hours_in_minutes - minutes_offset
+     else:
+         total_minutes = hours_in_minutes + minutes_offset
+3. Use total_minutes to compute offset:
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Option B — Require minutes to be non-negative (0..59) and document/correct callers (if that is the intended API):
+1. Keep the existing validation (minutes_offset must be 0..59).
+2. Fix callers so they never pass negative minutes. For a negative total offset, the caller must pass a negative hours_offset and a non-negative minutes_offset (e.g. -3 hours 15 minutes should be hours_offset = -3, minutes_offset = 15).
+3. Optionally add an explicit check to enforce callers follow the rule:
+     if hours_offset < 0 and minutes_offset < 0:
+         raise ValueError("minutes_offset must be non-negative when hours_offset is negative")
+   (but this is redundant if you require 0..59)
+
+Minimal code example for Option A (safe, accepts negative minutes):
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    # total minutes: if hours negative and minutes positive, subtract; otherwise add
+    if hours_in_minutes < 0 and minutes_offset > 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary
+- The immediate cause of the ValueError is the minutes range check rejecting a negative minutes_offset (-15).
+- The root cause is a mismatch between the validation and the later combination logic / caller expectation: either allow signed minutes and compute total correctly, or enforce that minutes are always non-negative and update callers. Implement one of the concrete fixes above.

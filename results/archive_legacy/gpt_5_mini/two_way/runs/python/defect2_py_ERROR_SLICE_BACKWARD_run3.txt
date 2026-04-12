@@ -1,0 +1,50 @@
+What happened (where it failed)
+- The failure occurs inside get_paint (line 54) when computing g on line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after that, the code tests g on lines 74–75 and raises:
+  raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- So the ValueError is raised because g is outside the 0–255 range. That means the expression (value - self._lower_bound) / (self._upper_bound - self._lower_bound) produced a result that, when multiplied by 255 and converted to int, was < 0 or > 255.
+
+Why it happened (root causes, exactly)
+1. value is outside the configured bounds:
+   - If value < self._lower_bound or value > self._upper_bound, the normalized fraction can be < 0 or > 1, making g < 0 or > 255.
+   - This is the most likely cause when callers pass an out-of-range value into get_paint(value).
+
+2. The bounds are invalid (lower_bound >= upper_bound):
+   - If self._upper_bound == self._lower_bound, the code divides by zero on line 71 (would raise ZeroDivisionError rather than produce g).
+   - If self._upper_bound < self._lower_bound, the denominator is negative and the normalized result will be flipped, producing g outside 0–255 for otherwise valid value inputs.
+
+3. The check only tests the single variable g (line 74–75):
+   - The error message complains about "Red Green Blue" but the code only computed/checked g. If r and b are computed elsewhere, they may also be out of range and yet the message is unhelpful.
+
+Why the current error message is misleading
+- The message "Color parameter outside of expected range: Red Green Blue" does not say which channel (r, g, or b), what numeric value caused the problem, nor which variable (value, lower_bound, upper_bound) was invalid. That leaves the developer guessing.
+
+Exact places to change (concrete fixes)
+1. Validate bounds in __init__ (lines 30–44)
+   - Add a check so lower_bound < upper_bound; raise a clear ValueError if not.
+   Example steps:
+   - After setting self._lower_bound and self._upper_bound, add:
+     if self._lower_bound >= self._upper_bound:
+         raise ValueError(f"lower_bound must be less than upper_bound: got {self._lower_bound} >= {self._upper_bound}")
+
+2. Validate value in get_paint (line 54) before computing g (insert before line 71)
+   - Check that value is between self._lower_bound and self._upper_bound and raise a precise error if not.
+   Example step:
+   - if not (self._lower_bound <= value <= self._upper_bound):
+         raise ValueError(f"value out of bounds: {value} not in [{self._lower_bound}, {self._upper_bound}]")
+
+3. Compute and check all color channels (if you produce r,g,b)
+   - Compute r, g, b individually, then validate each is within 0–255. If any is outside, raise an error that names the specific channel and its numeric value.
+   Example step:
+   - r = ...; g = ...; b = ...
+     for name, channel in (("r", r), ("g", g), ("b", b)):
+         if channel < 0 or channel > 255:
+             raise ValueError(f"Color channel {name} out of range: {channel} (expected 0..255)")
+
+4. Replace the vague message on line 75
+   - Provide the offending numeric value and which variable caused it. E.g. "Color channel g out of range: -12".
+
+Summary
+- Root cause: value or bounds produced a normalized value that yields g outside 0–255 (or bounds were inverted), triggering the ValueError check on lines 74–75.
+- Fixes (in order): validate bounds in __init__, validate value in get_paint before computing, compute and check each channel, and replace the vague error message with one that includes the channel name and numeric value. Following these concrete steps will stop the current ValueError and make the failure mode clear if it happens again.

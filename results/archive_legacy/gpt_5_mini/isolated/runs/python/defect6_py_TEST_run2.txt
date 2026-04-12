@@ -1,0 +1,46 @@
+What happened
+- The failing assertion comes from test_negative_zero expecting add_number(-0.0) to output "-0.0", but the implementation is printing "0" (or "0.0") without the minus sign.
+- Root cause: the code in CodeConsumer.add_number treats zeros by testing value == 0.0 (or value == 0) and unconditionally formats them as positive zero. That equality test discards the sign bit of -0.0, so the code never preserves the negative-zero case.
+
+Where it occurs (what to look for)
+- In CodeConsumer.add_number, find the branch that handles zeros or integer values; typical patterns that cause this bug:
+  - if value == 0.0: append("0") or append("0.0")
+  - elif value.is_integer(): append(str(int(value)))
+  - Any code that converts the float to int or does a direct equality check with 0.0 before checking for negative zero.
+
+Why that causes the failure
+- In IEEE-754, -0.0 compares equal to 0.0, so an equality test value == 0.0 cannot distinguish sign. If you check equality first, you will format -0.0 as positive zero.
+- The unit tests expect sign preservation for negative zero (the utility is_negative_zero exists and the tests check it). Because the check for zero runs before a negative-zero check, the special case never runs and the minus is lost.
+
+Exact places and variables to change
+- In CodeConsumer.add_number, locate the zero-handling branch. Typical variable names: value (or n), self.append(...), and the helper method CodeConsumer.is_negative_zero.
+- Insert the negative-zero check before any equality-to-zero or integer-conversion logic.
+
+Concrete fix (exact code to add)
+- Before any "if value == 0.0" or "if value.is_integer()" logic, add:
+
+    # preserve sign of negative zero
+    if self.is_negative_zero(value):
+        # produce -0.0 explicitly so the sign is retained
+        self.append("-0.0")
+        return
+
+- Implement is_negative_zero if missing or incorrect. A safe implementation:
+
+    @staticmethod
+    def is_negative_zero(x):
+        # x == 0.0 is required so non-zero values are rejected
+        # math.copysign(1.0, x) < 0.0 is true for -0.0
+        import math
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+Why that fix works
+- math.copysign preserves sign information for zero; checking is_negative_zero first guarantees -0.0 is handled before any code that treats zeros generically (equality or int conversion).
+- Returning immediately prevents later branches (which would convert to int or format without sign) from executing.
+
+Extra notes and pitfalls
+- Do not rely on int(value) or value.is_integer() before this negative-zero check — those will drop the sign.
+- Keep the rest of spacing / operator-handling logic unchanged; the negative-after-minus test implies add_number should still combine sensibly after a "-" via append("-") then add_number(-5.0) — the change above only affects negative-zero and returns early, so it won't change spacing behavior for normal negative numbers.
+- If your code formats numbers using a generic formatting helper, ensure that helper also either checks is_negative_zero or that add_number handles negative zero before calling the formatter.
+
+This pinpoints the exact cause (zero equality test happens before negative-zero detection) and gives the precise code and location to change.

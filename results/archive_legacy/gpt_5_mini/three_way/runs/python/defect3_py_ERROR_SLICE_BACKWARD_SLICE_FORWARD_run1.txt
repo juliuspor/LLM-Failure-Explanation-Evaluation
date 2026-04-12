@@ -1,0 +1,42 @@
+What happened (where it failed)
+- The IndexError was raised at line 36 inside this block:
+  - 35: if index < 0 or index >= len(code_units):
+  - 36:     raise IndexError(f"String index out of range: {index}")
+- The code checked index against len(code_units) and decided index (2) is out of range, so the function aborted before trying to read code_units[2].
+
+Why it happened (root cause)
+- There is a coordinate-system mismatch between the index the caller passed and the list the function is checking:
+  - to_utf16_code_units builds code_units (a list of UTF‑16 code units).
+  - The caller passed index = 2 expecting to index "the third character" in the original Python string s (a character/code point index).
+  - But len(code_units) is measured in UTF‑16 code units, not Python string characters. If the string contains surrogate pairs (characters outside the BMP) or simply fewer code units than characters, the numeric index that is valid for s may be invalid for code_units (and vice versa).
+- Concretely: index == 2 is not less than len(code_units), so the check fails and raises IndexError. The code never reaches the code that would combine a high and low surrogate (lines 38–43) because the mismatch was caught earlier.
+
+Exactly where to look
+- The check uses len(code_units) (line 35). That is the wrong length to validate if the caller supplied a character index. If the caller supplied a code‑unit index, the caller is passing an invalid index.
+- The later lines (38–43) assume index points into code_units; they are correct only if index is actually a code‑unit index.
+
+Concrete fixes (choose one, with exact steps)
+
+Option A — Caller meant "character index" (index into Python string s)
+1. Change the validation to check against len(s) instead of len(code_units):
+   - Replace line 35 with: if index < 0 or index >= len(s):
+2. Compute the code point at that character index directly (don’t index code_units by the character index). For example:
+   - Use ord(s[index]) and, if ord(s[index]) is a surrogate high, combine with the next code unit of s (but in Python 3 you usually don’t have surrogates; ord(s[index]) already gives the full code point).
+3. Or simpler: if you want the Unicode code point for character index i, return ord(s[index]). Remove the UTF‑16 code‑unit logic unless you specifically need UTF‑16 units.
+
+Option B — Caller meant "UTF‑16 code‑unit index" (index into code_units)
+1. Keep the check against len(code_units) but fix the caller so it passes a valid code‑unit index:
+   - Before calling to_utf16_code_units(s) the caller should compute or convert the desired character index to a code‑unit index.
+2. Example conversion: build code_units once with to_utf16_code_units(s) and ensure the caller uses an index < len(code_units). If you need code-unit index for character i, compute it by encoding slices:
+   - unit_index = len(s[:i].encode('utf-16-le')) // 2
+   - Then pass unit_index to this function.
+
+Minimal reproducible test to confirm the bug
+- Suppose s = "ab" and code_units has length 2. Calling function with index = 2 (third position) will raise the reported IndexError because 2 >= len(code_units).
+- Suppose s = "A😊B" where the emoji is a surrogate pair in UTF‑16: len(s) == 3 (characters) but len(code_units) == 4 (UTF‑16 units). Passing a character index 2 (the third character) as if it were a code‑unit index can be out of range or point to wrong unit.
+
+Which fix to apply
+- If the rest of your code treats index as a Python string character index, apply Option A.
+- If your code is intentionally working with UTF‑16 code units, apply Option B and make the caller compute a code‑unit index before calling this function.
+
+If you want, paste the caller code that supplies index and I will show the exact minimal change to make the index checks and indexing consistent.

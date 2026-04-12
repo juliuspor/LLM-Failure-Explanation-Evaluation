@@ -1,0 +1,56 @@
+What happened (what failed)
+- The ValueError is raised on line 77 inside get_paint (file slice_union) because the computed g is outside the allowed 0–255 range. The code raises ValueError when it sees g < 0 or g > 255.
+- The actual failing expression is the calculation on line 73:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  That formula produced a number outside 0–255 for the given inputs, so the test on line 76 triggered the ValueError on line 77.
+
+Why it happened (root cause)
+- The method assumes the normalized fraction (value - lower) / (upper - lower) will always be between 0 and 1. If that assumption is false, the result multiplied by 255 can be <0 or >255 and int(...) will produce a g outside the expected range.
+- Two common concrete causes:
+  1) value is outside the interval [self._lower_bound, self._upper_bound] (e.g., value < lower or value > upper). That directly yields g < 0 or g > 255. This is the most likely cause.
+  2) self._lower_bound >= self._upper_bound (bounds misconfiguration). If upper == lower you'd get a ZeroDivisionError (not this ValueError); if upper < lower the fraction can be >1 or <0 for normal value inputs, producing out-of-range g.
+- The ValueError message ("Color parameter outside of expected range: Red Green Blue") is unhelpful because it does not include the actual values (value, lower_bound, upper_bound, computed g) or a clear statement that get_paint produced an out-of-range green channel.
+
+Where it occurred (specific lines and method)
+- Method: get_paint
+- Relevant lines from your trace:
+  - Line 73: computes g
+  - Line 76: checks g < 0 or g > 255
+  - Line 77: raises ValueError with the uninformative message
+
+Concrete fixes (step-by-step)
+1) Validate bounds on construction
+   - In the class __init__ (or wherever _lower_bound and _upper_bound are set) add a check:
+     - If upper == lower, raise a clear error (division by zero would otherwise happen).
+     - If upper < lower, either swap them or raise a configuration error.
+   - Example action: raise ValueError(f"_lower_bound ({self._lower_bound}) must be < _upper_bound ({self._upper_bound})")
+
+2) Clamp or reject out-of-range input value in get_paint
+   - Option A (reject): At start of get_paint, check if value < lower or value > upper and raise a clear error including the values:
+     raise ValueError(f"value {value} outside [{self._lower_bound}, {self._upper_bound}]")
+   - Option B (clamp): If you want to allow out-of-range values, clamp the normalized fraction so g stays within 0–255:
+     frac = (value - lower) / (upper - lower)
+     frac = max(0.0, min(1.0, frac))
+     g = int(frac * 255.0)
+
+3) Improve the error message where you raise the ValueError
+   - Replace the generic string with one that includes the computed g and the inputs:
+     raise ValueError(f"Computed color channel out of range: g={g} (value={value}, lower={self._lower_bound}, upper={self._upper_bound})")
+
+4) Optional: use safer numeric conversion
+   - Compute the float fraction first, clamp it, then convert to int to avoid any surprises with large float -> int conversion.
+
+Minimal concrete code change (inside get_paint)
+- Before computing g, add:
+  if self._upper_bound == self._lower_bound:
+      raise ValueError(f"Invalid bounds: lower={self._lower_bound} upper={self._upper_bound}")
+  frac = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+  frac = max(0.0, min(1.0, frac))   # clamps fraction to [0,1]
+  g = int(frac * 255.0)
+
+Why these fixes solve it
+- Validating bounds prevents division-by-zero or inverted ranges.
+- Clamping or rejecting out-of-range values ensures g will always be between 0 and 255, so the error will no longer be raised for normal numeric inputs.
+- A clear error message will tell you exactly what went wrong (the actual numeric inputs), preventing guessing.
+
+If you want, paste the surrounding __init__ and any code that sets _lower_bound/_upper_bound and I will show the exact lines to modify.

@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The function fails at line 36 with IndexError("String index out of range: {index}"). That means the caller passed an index that is not inside the code_units list bounds (index < 0 or index >= len(code_units)).
+- You will also hit a logical bug later (not a crash) at line 44: if code_units[index] is a high surrogate (0xD800–0xDBFF) and it is not followed by a low surrogate, the function returns the raw high-surrogate value (variable high) as a code point. That is an invalid Unicode scalar value and will cause later code that expects a valid scalar to fail or produce incorrect results.
+
+Why it happened (root causes, with variables/lines)
+1. Out-of-range index (immediate crash)
+   - At lines 35–36 the code checks:
+     if index < 0 or index >= len(code_units):
+         raise IndexError(...)
+   - The IndexError means the caller supplied index equal to len(code_units) or otherwise outside [0, len(code_units)-1]. The root cause is therefore a mismatch between the index the caller supplies and the length of code_units. Typical causes:
+     - The caller computed index using the original string length but then converted the string into code_units and the lengths differ.
+     - An off-by-one in the caller where it uses len(...) instead of len(...) - 1 when iterating.
+     - The caller mutated code_units before calling slice_forward so len(code_units) is smaller than expected.
+
+   This is where the failure occurs: line 36.
+
+2. Invalid return for unmatched high surrogate (logical bug, lines 38–44)
+   - At line 38 you read high = code_units[index].
+   - Lines 39–43 detect a valid surrogate pair and return the combined code point.
+   - But at line 44 you return high unmodified whenever the high-surrogate is not followed by a matching low-surrogate.
+   - Returning a value in the 0xD800–0xDBFF range is not a valid Unicode scalar; any later code that assumes a valid scalar will misbehave. This is a bug in behavior (it may not crash immediately but leads to incorrect results).
+
+How to fix it (concrete steps you can take)
+1. Fix the caller / index supply so the function is only called with a valid index:
+   - Audit the caller(s) that call this method and ensure they only call with index in 0 .. len(code_units)-1.
+   - If the caller computes index from the original string, make sure it uses the same code_units array or adjusts for any difference in length/encoding.
+   - If you iterate, use for index in range(len(code_units)): or for i, _ in enumerate(code_units): rather than using len(...) - 1 mistakes.
+
+2. Add robust handling for unmatched surrogates (change behavior at lines 39–44):
+   - Instead of returning the raw high surrogate at line 44, either:
+     a) Return the Unicode replacement character U+FFFD (0xFFFD) to indicate a decode error, or
+     b) Raise a ValueError indicating an unmatched surrogate (if you prefer to treat it as a hard error).
+   - Concretely replace the final return high with one of:
+     - return 0xFFFD
+     - or raise ValueError(f"Unpaired high surrogate at index {index}: 0x{high:X}")
+   - This prevents later code from getting invalid scalar values.
+
+3. (Optional) Improve the index bound check message and type if you prefer different error semantics:
+   - If the API contract should raise ValueError for bad input rather than IndexError, change the exception type at line 36 to ValueError and document it.
+   - Otherwise keep IndexError but ensure the caller is fixed.
+
+Summary (what to change, with lines)
+- Caller-side: stop calling slice_forward with index >= len(code_units). This will prevent the IndexError at line 36.
+- In slice_forward: replace the fallback return at line 44 so you do not return an invalid surrogate. Either return 0xFFFD or raise ValueError on unmatched high surrogate.
+
+Those two concrete fixes remove the crash and prevent incorrect/invalid code points from being returned.

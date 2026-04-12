@@ -1,0 +1,51 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method raises ValueError("Minutes out of range: -15") at the input validation (lines ~400–401), so the test fails.
+
+Why it failed (root cause)
+- for_offset_hours_minutes enforces that minutes_offset must be between 0 and 59:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")  (lines 400–401)
+- But the API in the docstring (and the intended behavior) allows negative minutes when the hours are negative: e.g. (-2, -15) should mean -02:15.
+- The code later attempts to combine hours and minutes with sign-aware logic (hours_in_minutes = hours_offset * 60; if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset else ...), which expects minutes_offset to be allowed to be negative when hours_offset is negative.
+- Because validation rejects negative minutes unconditionally, valid inputs such as (-2, -15) are refused prematurely. The error originates in for_offset_hours_minutes, specifically at the minutes validation check (lines 400–401).
+
+Where in the code
+- Method: DateTimeZone.for_offset_hours_minutes (start ~line 309 in your file; validation at ~line 400).
+- Failing check: the unconditional minutes range check:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This is inconsistent with the accepted sign combinations described in the docstring above the method.
+
+How to fix it (clear, actionable steps)
+Option A — allow negative minutes when hours are negative (recommended, minimal change)
+1. Replace the unconditional check with logic that enforces the valid combinations described in the docstring:
+   - minutes must be in 0..59 if hours > 0
+   - minutes must be in 0..59 if hours == 0 (but now sign of minutes determines overall sign)
+   - minutes must be in 0..59 if hours < 0 but you accept negative minutes as representing the same sign as hours (so you allow negative minutes but check absolute value <= 59)
+2. Concretely, change the check around line 400 to something like:
+   if abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Minutes must be positive when hours are positive")
+   (you can mirror the combinations in the docstring to be exact)
+
+Option B — normalize sign earlier and require minutes non-negative
+1. Require callers to pass minutes >= 0 and interpret hours sign; document that (-2, -15) is invalid and callers must pass (-2, 15) to mean -02:15.
+2. This is a breaking change vs. your docstring; not recommended unless you update docs/tests.
+
+Example patch (implementing Option A, minimal):
+- Replace the two validation lines with:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must not be negative when hours are positive")
+
+Why the recommended fix is correct
+- It matches the method docstring which explicitly lists sign combinations (including negative minutes when hours are negative).
+- It allows inputs like (-2, -15) to produce offset -02:15 as intended (the subsequent combining logic already expects to handle negative minutes).
+
+Summary
+- The failing check is in DateTimeZone.for_offset_hours_minutes (validation of minutes at lines ~400–401).
+- It incorrectly rejects valid inputs like (-2, -15).
+- Fix by changing validation to allow negative minutes when appropriate (or normalize inputs), with the suggested code change above.

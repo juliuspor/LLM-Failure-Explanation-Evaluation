@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The failure occurs inside LocaleUtils.to_locale at the checks around lines 237–240 in your slice:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- For the input "fr__POSIX" the character at index 3 is '_' (because the format is language + '_' + '_' + variant). The code expects ch3 and ch4 to be uppercase letters for a country code and therefore fails the test ch3 < 'A' or ch3 > 'Z' (since '_' < 'A') and raises ValueError.
+- In short: the method unconditionally validates positions 3 and 4 as an uppercase country code, so it rejects the "language__variant" form (empty country, double underscore) instead of recognizing that the empty country is allowed and the rest is the variant.
+
+Why this happens (root cause)
+- The code assumes that whenever a variant is present, there must be a 2-letter country code in positions 3 and 4. It never checks for the special case where the country is empty (two consecutive underscores). Because of that, the check on ch3/ch4 treats the second underscore as an invalid country letter and raises an error.
+- Variable names and lines: locale_str is indexed at [3] and [4] (lines 237–239), and the ValueError is raised at line 240 when those characters are not uppercase letters.
+
+Concrete fix (step-by-step)
+1. Detect the empty-country case explicitly before validating ch3/ch4:
+   - If locale_str[2] == '_' and locale_str[3] == '_' then:
+     - set country = ""
+     - set variant = locale_str[4:] (allowing variant to be any non-empty string)
+   - Otherwise, proceed to validate a 2-letter country at locale_str[3:5] as the existing code intends.
+2. Keep the existing validations for:
+   - language length and lower-case check (unchanged)
+   - country two-letter upper-case check (only when country is present)
+   - separator being underscore
+3. Example pseudocode patch:
+   - if locale_str[2] == '_' and locale_str[3] == '_':
+       country = ""
+       variant = locale_str[4:]
+     else:
+       ch3 = locale_str[3]
+       ch4 = locale_str[4]
+       if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+           raise ValueError(...)
+       country = locale_str[3:5]
+       variant = locale_str[6:]  # if there's a variant following another underscore
+
+Which tests fail because of this
+- test_locale_with_empty_country_variant (fr__POSIX)
+- test_locale_empty_country_with_variant (en__UNIX, de__DOS)
+These expect the code to accept language__variant and return Locale(language, "", variant), but the present code raises ValueError.
+
+Summary
+- Root cause: unconditional validation of characters at indices 3 and 4 as an uppercase country code; does not handle the valid "language__variant" (double-underscore) form.
+- Fix: detect the double-underscore (empty country) case first and parse variant accordingly; only validate country letters when a country is actually supplied.

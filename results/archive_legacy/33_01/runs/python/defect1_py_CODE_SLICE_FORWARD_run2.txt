@@ -1,0 +1,53 @@
+What fails
+- The code computes the total offset minutes by reusing the parameter minutes_offset and then either adding or subtracting it from hours_in_minutes at lines 402–405. That logic produces the wrong sign for the total minutes in the case of negative hour offsets, and so the method returns an incorrect offset (or later overflows when multiplied by MILLIS_PER_MINUTE).
+
+Where it happens (exact lines)
+- Line 402: hours_in_minutes = hours_offset * 60
+- Line 403–404: if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- Line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this is wrong (root cause)
+- The code treats minutes_offset both as the input minutes (0..59) and then as the computed total minutes. That alone is confusing, but the real sign bug is in how the code applies the minutes when hours_in_minutes is negative:
+  - For a negative hours_offset the code does: total_minutes = hours_in_minutes - minutes_offset.
+  - That only makes sense if the incoming minutes are always positive and the sign of the whole offset is determined solely by hours_offset. In practice an offset of "-1 hour, 30 minutes" should become -90 minutes (−60 − 30 = −90), but an offset of "-1 hour, 0 minutes" should become −60. The code’s logic will produce correct numbers only if the caller intended the minutes to always be positive and the sign applied by the hours. That ambiguity is the source of errors.
+- If callers supply negative minutes (which the code currently blocks, but callers might expect to be allowed), or if you want the sign to be determined by the pair (hours, minutes) rather than only hours, this code computes the wrong sign.
+- Reusing minutes_offset for two meanings (input minutes and total minutes) makes the code harder to reason about and easy to get the sign wrong.
+
+Concrete example showing the bug
+- Call: hours_offset = -1, minutes_offset = 30
+  - hours_in_minutes = -60
+  - code computes minutes_offset = hours_in_minutes - minutes_offset = -60 - 30 = -90  (here it actually produces the expected -90)
+- Call: hours_offset = -1, minutes_offset = 0
+  - hours_in_minutes = -60
+  - code computes minutes_offset = -60 - 0 = -60 (also okay)
+- But the ambiguity & failure surface when callers expect the sign to be the sign of the whole offset rather than carried by hours only, or if you later change validation to accept negative minutes. More importantly, the code is fragile and easy to misread or change into a wrong sign operation.
+
+How to fix (clear steps)
+1. Do not reuse the parameter minutes_offset to store the total. Introduce a new local variable (total_minutes) so input and computed values are distinct.
+2. Decide and implement a single, unambiguous sign rule: either
+   - Interpret minutes_offset as always positive and use the sign of hours_offset for the whole offset; or
+   - Allow minutes_offset to carry its own sign and compute total_minutes = hours_offset*60 + minutes_offset (this is simpler and less error-prone).
+3. Compute total_minutes explicitly and then multiply:
+   - If you choose to allow signed minutes:
+       total_minutes = hours_offset * 60 + minutes_offset
+   - If you choose to keep minutes positive and use hours sign:
+       sign = -1 if hours_offset < 0 else 1
+       total_minutes = hours_offset * 60 + sign * minutes_offset
+4. Use FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE) and return cls.for_offset_millis(offset).
+
+Minimum code example (replace lines 402–405)
+- Option A (signed minutes allowed):
+    total_minutes = hours_offset * 60 + minutes_offset
+- Option B (minutes positive, sign follows hours):
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes + (hours_in_minutes < 0 ? -minutes_offset : minutes_offset)
+
+Then multiply total_minutes by MILLIS_PER_MINUTE and return.
+
+Why this answers your requirements
+- Identifies the exact lines and variables (hours_in_minutes, minutes_offset, FieldUtils.safe_multiply) where the error occurs.
+- Explains the root cause (ambiguous/reused variable + sign handling).
+- Gives concrete, step-by-step fixes and a minimal replacement snippet so the developer can correct the code immediately.

@@ -1,0 +1,54 @@
+What happened (where it failed)
+- The test that failed called DateTimeZone.for_offset_hours_minutes(0, -15).
+- The method raised ValueError: Minutes out of range: -15.
+- The bug is in the code that computes/normalizes minute values — specifically the code that overwrites the minutes variable and then uses that wrong value when validating or building the total offset.
+- The problematic lines are in the slice you provided:
+  - Line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404: minutes_offset = hours_in_minutes + minutes_offset
+  - These lines overwrite minutes_offset instead of computing the total minutes correctly. Because the variable holding the original minute argument is reused and transformed, the code ends up validating or using an already-transformed value and rejects a perfectly valid minute value (-15).
+
+Why that produces "Minutes out of range: -15"
+- The function should first check that the minutes argument is within -59..59 and then compute total minutes from hours and minutes.
+- Instead, the code mutates minutes_offset using hours_in_minutes and arithmetic that depends on sign-handling logic, so for some inputs (hours == 0 and minutes negative, or other sign combinations) the mutated minutes_offset becomes a value the validator treats as out-of-range, so the function raises ValueError with the original minutes value in the message.
+- Concretely: by reusing minutes_offset to mean different things (original minutes vs. transformed combined-minute value) the flow that applies the range check sees the wrong value or applies the wrong transformation order and triggers the error for -15.
+
+Where exactly to look and fix (step-by-step)
+1. Lines to change: the assignments at/around lines 402 and 404 that reassign minutes_offset. Do not reuse the original minutes variable for intermediate results. Use separate names.
+   - Replace:
+     - minutes_offset = hours_in_minutes - minutes_offset
+     - minutes_offset = hours_in_minutes + minutes_offset
+   - With a single, clear calculation of total_minutes (or similar variable).
+2. Validate minutes early:
+   - Before any sign folding, check that the minutes argument is in the allowed range: if minutes < -59 or minutes > 59: raise ValueError("Minutes out of range: %d" % minutes)
+3. Implement sign rules clearly (matching the docstring/tests):
+   - If hours > 0 and minutes < 0: raise ValueError("Signs must match or be handled per spec")
+   - If hours < 0:
+       total_minutes = hours * 60 - abs(minutes)   # (-2, 15) -> -135
+     (this handles both (-2, 15) and (-2, -15) -> -135 as test expects)
+   - If hours > 0:
+       total_minutes = hours * 60 + minutes       # (2, 15) -> 135
+   - If hours == 0:
+       total_minutes = minutes                    # (0, -15) -> -15
+4. Convert total_minutes to milliseconds and proceed:
+   - offset = total_minutes * DateTimeConstants.MILLIS_PER_MINUTE
+   - Then return cls.for_offset_millis(offset)
+5. Use distinct local variable names:
+   - Keep the original minutes argument untouched (or copy it to minutes_arg) and compute total_minutes separately. This avoids accidental reuse/misinterpretation.
+
+Minimal example of the corrected calculation (pseudo-code)
+- Validate minutes in [-59, 59]
+- if hours > 0 and minutes < 0: raise ValueError(...)
+- if hours < 0:
+    total_minutes = hours * 60 - abs(minutes)
+  elif hours > 0:
+    total_minutes = hours * 60 + minutes
+  else:
+    total_minutes = minutes
+- offset = total_minutes * MILLIS_PER_MINUTE
+
+Why this fix works
+- It prevents overwriting the original minutes variable with intermediate results.
+- It ensures the range check sees the real minute argument.
+- It makes the sign handling explicit so the combinations tested (0, -15), (-2, 15), (-2, -15), (2, -15) behave exactly as the tests/docstring expect.
+
+If you want, I can produce the exact patched code for the method showing the replaced lines and validations.

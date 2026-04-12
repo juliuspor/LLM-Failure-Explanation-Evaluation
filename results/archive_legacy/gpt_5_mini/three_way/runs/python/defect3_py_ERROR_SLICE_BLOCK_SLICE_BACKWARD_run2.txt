@@ -1,0 +1,42 @@
+What happened (where it failed)
+- The exception is raised at lines 35–36 inside to_utf16_code_units (shown in your slice). The code checks:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- The test produced index == 2, and that check evaluated True because len(code_units) <= 2. In other words, index 2 is not a valid index into the list code_units (valid indexes would be 0 .. len(code_units)-1).
+
+Why it happened (root cause)
+- Somewhere before this check you computed or received an index value (named index) that assumes the string has at least three UTF-16 code units, but code_units actually contains fewer than three items.
+- A likely real-world cause in this function is an off-by-one or a mismatch between "characters" (Python str code points) and UTF-16 code units. Some Unicode characters (for example emoji or characters outside the BMP) map to two UTF-16 code units (a surrogate pair). If code_units was built by appending 1 or 2 units per code point, then the index you supply must be in terms of code_units, not in terms of Python string positions. If you mixed those two index spaces, index can be out-of-range.
+- Concretely: index == len(code_units) (2 in this case) means the caller tried to access one past the last element, so the check correctly raised IndexError.
+
+How to reproduce / confirm
+1. Log the values right before the check (add a temporary print or debugger):
+   print("index:", index, "len(code_units):", len(code_units))
+2. Run the failing test input. If len(code_units) is less than or equal to the index, you’ve confirmed the mismatch.
+3. Check how index is computed in the caller: is it derived from the original Python string positions, or from the code_units list?
+
+Exact, actionable fixes (choose the one that fits your intent)
+1. If index is meant to index UTF-16 code units:
+   - Ensure the caller computes index in the same space as code_units. If the caller computed an index from Python string code points, convert that to code-unit offset by counting how many units were appended up to that code point when building code_units.
+   - Example: when building code_units, maintain a mapping list from code-point index -> current code_unit_offset. Use that mapping to translate a code-point index to a code-unit index.
+
+2. If index is meant to index Python string characters (code points):
+   - Change the function signature/behavior so it takes a code-point index, then compute the correct code-unit offset internally before validating/accessing code_units.
+
+3. If the check itself is wrong (off-by-one bug in validation):
+   - Leave the check as-is (it is correct for Python indexing). But if you intended to allow index equal to len(code_units) (rare), reconsider — accessing len(code_units) is invalid and should not be allowed.
+
+4. Defensive: make the error clearer
+   - Replace the current IndexError message with more detail to help future debugging:
+     raise IndexError(f"UTF-16 code unit index out of range: {index} (valid 0..{len(code_units)-1})")
+
+Step-by-step fix example (if caller used Python-string index):
+- When building code_units, also build code_unit_offsets: start at 0, for each character ch in s:
+    if ord(ch) <= 0xFFFF:
+        append one unit; append code_unit_offsets.append(current_offset); current_offset += 1
+    else:
+        append two units; append code_unit_offsets.append(current_offset); current_offset += 2
+- When the caller passes a Python-string index i, translate to code-unit index j = code_unit_offsets[i] and use j when indexing code_units.
+
+Summary
+- The exception means index == 2 is outside the valid range for code_units. The root cause is a mismatch between how that index was computed and what code_units actually contains (likely an off-by-one or code-point vs. UTF-16-code-unit mismatch). Fix by making both sides use the same index space (or translate indices explicitly), and add clearer error logging while you debug.

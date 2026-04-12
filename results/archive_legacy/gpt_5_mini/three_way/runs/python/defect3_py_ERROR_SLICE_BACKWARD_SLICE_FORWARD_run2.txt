@@ -1,0 +1,49 @@
+What happened (what failed)
+- The function raised the IndexError on line 36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  The error message shows index == 2 and len(code_units) <= 2, so the condition was true and the function aborted there.
+
+Why it happened (root cause)
+- The function builds code_units (UTF-16 code units) in to_utf16_code_units(s). The variable index you pass into this function is being compared to len(code_units) (line 36).
+- The caller passed an index that is measured in a different unit than code_units. In plain terms: index 2 is valid as an index into the original Python string s (or into a list of code points), but it is out of range for code_units because code_units has fewer entries than the caller expects. That mismatch of "index means UTF-16 code-unit index" vs "index means Python string index / code-point index" is the root cause.
+- As a concrete example: if s contains a surrogate pair (one Unicode character encoded as two UTF-16 code units), len(s) (or the caller's index space) will count that character once, but len(code_units) counts it twice. Passing a "character index" into a function that indexes code_units will therefore produce index >= len(code_units) and trigger the raise on line 36.
+
+Where exactly (lines/variables)
+- to_utf16_code_units constructs code_units (not shown in the slice).
+- The range check at lines 35–36 uses: index and len(code_units).
+- The code then accesses code_units[index] at line 38 and code_units[index+1] at line 40, so the intent is to operate on UTF-16 code units. The IndexError shows this check failed: index (2) >= len(code_units).
+- The mismatch is between the caller's meaning of index and the check at line 36.
+
+Exactly how to fix it (clear, actionable steps)
+Pick the intended meaning of index and apply one of these specific fixes:
+
+A) If index is supposed to be an index into the original Python string s (character/code-point index):
+1. Change the range check to compare index against len(s) (line 36):
+   if index < 0 or index >= len(s): ...
+2. When you need the UTF-16 code units at that string position, map the string index to the correct code_unit index first (compute how many UTF-16 code units appear before s[index]). Example approach:
+   - Walk s from 0 to index-1, convert each character to 1 or 2 UTF-16 code units and count them.
+   - Use that count as the code_units index before accessing code_units[count] and code_units[count+1].
+3. Or simpler, if you only need the code point at s[index], use ord(s[index]) and handle surrogate pairs by inspecting s[index+1] if your Python build uses UTF-16 surrogates.
+
+B) If index is supposed to be a UTF-16 code-unit index (the current function’s intention):
+1. Fix the caller: make sure it passes a UTF-16 index, not a Python-string index. Convert the caller's index space to UTF-16 code-unit indices before calling this function.
+2. Add debugging/logging in the caller to print the index and len(code_units) (or print them inside this function) so the caller can see the mismatch:
+   print("index", index, "len(code_units)", len(code_units), "s", repr(s))
+
+C) Quick defensive change (only if you want to avoid the exception and handle out-of-range gracefully):
+1. If code should return something else when index points past the last code unit, either clamp the index or return a sentinel instead of raising. (This only masks the problem; prefer A or B.)
+
+Which fix is best
+- Use A if the rest of your code treats indices as Python string positions (common in Python code).
+- Use B if your system consistently uses UTF-16 indices (rare in Python; common in interop with JS/Java).
+
+How to verify after the fix
+1. Add unit tests for strings containing:
+   - ASCII chars,
+   - BMP characters (1 UTF-16 unit),
+   - characters outside BMP (emoji, which are surrogate pairs -> 2 UTF-16 units).
+2. For each test, assert that calling the function with an index meaning “character position” returns the intended code point, or that calling with a UTF-16 index accesses the expected code unit.
+
+Summary in one sentence
+The function compares index to len(code_units) (line 36) but the caller passed an index counted in a different unit (string/character index), so index (2) is out of range for code_units; fix by making the index units consistent (map string index → UTF-16 code-unit index or change the check to use len(s)) and add tests that include surrogate pairs.

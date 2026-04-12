@@ -1,0 +1,39 @@
+What happened (where it failed)
+- The ValueError is raised on line 251 in the function that parses a locale string (see lines 248–252).
+- The code assumes the input is in the form "ll_CC" or "ll_CC_variant" and parses by fixed string indexes:
+  - it reads language as locale_str[0:2]
+  - it reads country as locale_str[3:5]
+  - it expects a variant separator '_' at locale_str[5]
+- For the input "fr__POSIX" those assumptions are wrong and the check at line 250 (if locale_str[5] != '_') evaluates to true, so line 251 raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it failed (root cause)
+- The input "fr__POSIX" has an empty country field (there are two underscores in a row). The parser uses fixed-index slicing, so the country slice locale_str[3:5] becomes "_P" (not a valid two-letter country), and locale_str[5] is 'O' (not '_'), so the subsequent variant-separator check fails.
+- In short: the parser does not handle the case where the country is omitted (double underscore). The fixed-index logic is misaligned for that input and treats the string as malformed instead of recognizing "language + empty country + variant".
+
+How to fix it (concrete steps you can apply)
+Choose one of these fixes depending on intended behavior.
+
+Option A — support missing country (recommended if "fr__POSIX" should be valid)
+1. Replace fixed-index parsing with splitting and explicit cases. Example logic:
+   - parts = locale_str.split('_', 2)
+   - if len(parts) == 1: return Locale(parts[0])                           # "fr"
+   - if len(parts) == 2: return Locale(parts[0], parts[1])                 # "fr_FR"
+   - if len(parts) == 3:
+       - if parts[1] == '': return Locale(parts[0], None, parts[2])       # "fr__POSIX"
+       - else: return Locale(parts[0], parts[1], parts[2])                # "fr_FR_POSIX"
+2. Replace lines 248–252 with the splitting logic above. This avoids brittle index assumptions and makes empty country explicit.
+
+Option B — normalize input before current parser (if you want to reject missing country but accept variants without country differently)
+1. If the canonical form you expect is "fr_POSIX" (language + variant without country), normalize "fr__POSIX" to "fr_POSIX" before parsing:
+   - if locale_str.startswith(language + "__"): locale_str = language + "_" + locale_str.split("__", 1)[1]
+2. Keep the rest of the index-based parsing, or better yet use the split approach in Option A.
+
+Option C — validate with a regex and parse groups
+1. Use a regex with explicit groups for language, optional country, optional variant:
+   - r'^([a-z]{2})(?:_([A-Z]{2}))?(?:_(.+))?$' (adjust letter cases to your conventions)
+2. If the country group is empty (None) and a variant group exists, construct Locale(language, None, variant).
+
+Why these fixes work
+- They remove the fragile fixed-index assumptions (lines 248–252) and handle the empty-country case explicitly so "fr__POSIX" is parsed as language="fr", country=None (or ''), variant="POSIX" rather than causing an index/misalignment error that triggers the ValueError.
+
+If you want, tell me which behavior you want (reject double-underscore, accept it as empty country, or normalize to single underscore) and I can provide the exact replacement code for lines 248–252.

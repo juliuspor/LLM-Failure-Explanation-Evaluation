@@ -1,0 +1,49 @@
+What happened (where and what failed)
+- Failure occurred in get_paint(self, value: float), at the check on lines 73–77.
+- Line 73 computes g:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Line 76 raises a ValueError because g is outside 0..255:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- Root cause: the scaled green component g is outside the allowed byte range (0–255), so the code intentionally raises an error. That means either the incoming value is outside the expected bounds, or the bounds (_lower_bound/_upper_bound) are wrong, so the scaled result falls outside 0..255.
+
+Why this is the root cause (exact and concrete)
+- The computation on line 73 scales value into a 0–255 range using (value - _lower_bound) / (_upper_bound - _lower_bound). If value < _lower_bound you get g < 0; if value > _upper_bound you get g > 255. The code checks exactly that and raises when out of range, so the immediate reason for the failure is that value (or the bounds) produced g outside the valid range.
+- Note: if _upper_bound == _lower_bound you would get a ZeroDivisionError at line 73. That is a different failure mode; the current failure reached the raise on line 76, so division succeeded but produced an out-of-range result.
+
+Why the error message is misleading
+- The raised ValueError string literally contains "Red Green Blue" instead of showing the actual numeric channel values or the offending value/bounds. So the error both signals the right condition (out-of-range channel) but fails to tell you which numeric value/bounds caused it.
+
+How to fix it (explicit steps, referencing methods and lines)
+1. Decide intended behavior when value is outside bounds:
+   - If you want to clamp values into 0..255, replace the check + raise with a clamp.
+   - If you want to reject out-of-range input, keep the raise but make the message informative.
+2. To clamp (modify get_paint around lines 73–77):
+   - Replace the current g computation and check with:
+     delta = self._upper_bound - self._lower_bound
+     if delta == 0:
+         raise ValueError(f"Invalid bounds: lower={self._lower_bound}, upper={self._upper_bound}")
+     g = int((value - self._lower_bound) / delta * 255.0)
+     g = max(0, min(255, g))   # clamp into [0,255]
+   - Do the same for r and b if they use the same pattern.
+3. To keep strict validation but provide a clear error (modify the raise on line 76):
+   - Compute r,g,b first and then raise with specific numbers:
+     raise ValueError(
+         f"Color parameter out of range: value={value}, computed_g={g}, "
+         f"bounds=({self._lower_bound},{self._upper_bound})"
+     )
+   - Also check and handle delta == 0 before computing to avoid ZeroDivisionError.
+4. Add an explicit bounds check earlier in get_paint (recommended if strict):
+   - At the start of get_paint, add:
+     if self._upper_bound <= self._lower_bound:
+         raise ValueError(f"Invalid bounds: lower={self._lower_bound}, upper={self._upper_bound}")
+     if not (self._lower_bound <= value <= self._upper_bound):
+         raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+   - That pinpoints the problem to the caller's input and avoids later ambiguous computations.
+
+Summary / actionable next steps
+- Inspect the caller to see whether it is passing value outside the configured bounds or whether the bounds themselves were set incorrectly.
+- Choose whether to clamp out-of-range colors or to raise a descriptive error.
+- Implement one of the explicit code fixes above:
+  - Add a delta == 0 guard (line ~73).
+  - Either clamp g (and r,b) or raise a ValueError that includes value, computed channel(s), and the bounds (replace the literal "Red Green Blue" text on line 76 with actual numbers).

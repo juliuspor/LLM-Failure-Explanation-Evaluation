@@ -1,0 +1,54 @@
+What happened (root cause)
+- The failure occurs in the block that handles the case when translate_codepoint(...) returns a non-zero consumed value:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The code calls code_point_at(code_units, pos) repeatedly while advancing pos inside the same loop. That is unsafe when the current pos points to a low surrogate (the second half of a surrogate pair).
+- Specifically: when pos is at a high-surrogate and you advance by char_count(code_point_at(..., pos)) inside the loop, a later loop iteration may call code_point_at with pos pointing to the low-surrogate (or beyond the end), causing code_point_at to index into code_units out of range (IndexError: String index out of range: 2).
+
+Why that happens (step-by-step)
+1. code_units is a list of UTF-16 code units (so a character outside BMP is two units: high and low surrogate).
+2. translate_codepoint(...) returns consumed (the contract in comments is ambiguous: is consumed code units or code points?). The loop assumes consumed means “number of codepoints handled”, but then uses code_point_at on the moving pos inside the same loop.
+3. Suppose translate_codepoint indicates it handled one codepoint that was a surrogate pair. consumed will be >0 (likely 1 or 2 depending on implementation). The loop iterates consumed times and calls code_point_at(code_units, pos) each time. After the first iteration pos is advanced by 2 (char_count returned 2), but the loop may still run another iteration and call code_point_at with pos pointing to the low-surrogate or beyond the list end. That leads to the IndexError shown by the test.
+
+Where it occurred in your code
+- The problematic lines are these (in order):
+  - consumed = self.translate_codepoint(code_units, pos, out)
+  - for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The unsafe call is code_point_at(code_units, pos) inside the for-loop while pos is being updated inside that same loop.
+
+Concrete fixes (clear steps)
+Pick one of these definite fixes depending on what translate_codepoint is supposed to return.
+
+A. If translate_codepoint returns the number of UTF-16 code units consumed (i.e., 1 for BMP char, 2 for surrogate pair)
+- Replace the for-loop entirely with:
+    pos += consumed
+- Rationale: consumed already counts code units, so advance pos by that many code units. Do not call code_point_at while pos is being changed.
+
+B. If translate_codepoint returns the number of codepoints consumed (i.e., 1 for one codepoint even if it is 2 code units; >1 if multiple codepoints were processed)
+- Compute the advance based on the codepoints consumed but avoid calling code_point_at when pos points to the middle of a surrogate:
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)   # safe: pos starts at a real codepoint boundary
+        pos += char_count(cp)
+- Important: make sure you call code_point_at and advance once per iteration, not call code_point_at after having advanced into a low surrogate. The key is calling code_point_at before advancing pos inside that iteration.
+
+C. Simpler and safest: have translate_codepoint return exactly how many UTF-16 code units were consumed, and then use option A (pos += consumed). This avoids ambiguity.
+
+What to change in one-line patch form
+- Replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  With one of:
+    pos += consumed
+  OR
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+Why these fixes solve the error
+- They stop calling code_point_at with pos pointing at a low-surrogate or past the end. Either you advance by known safe units (consumed) or you always call code_point_at before advancing pos for that codepoint, never after advancing into a low surrogate.
+
+Which I recommend
+- Use option A: make translate_codepoint contract be “returns number of UTF-16 code units consumed” and then do pos += consumed. That is the simplest, least error-prone fix and matches the comments hinting at surrogate-pair handling.
+
+If you want, paste the translate_codepoint signature/implementation and I’ll give the exact one-line change to apply.

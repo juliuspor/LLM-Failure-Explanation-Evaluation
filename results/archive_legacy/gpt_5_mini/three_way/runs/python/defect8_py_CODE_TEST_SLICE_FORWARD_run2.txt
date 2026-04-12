@@ -1,0 +1,49 @@
+What happened (what failed)
+- The code assumes that if the locale string is longer than 2 characters it will always have a two-letter country code at positions 3–4 (locale_str[3] and locale_str[4]) and therefore always checks those positions for uppercase letters.
+- For the input "fr__POSIX" the characters are:
+  - locale_str[0] = 'f', locale_str[1] = 'r'
+  - locale_str[2] = '_' (separator)
+  - locale_str[3] = '_' (empty country marker)
+  - locale_str[4] = 'P' (start of variant)
+- The code reaches the check if ch3 < 'A' or ch3 > 'Z' (the uppercase-country check). Because ch3 == '_' the check fails and a ValueError is raised. That is why test_locale_with_empty_country_variant fails with "Invalid locale format".
+
+Where it occurs (exact variables/lines)
+- The failure happens after the code verifies locale_str[2] == '_' and sets
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+- Then the code immediately does the uppercase check on ch3 and ch4:
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(...)
+- These checks are on locale_str[3] and locale_str[4] (shown around lines 243–246 in the slice). For "fr__POSIX" locale_str[3] is '_' so the check fails.
+
+Why it happened (root cause)
+- The function does not handle the valid locale pattern language__variant (double underscore = empty country + variant). It treats every non-2-length string with an underscore at position 2 as if a two-letter uppercase country must follow immediately. It never considers the special case where the country is empty and the second underscore is at position 3.
+
+How to fix it (concrete steps)
+1. After confirming locale_str[2] == '_' and before validating ch3/ch4 as an uppercase country, detect the empty country case:
+   - If locale_str[3] == '_' then this is language__variant. The variant begins at locale_str[4:].
+   - Return Locale(locale_str[0:2], "", locale_str[4:]) in that case.
+2. Otherwise, validate ch3/ch4 are uppercase letters and proceed with the existing logic for language_country or language_country_variant:
+   - Keep the existing path that checks ch3/ch4 between 'A' and 'Z' and handles length==5 or the length>=7 variant-with-country path.
+
+Minimal code patch (where to insert)
+Replace the block that sets ch3/ch4 and immediately validates them with:
+
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    # handle empty country: language__variant (e.g. "fr__POSIX")
+    if ch3 == '_':
+        # variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # otherwise country must be two uppercase letters
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why this fix works
+- It covers the valid language__variant format by detecting the second underscore at position 3 and returning the correct Locale(language, "", variant).
+- It preserves the existing validation for the normal language_country and language_country_variant formats.
+
+Which test will now pass
+- test_locale_with_empty_country_variant (and other tests for language__variant like en__UNIX, de__DOS) will no longer raise the incorrect ValueError.
+
+If you want, I can produce a one-line diff or the full corrected function body.

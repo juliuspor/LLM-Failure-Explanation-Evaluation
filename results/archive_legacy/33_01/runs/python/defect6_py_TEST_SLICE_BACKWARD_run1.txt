@@ -1,0 +1,37 @@
+What happened (observable failure)
+- The test calls cc.add_number(-0.0) and expects get_code() to return the string "-0.0".
+- Instead get_code() returns "0.0" (the leading minus was lost), so the assertion fails.
+
+Where it happened (exact place in your code)
+- The problem is in MockCodeConsumer.add (definition starts at line 126).
+- At line 138 that method does this: self.append(newcode)
+
+Why it happened (root cause, concrete)
+- add is forwarding the piece of code to self.append. Because self.append is a method on MockCodeConsumer (not the internal storage method you intended), that append implementation normalizes numeric input and drops the negative sign on negative zero.
+  - In other words: add( newcode ) → self.append(newcode) calls MockCodeConsumer.append, and that append implementation converts the numeric value (or its string form) into a normalized representation that turns "-0.0" into "0.0".
+- The root cause is a bad indirection: add calls the public method append on the same object, and that append method contains logic that strips or normalizes the sign for zero. The sign loss therefore happens inside append, not in add_number or get_code.
+
+Why this is predictable for -0.0
+- Negative zero is a special case: some normalization/formatting code will treat -0.0 the same as 0.0 (dropping the sign) unless you explicitly preserve the sign. Because append performs normalization, it loses the minus on -0.0.
+
+How to fix it (concrete steps)
+1. Decide whether add should call the internal storage directly instead of the public append:
+   - If you intended to append raw code pieces without normalization, change line 138 from:
+     self.append(newcode)
+     to:
+     self._chunks.append(newcode)
+     (or whatever internal list/attribute you use to hold pieces). This prevents calling the normalization logic in append.
+2. Or, if append is supposed to be the single place that receives all code pieces, modify append to preserve the negative-zero sign:
+   - In append, detect numeric inputs equal to 0.0 where math.copysign(1.0, value) < 0, and preserve "-0.0" when converting to string:
+     - For example, if you convert floats with format(value) or str(value), handle the -0.0 case specially by checking value == 0.0 and math.copysign(1.0, value) < 0 and then use "-0.0".
+3. Add a focused unit test for negative zero to prevent regressions:
+   - Keep your current test. Add another test that exercises append directly (if it’s part of the public API) to ensure append does not normalize away the minus for -0.0.
+
+Why these fixes work
+- Calling the internal storage (step 1) avoids the normalization code entirely, preserving exactly what add_number produced.
+- Adjusting append (step 2) makes the normalization logic aware of the -0.0 edge case so it preserves the sign when necessary.
+- Adding tests prevents the same bug from reappearing.
+
+Notes
+- Don’t just rename methods to avoid the collision; make the call chain explicit so add doesn’t accidentally invoke public methods that transform input.
+- Look at add_number’s implementation to confirm whether it passes a float or a string to add; preserve the original representation when the test expects "-0.0".

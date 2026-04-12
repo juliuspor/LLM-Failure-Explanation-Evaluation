@@ -1,0 +1,54 @@
+I can’t point to the exact line number or variable name yet because you didn’t include the code slice, but I can say exactly what caused the failing assertion and give precise, actionable steps to find and fix it.
+
+What the test message means
+- The test framework compared two floats and printed: "Expected -0.0, got 0".
+- That means the expected value has the negative sign bit set (IEEE-754 negative zero), while the actual value has the positive sign bit (positive zero).
+- Note: in most languages float equality (0.0 == -0.0) is true, so a plain numeric equality check can pass even when sign differs. The test failure indicates the assertion used a comparison that distinguishes sign (string/representation or bitwise comparison), or the assertion prints sign info and the expected literal was -0.0.
+
+Why this happens in real code (likely causes)
+- A calculation produced +0.0 instead of -0.0. Common operations that produce negative zero:
+  - Negating an underflowed result or negating 0: -0.0 can come from something like -x where x is +0.0.
+  - Dividing a negative finite by +infinity: -1.0 / float("inf") → -0.0.
+  - Using math.copysign or operations that preserve a sign bit.
+- Many conversions/formatting steps strip the sign bit:
+  - Converting the float to an integer, to Decimal, or to a string using formatting that hides negative zero will produce "0" or "0.0".
+  - Some serialization (JSON, repr depending on language/runtime) can normalize -0.0 → 0.
+- The test is asserting signed-zero equality (or using string comparison), so the sign bit matters. The code returned a positive zero (no negative sign bit), so the assertion fails.
+
+How to locate the exact spot in your code (step-by-step)
+1. Re-run the failing test and log the value right before the assertion. Insert a debug print or breakpoint on the variable the test compares (replace X with the variable name used in the test):
+   - Python: print("value repr:", repr(X), "sign:", math.copysign(1.0, X))
+   - JS: console.log("value:", Object.is(X, -0) ? "-0" : X, X)
+2. If the test is inside a function, add the debug immediately before return and at earlier intermediate results (each variable that contributes to X) so you can see which operation flips the sign.
+3. Use a bit-level check to confirm sign bit:
+   - Python: import struct; print(struct.pack("!d", X).hex()) — the highest bit is the sign.
+   - NumPy: numpy.signbit(X) will be True for negative zero.
+   - JS: Object.is(X, -0) returns true when X is negative zero.
+4. Inspect arithmetic around the producing expression: look for divisions by infinity, negations of zero, or use of copysign.
+
+How to fix it (explicit, actionable options)
+- If the sign of zero is irrelevant for your logic (most cases):
+  1. Change the test to treat -0.0 and +0.0 as equal. Replace any string or bitwise comparisons with numeric comparisons, or normalize both sides before comparing:
+     - Python: self.assertEqual(float(expected), float(actual)) or use math.isclose for approximate tests.
+     - Or normalize sign: actual = 0.0 if actual == 0.0 else actual and compare.
+  2. Normalize in code before returning: if X == 0.0: X = 0.0 (this forces positive zero on many runtimes).
+- If you explicitly need negative zero:
+  1. Produce it explicitly where required: Python: actual = math.copysign(0.0, -1.0) or actual = -0.0; JS: actual = -0; ensure no later step re-normalizes it.
+  2. Make sure any conversion or serialization preserves sign (e.g., use struct/hex or a serializer that keeps sign bit).
+- If a conversion step accidentally strips the sign (e.g., converting through Decimal/string/int):
+  1. Avoid that conversion or preserve sign during conversion. For example, in Python, converting to Decimal loses the -0 sign; preserve the original float or preserve sign separately (use math.copysign).
+  2. If serialization is required, encode sign explicitly (e.g., a flag) or use a format that preserves -0.0.
+
+Concrete quick checks to run now
+- Print representation and sign:
+  - Python:
+    import math, struct
+    print("repr:", repr(X))
+    print("is negative zero:", struct.pack("!d", X).hex()[0] in "89abef")  # check high nibble sign bit
+    print("copysign:", math.copysign(1.0, X))
+  - JavaScript:
+    console.log("Object.is(-0, X):", Object.is(X, -0));
+    console.log("String(X):", String(X), "toString:", X.toString());
+- Replace the failing assertion with a temporary diagnostic (print both expected and actual with the checks above) to confirm which one has the sign bit.
+
+If you want a pinpoint fix, paste the minimal failing test and the implementation (the function being tested). With the actual lines and variable names I will show exactly which line produces +0.0, why, and give the one-line change to either normalize or preserve the negative zero as you intend.

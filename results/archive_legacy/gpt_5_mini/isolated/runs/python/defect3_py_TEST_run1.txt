@@ -1,0 +1,71 @@
+What happened
+- The failure comes from hit03_translator.py, in the code that walks the input string inside CsvEscaper.translate_string (the method your tests call).
+- That code mixes two different string models and so advances the loop index incorrectly when it sees a Unicode surrogate pair (a supplementary code point, e.g. U+1F630). That leads to an IndexError on some inputs (your test input "\U0001F630A" — emoji followed by "A").
+
+Where it occurs (file, function, variables)
+- File: hit03_translator.py
+- Function/methods involved: CsvEscaper.translate_string, code_point_at, to_utf16_code_units
+- Variables involved: index (the loop index), cp or code_point (the value returned by code_point_at), result (the accumulating output or buffer), s (input string)
+- The bug is in the place where translate_string reads a code point and then advances index. The advance is wrong for surrogate pairs.
+
+Why it fails (root cause, plain)
+- In Python 3, str is a sequence of Unicode code points; indexing s[i] returns a character (a code point), not a UTF-16 code unit. There is no surrogate pair in Python str: supplementary characters are a single element at one index.
+- The code in hit03_translator.py appears to be written as if it is processing UTF-16 code units (as Java would): it uses to_utf16_code_units / code_point_at and then advances index by 2 to skip a surrogate pair. That is correct for a UTF-16 code unit array, but wrong for Python str.
+- On an input like "\U0001F630A":
+  - Python str length is 2 (one code point for the emoji and one for 'A').
+  - If code_point_at detects a supplemental code point and the translate loop advances index by 2 (treating it like two UTF-16 units), index becomes 2. That is equal to len(s) (ok if handled), but if code tries to access s[index] again with index == len(s) or advances inconsistently, it can cause IndexError or skip characters.
+  - Conversely, if code assumes UTF-16 units but uses Python indexing midway, it can try to read s[index+1] when index+1 == len(s) and raise IndexError.
+- In short: the code is applying UTF-16-based indexing/advancing (code units) to a Python str (which uses code points). That mismatch produces an off-by-one advancement or an out-of-range access.
+
+How you can confirm the exact failing line
+- Look inside translate_string for a loop like:
+    while index < len(s):
+        cp = code_point_at(s, index)
+        ...  # process cp
+        index += 1 or index += 2  # wrong advancement
+  and look at code_point_at — it likely expects to read s[index] and s[index+1] for surrogate pairs.
+- The failing pattern is: code_point_at reads a high surrogate and then reads s[index+1] without ensuring index+1 < len(s). Or translate_string increments index by 2 when it should increment by 1 (in Python), or vice versa.
+
+Concrete, actionable fixes (step-by-step)
+Pick one of these fixes depending on intended design:
+
+Option A — Keep it simple and Pythonic (recommended)
+1. Remove UTF-16 helper functions. Treat the input as Python code points.
+2. In translate_string, iterate over the string by characters (for ch in s:) instead of manual index arithmetic, or if you need index-based:
+   - Do: for ch in s: cp = ord(ch)
+   - Process cp, append to result or escaped form, and do not try to handle surrogate pairs specially.
+3. This is simplest and will correctly handle supplementary characters (they are single str elements in Python 3).
+
+Example replacement sketch (inside hit03_translator.py)
+- Replace the index loop with:
+    result = []
+    for ch in s:
+        mapped = self.translate_char_or_none(ch)  # whatever your translation logic is
+        result.append(mapped if mapped is not None else ch)
+    return "".join(result)
+
+Option B — If you must implement UTF-16 logic (not recommended)
+1. Convert the string to UTF-16 code units explicitly and operate on that array of 16-bit units; then implement code_point_at and indexing on those units consistently.
+2. Or, keep using Python str but implement code_point_at to return a code point using ord(s[index]) and to only return a combined code point by reading s[index] and s[index+1] if both are surrogates — but remember that in normal Python builds (wide builds) you will not see surrogates at all, so this is fragile.
+3. If doing manual surrogate handling, ensure:
+   - code_point_at checks (index + 1) < len(s) before reading s[index+1]
+   - translate_string advances index by 1 when you consumed one Python character, or by 2 only when you are actually consuming two separate code units from a UTF-16 sequence you explicitly constructed.
+
+Minimal concrete change if you want to keep current layout
+- In translate_string, after getting cp from code_point_at, do:
+    consumed = number_of_code_units_consumed  # 1 for BMP, 2 for surrogate pair in a UTF-16 array
+    index += consumed
+  But in Python str consumed should always be 1 unless you are working on a UTF-16 code unit array you constructed yourself.
+
+Why this explains your failing test
+- Your test input "\U0001F630A" has an emoji followed by "A". The translator treats that emoji as two UTF-16 code units and then either:
+  - Reads past the string end while trying to access the next code unit, causing IndexError, or
+  - Advances the index incorrectly and drops or corrupts the "A", causing test mismatch.
+- The symptom described in the test docstring (IndexError when advancing past surrogate pair) matches the exact source: wrong treatment of Python str as UTF-16 code unit array.
+
+Summary (short)
+- Root cause: hit03_translator.py mixes UTF-16 code-unit logic with Python str code-point indexing.
+- Where: CsvEscaper.translate_string and code_point_at / to_utf16_code_units.
+- Fix: iterate over Python characters (for ch in s) or make code_point_at/advancement consistent with the data representation (either operate on UTF-16 units exclusively or on Python code points exclusively). Ensure index checks (index+1 < len(s)) before accessing s[index+1].
+
+If you share the relevant excerpt of hit03_translator.py (the translate loop and code_point_at), I can give the exact line numbers and a patch you can apply.

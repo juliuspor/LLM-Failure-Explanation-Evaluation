@@ -1,0 +1,39 @@
+What happened (where it fails)
+- At line 39 you detect a high surrogate in high = code_units[index].
+- If the following code unit is not a matching low surrogate, the function falls through to line 44 and returns high.
+- Returning high (the raw 16-bit surrogate value) is the bug: a high-surrogate value (0xD800–0xDBFF) is not a valid Unicode scalar value by itself. Later code that expects a real Unicode code point (0..0x10FFFF, excluding surrogate range) will see an invalid value and fail.
+
+Why it fails (root cause)
+- The code assumes that when high is a surrogate but the next unit is not a valid low surrogate it can safely return high. It cannot.
+- A lone high-surrogate must be handled as an error (or replaced), not returned as if it were a valid code point. The same problem exists symmetrically if a lone low surrogate appears: the function will return that raw low-surrogate value (also invalid).
+
+Exactly where to change it and how (concrete fixes)
+Pick one of these explicit fixes, depending on how you want to handle malformed UTF-16:
+
+1) Replace lone surrogates with the Unicode replacement character U+FFFD
+- Change line 44 to return 0xFFFD instead of returning high.
+  - Replace:
+    return high
+  - With:
+    return 0xFFFD
+- This ensures callers always get a valid Unicode scalar.
+
+2) Signal an error instead of returning a scalar
+- Modify the function return protocol to indicate an error (raise an exception or return a tuple (error, index) etc.). For example, raise a ValueError at line 44:
+  - Replace:
+    return high
+  - With:
+    raise ValueError(f"Unpaired surrogate at index {index}: 0x{high:X}")
+
+3) Treat lone low surrogates explicitly (if your code can see them)
+- Before line 38 or after line 44, add a check:
+  if 0xDC00 <= high <= 0xDFFF:
+      return 0xFFFD
+- This prevents returning a low-surrogate raw value.
+
+What to watch for after fixing
+- If callers expect to know how many code units were consumed (1 or 2), make sure you still return or update the index correctly when you return a replacement or raise an error.
+- If you choose replacement (U+FFFD), decide whether to advance by 1 unit (consume the lone surrogate) or handle differently; document that behavior.
+
+Summary in one sentence
+Returning high at line 44 hands back an unpaired surrogate (an invalid Unicode scalar), which causes later code to fail — you must replace or error on unpaired surrogates instead of returning them.

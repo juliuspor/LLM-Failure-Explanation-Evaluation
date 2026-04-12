@@ -1,0 +1,66 @@
+What happened
+- The failure occurs inside LocaleUtils.to_locale when parsing a locale string like "fr__POSIX".
+- The code assumes that if an underscore is present then a two-letter country code must follow, so it checks fixed character positions (for example s[2] and s[3]) and enforces that s[3] is an uppercase letter.
+- For "fr__POSIX" there is a double underscore: language = "fr", country = "" (empty), variant = "POSIX". At index 3 there is '_' (the second underscore), not an uppercase letter, so the validation rejects the input and raises ValueError.
+
+Where it happens (what to look for)
+- In LocaleUtils.to_locale, find the validation/parsing section that:
+  - inspects exact character positions (like s[2], s[3]) for country letters, or
+  - uses logic that assumes country must always be two characters if an underscore is present.
+- The failing check will be the one that complains about "position 3 is '_' not uppercase letter" (the code that checks s[3].isupper()).
+
+Why it fails (root cause)
+- The parser is position-based instead of token-based. It treats the underscore as a delimiter only when the country is present. It does not handle the valid Java-style form language__variant (empty country, double underscore).
+- Specifically:
+  - Input: locale_str = "fr__POSIX"
+  - Expected parsing: parts = ["fr", "", "POSIX"]
+  - Actual code path: sees underscore and then expects two uppercase country letters at positions 3 and 4 (or similar), so when it sees '_' at s[3] it flags a format error.
+
+Concrete fix (step-by-step)
+1. Replace the fragile position-based validation with splitting on underscores, limiting to 2 splits:
+   - parts = locale_str.split('_', 2)
+   - This yields:
+     - length 1 -> [language]
+     - length 2 -> [language, country_or_variant] (if country only, then second part is country; but see step 3)
+     - length 3 -> [language, country, variant] (country may be empty string)
+2. Enforce cases and lengths against the parts, not fixed indices:
+   - language = parts[0]
+     - must be length 2 and all lowercase (language.islower() and len(language) == 2)
+   - If len(parts) >= 2:
+     - country = parts[1]
+     - If country == "":
+       - treat as empty country (allowed) — this is the language__variant case when len(parts) == 3
+     - Else if country is non-empty:
+       - require len(country) == 2 and country.isupper()
+   - If len(parts) == 3:
+     - variant = parts[2] (can be any non-empty string; accept even mixed case)
+3. Return Locale(language, country, variant) where country may be "" (empty string) and variant may be omitted or "" depending on your Locale class.
+4. Remove checks that assume s[3] must be uppercase; instead validate country as described.
+
+Example patch sketch (replace existing parsing block)
+- Find the block that currently checks characters by index; remove it and use:
+  parts = locale_str.split('_', 2)
+  if not parts[0] or len(parts[0]) != 2 or not parts[0].islower():
+      raise ValueError("Invalid language: must be two lowercase letters")
+  language = parts[0]
+  country = ""
+  variant = ""
+  if len(parts) >= 2:
+      country = parts[1]  # may be ""
+      if country and (len(country) != 2 or not country.isupper()):
+          raise ValueError("Invalid country: must be two uppercase letters or empty")
+  if len(parts) == 3:
+      variant = parts[2]
+  return Locale(language, country, variant)  # adapt to Locale constructor signature
+
+Why this fix works
+- Splitting on '_' treats the double underscore correctly as an empty token for the country.
+- Validations are applied to tokens (language and country strings), not to fixed character positions, so language__variant and language_country_variant both parse correctly.
+- It also keeps existing checks for language lowercase and country uppercase where present.
+
+What to check after the change
+- Run your test suite. The failing test test_locale_with_empty_country_variant ("fr__POSIX") should pass.
+- Also ensure other tests that expect ValueError for bad lengths or wrong casing still raise errors.
+- Verify that LocaleUtils.to_locale(None) still returns None and that Locale object equality behaves as expected.
+
+If you paste the current to_locale implementation (the code that checks s[2]/s[3]) I can provide an exact line-by-line patch you can drop in.

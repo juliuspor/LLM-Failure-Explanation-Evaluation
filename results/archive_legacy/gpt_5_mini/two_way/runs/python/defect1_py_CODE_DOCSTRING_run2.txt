@@ -1,0 +1,62 @@
+What happens
+- The bug is in these lines (around the middle of the method):
+  ```
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  ```
+- The code treats the sign of minutes incorrectly and allows/produces invalid combinations.
+
+Why it fails (root causes, with concrete examples)
+1. Wrong handling when hours is negative and minutes is negative:
+   - Example: hours_offset = -2, minutes_offset = -15
+   - hours_in_minutes = -120, branch taken: minutes_offset = -120 - (-15) = -105
+   - That yields -01:45, but the doc and intent say (-2, -15) should be -02:15 (i.e. total -135 minutes).
+   - Root cause: the code subtracts the negative minutes instead of treating the minutes magnitude as adding to the negative hours.
+
+2. Missing validation when hours is positive and minutes is negative:
+   - Example: hours_offset = 2, minutes_offset = -15
+   - hours_in_minutes = 120, branch else: minutes_offset = 120 + (-15) = 105 -> +01:45
+   - According to the doc this combination should be rejected with ValueError, but the code silently computes a different offset.
+   - Root cause: there's no check forbidding positive hours with negative minutes.
+
+3. Confusing variable reuse:
+   - The code overwrites minutes_offset to hold the total minutes. That makes the arithmetic harder to reason about and masks the logic error.
+
+Where it occurs
+- The incorrect logic is in the arithmetic block just before calling FieldUtils.safe_multiply(...). Specifically the computation of minutes_offset from hours_in_minutes and the original minutes_offset.
+
+How to fix it (concrete steps)
+1. Validate the sign combination explicitly, using the documented rules:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes must be non-negative when hours is positive")
+   - Ensure minutes_offset is in [-59, 59] as you already check.
+
+2. Compute total minutes in a clear, unambiguous way:
+   - If hours_offset < 0:
+       total_minutes = hours_offset * 60 - abs(minutes_offset)
+     (this yields -120 - 15 = -135 for (-2, -15) or (-2, 15))
+   - Else (hours_offset >= 0):
+       total_minutes = hours_offset * 60 + minutes_offset
+     (because minutes_offset is guaranteed non-negative when hours>0; when hours==0 minutes_offset may be negative and adding is correct)
+   - Use a new variable (e.g. total_minutes) instead of reusing minutes_offset.
+
+3. Keep the overflow catch and conversion to millis as before:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Example corrected snippet
+- Rough outline (lines to replace the buggy block):
+  ```
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("Minutes must be non-negative when hours is positive")
+  hours_in_minutes = hours_offset * 60
+  if hours_offset < 0:
+      total_minutes = hours_in_minutes - abs(minutes_offset)
+  else:
+      total_minutes = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+  ```
+
+Summary
+- The code computes the combined offset minutes incorrectly for negative hours with negative minutes, and it fails to reject positive hours with negative minutes. Fix by adding the explicit sign validation and computing total minutes with clear use of abs() and a separate total_minutes variable.

@@ -1,0 +1,53 @@
+What happened (what fails)
+- The bug is in DateTimeZone.for_offset_hours_minutes when it computes the total minutes. The code reassigns minutes_offset incorrectly in this block:
+
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+
+- For inputs where hours_offset is negative and minutes_offset is also negative (e.g. (-2, -15)), that code computes:
+  - hours_in_minutes = -120
+  - minutes_offset = -120 - (-15) = -105
+
+  That yields -105 minutes (i.e. -01:45) instead of the intended -135 minutes (i.e. -02:15). The test expecting DateTimeZone.for_offset_hours_minutes(-2, -15) to produce "-02:15" thus fails.
+
+Why it fails (root cause)
+- The code subtracts minutes_offset directly when hours_in_minutes is negative. If minutes_offset is negative, subtracting it becomes addition, which reduces the magnitude of the negative offset instead of increasing it. In plain terms: when hours are negative, you must add the absolute value of the minutes to the hours' magnitude (so -2h and -15m => -(2*60 + 15)), but the code does -120 - (-15) => -105.
+- The bug occurs in the computation immediately after hours_in_minutes is set (the if/else that changes minutes_offset). Reusing the parameter name minutes_offset for the combined-minute value makes the mistake less obvious.
+
+Where to fix (exact place)
+- Replace the block that starts with "hours_in_minutes = hours_offset * 60" and the subsequent if/else that reassigns minutes_offset with correct total-minute calculation.
+
+Concrete fix (step-by-step)
+1. Compute total_minutes in a new variable (do not overwrite minutes_offset) to avoid confusion.
+2. If hours_offset is negative, subtract the absolute value of minutes_offset from hours_in_minutes (i.e. hours_in_minutes - abs(minutes_offset)).
+3. Otherwise add minutes_offset to hours_in_minutes.
+4. Use total_minutes to compute offset in milliseconds.
+
+Exact replacement code (minimal change):
+
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- For (-2, -15): hours_in_minutes = -120; total_minutes = -120 - abs(-15) = -120 - 15 = -135 (correct).
+- For (-2, 15): hours_in_minutes = -120; total_minutes = -120 - abs(15) = -135 (matches documented behavior where (-2, 15) -> -02:15).
+- For (2, -15): hours_in_minutes = 120; total_minutes = 120 + (-15) = 105 — this is where you may also want to keep the existing validation that (positive hours with negative minutes) is considered invalid if your API requires it; the current code will allow it unless additional validation blocks it earlier. (Your tests expect that (2, -15) raises ValueError — keep or add validation accordingly.)
+
+Optional: enforce mixed-sign rules
+- If you want to explicitly forbid combinations like (positive hours, negative minutes) or (negative hours, positive minutes) according to your documented rules, add checks before computing total_minutes, for example:
+
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be positive when hours is positive")
+    if hours_offset < 0 and minutes_offset > 0:
+        # If your desired behavior is to allow (-2, 15) as -02:15 then do not raise.
+
+Summary
+- The failing test is caused by subtracting minutes_offset directly when hours are negative; that operation yields the wrong total when minutes_offset is negative.
+- Compute total_minutes using abs(minutes_offset) when hours are negative, avoid overwriting the minutes_offset parameter, then convert to milliseconds. This corrects (-2, -15) -> -02:15 and matches the documented behavior.

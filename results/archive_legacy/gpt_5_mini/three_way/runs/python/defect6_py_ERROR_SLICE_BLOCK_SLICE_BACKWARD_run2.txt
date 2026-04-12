@@ -1,0 +1,40 @@
+What happened (root cause)
+- The code collapses negative zero (-0.0) into plain zero because of the check on line 176:
+  if x == int(x) ...
+  For x == -0.0, x == int(x) is True and int(-0.0) yields 0 (line 177). At this point the sign information is lost — value and mantissa become 0 — and later you call self.add(str(value)) (line 192), producing "0".
+- IEEE-754 negative zero is equal to positive zero numerically, so testing equality and converting to int removes the signbit. That is why the test expected "-0.0" (or "-0") but got "0".
+
+Where it occurs
+- The problem occurs right after line 176 and line 177: value = int(x) discards the negative sign when x is -0.0. The code paths that follow (mantissa manipulation and final self.add(...)) never check the original sign, so the output becomes "0" (line 192) instead of preserving "-0.0".
+
+How to fix it (concrete steps)
+1. Detect the sign of x before you lose it. Use math.copysign to test the signbit:
+   sign_is_negative = math.copysign(1.0, x) < 0.0
+2. Use that sign when building the string in all branches (both the mantissa/exponent branch and the plain integer branch). Example minimal changes:
+   - After line 176, add:
+       sign_is_negative = math.copysign(1.0, x) < 0.0
+   - Then when you add the final string, prefix it if needed. Replace line 190–192 and 194 with something like:
+       sign = "-" if sign_is_negative else ""
+       if exp > 2:
+           self.add(sign + str(mantissa) + "E" + str(exp))
+       else:
+           self.add(sign + str(value))
+   - For the non-integer branch (line 194), also use the sign prefix rather than relying on str(x) which will produce "-0.0" for -0.0 but you already handled integer case. If you want consistent formatting, do:
+       self.add(sign + format_abs_x)
+     where format_abs_x formats abs(x).
+
+Why this fix works
+- math.copysign(1.0, x) inspects the signbit without changing numeric equality; it returns -1.0 for negative values including -0.0. By capturing that before value = int(x), you can reattach the minus sign to the string even when int(x) became 0.
+
+Example patch (concise)
+- Insert after line 176:
+    sign_is_negative = math.copysign(1.0, x) < 0.0
+- Replace the add() calls to prefix with:
+    sign = "-" if sign_is_negative else ""
+    if exp > 2:
+        self.add(sign + str(mantissa) + "E" + str(exp))
+    else:
+        self.add(sign + str(value))
+- Ensure the non-integer branch uses the same sign logic if you need consistent formatting.
+
+This preserves the negative zero sign while keeping the rest of your integer-handling logic intact.

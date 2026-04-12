@@ -1,0 +1,60 @@
+What failed
+- Root cause: the code reads characters at indices 3 and 4 (locale_str[3] and locale_str[4]) while the branch that reaches those reads only checked length == 2 (line 231). That makes an out-of-range string index access and crashes (IndexError) when locale_str is shorter than 5 characters.
+- Where it happened: inside to_locale(cls, locale_str: str) around lines 231 and 237–240. Specifically, line 231 checks length == 2, then lines 237–238 do ch3 = locale_str[3], ch4 = locale_str[4].
+- Why it happened: the length check is wrong / mismatched with the indices that follow. Indexing uses 0-based offsets, so reading characters 3 and 4 requires length >= 5, but the code only guaranteed length == 2.
+
+What to change (concrete steps)
+1. Decide the intended formats and their lengths. Typical formats are:
+   - "ll" (language only) → length 2
+   - "ll_CC" (language + country) → length 5, with locale_str[2] == '_', country at indices 3..4
+   - "ll_CC_VARIANT" (language + country + variant) → length >= 7, with locale_str[5] == '_' for variant start
+
+2. Replace the incorrect length check and reorder branches so you only access indices after checking bounds. Example corrected structure:
+
+   - if length == 2:
+       return Locale(locale_str[0:2])
+   - elif length == 5:
+       if locale_str[2] != '_':
+           raise ValueError(...)
+       ch3 = locale_str[3]; ch4 = locale_str[4]
+       if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+           raise ValueError(...)
+       return Locale(locale_str[0:2], locale_str[3:5])
+   - elif length > 5:
+       if locale_str[2] != '_' or locale_str[5] != '_':
+           raise ValueError(...)
+       (same country validation)
+       return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+   - else:
+       raise ValueError(...)
+
+3. Alternatively, check bounds right before each access, for example:
+   - if length < 2: raise ValueError
+   - if length >= 5: then read locale_str[3] and [4]
+   - if length >= 7: then check locale_str[5] for variant
+
+Exact minimal code fix (replace the offending part)
+- Change the branch guard at line 231 from if length == 2: to something like:
+
+    if length == 2:
+        return Locale(locale_str[0:2])
+    if length >= 5:
+        if locale_str[2] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        if length == 5:
+            return Locale(locale_str[0:2], locale_str[3:5])
+        if locale_str[5] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+    raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why this solves it
+- It prevents accessing locale_str[3] and locale_str[4] unless length >= 5, eliminating the IndexError.
+- It validates underscores at indices 2 and 5 before slicing, matching the expected format positions.
+- It keeps explicit checks and clear failure points so you won't guess where the error came from.
+
+If you want, tell me the exact expected input formats for to_locale and I’ll produce a drop-in patch with unit tests.

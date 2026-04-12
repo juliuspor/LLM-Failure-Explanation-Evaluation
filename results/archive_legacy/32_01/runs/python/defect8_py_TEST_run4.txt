@@ -1,0 +1,62 @@
+What happened (short)
+- The test calls LocaleUtils.to_locale('fr__POSIX') expecting a Locale(language='fr', country='', variant='POSIX').
+- The to_locale implementation discards the empty country token produced by the adjacent underscores, so it interprets the tokens as ["fr","POSIX"] instead of ["fr","","POSIX"]. That makes the method treat "POSIX" as the country (or throw a validation error), so the produced Locale does not match the expected one.
+
+Why this happens (root cause)
+- In LocaleUtils.to_locale the input string is split into parts on the underscore separator.
+- The implementation uses a tokenization approach that collapses consecutive separators and therefore removes empty tokens. Typical culprits are:
+  - Using StringTokenizer (Java) or a split call that collapses repeated separators (for example using a regex like "_+"), or using split without preserving trailing/empty fields.
+  - As a result, the empty country token between the two underscores is lost.
+- Because the empty country is lost, the method shifts the variant into the country slot (or otherwise mis-parses the fields), producing the wrong Locale.
+
+Where it occurs (what to inspect)
+- Open LocaleUtils.to_locale(...) and locate the line that splits or tokenizes the input string (the call to split(), StringTokenizer, or similar). That is the exact line that removes empty tokens.
+- Also check any subsequent validation/assignment code that maps tokens[0] → language, tokens[1] → country, tokens[2] → variant.
+
+How to confirm quickly
+1. Add a test print or debugger inside LocaleUtils.to_locale to show the token array immediately after splitting:
+   - If you see ["fr","POSIX"] instead of ["fr","","POSIX"], you have confirmed the issue.
+2. Re-run the provided failing test after that print.
+
+Precise fixes (choose the one that matches your language)
+
+If this is Java:
+- Problem: calling String.split("_") or using StringTokenizer that discards empty tokens.
+- Fix (recommended): use String.split with a negative limit so empty fields are preserved:
+  - Replace:
+    parts = input.split("_");
+  - With:
+    parts = input.split("_", -1); // preserves empty strings between consecutive separators
+- Alternatively, split on Pattern.quote("_") with -1:
+  - parts = input.split(Pattern.quote("_"), -1);
+- If you used StringTokenizer, stop using it for this parsing; StringTokenizer does not return empty tokens. Use String.split(..., -1) or manual indexOf/substr parsing.
+
+If this is Python:
+- Problem: using re.split('_+', ...) or str.split('_') which by default keeps empty strings between separators? (Note: Python's str.split('_') does preserve empty items only for leading/trailing separators if maxsplit is used; but re.split('_+', ...) collapses repeated separators.)
+- Fix: use input.split('_') but ensure you don't use a collapsing regex; or use a manual parse that preserves empty strings:
+  - parts = input.split('_')  # preserves empty tokens between consecutive separators in Python
+  - If you used re.split('_+', input), replace with input.split('_') or re.split('_', input)
+
+Concrete small change example (Java):
+- Before (bug):
+  String[] parts = localeString.split("_");
+  // later assumes parts.length == 3
+- After (fix):
+  String[] parts = localeString.split("_", -1);
+  // now parts for "fr__POSIX" -> ["fr", "", "POSIX"]
+
+Concrete small change example (Python):
+- Before (bug):
+  parts = re.split(r'_+', locale_string)
+- After (fix):
+  parts = locale_string.split('_')
+
+Follow-up steps to make the test pass
+1. Edit LocaleUtils.to_locale and change the splitting/tokenization as above so empty tokens are preserved.
+2. Re-run the failing test:
+   result = LocaleUtils.to_locale('fr__POSIX'); assert result == Locale('fr', '', 'POSIX')
+3. Run the full test suite to catch other parsing cases (single underscore, trailing variant only, empty input).
+
+If you want I can:
+- Point to the exact line number change if you paste the LocaleUtils.to_locale method here.
+- Draft a complete patch (diff) for the repository language you’re using.

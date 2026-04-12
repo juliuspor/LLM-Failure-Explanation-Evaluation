@@ -1,0 +1,58 @@
+What happened (what the error message means)
+- The JVM threw ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String; which means your code tried to cast a Java Object[] (an array whose runtime component type is java.lang.Object) to a String[].
+- In your code path the TypeError is raised at line 347 because inferred_type was set to object at line 340 while expected_type is a non-object type (for example a list/array of strings). The check at line 346 triggers:
+  - line 337: the branch runs because element is not None
+  - line 340: inferred_type = object
+  - line 346: inferred_type == object and expected_type != object
+  - line 347: raise TypeError(...) — the code detects a type mismatch and fails
+
+Why it happened (root cause)
+- The runtime value you passed is an Object[] (array of Objects), not a String[].
+- Your code treats the element as "object" (line 340) rather than detecting it as a String[] (or a list of strings). Because expected_type is a more specific type (String[] / list of str), the check at line 346 finds a mismatch and raises.
+- The underlying JVM cannot reinterpret an Object[] as a String[]; attempting to cast Object[] -> String[] produces ClassCastException. So even if all elements are strings, the array’s runtime component type matters.
+
+Exactly where to look
+- Line 337: the branch where element is not None begins.
+- Line 340: inferred_type is forcibly set to object.
+- Line 346–347: the code declares a mismatch and raises the TypeError you see.
+- The actual cast that fails happens later (or earlier) when code treats the array as a String[]; but the immediate test/exception comes from lines 346–347 because inferred_type does not match expected_type.
+
+How to fix it (specific options and steps)
+Pick one of these, depending on intended behavior:
+
+1) Convert the Object[] to a String[] explicitly
+- If you expect a string array but currently have an Object[], convert it before the cast:
+  - In Java: create a new String[length] and copy each element with (String) cast (or use Arrays.copyOf with the Class parameter):
+    - String[] strings = Arrays.copyOf((Object[]) objArray, ((Object[]) objArray).length, String[].class);
+  - This throws ClassCastException if an element is not actually a String — which is desired if invalid data exists.
+
+2) Inspect contents instead of treating whole array as object
+- Change the logic at line 340 so you inspect the array’s component type or its elements:
+  - If element is an array, determine component type: if (element.getClass().isArray()) { component = element.getClass().getComponentType(); if (component == String.class) inferred_type = String; else ... }
+  - Or iterate elements: if all items are instanceof String, set inferred_type = String (or list/string-array), otherwise leave as object.
+
+3) Allow object arrays when expected_type is generic
+- If expected_type can accept object arrays, change the test at line 346 to permit Object[] -> expected_type when a safe conversion will be performed, or perform elementwise conversion rather than rejecting.
+
+4) Normalize inputs before type-check
+- Ensure callers provide a String[] (or List<String>) rather than Object[]. Convert higher up in the call chain so inferred_type will be correct at lines 337–347.
+
+Concrete minimal change example (pseudo-Java, to change behavior at lines 337–340)
+- Replace:
+    if (element is not None):
+        inferred_type = object
+- With:
+    if (element != null && element.getClass().isArray()):
+        Class<?> comp = element.getClass().getComponentType();
+        inferred_type = (comp == String.class) ? String[].class : object;
+    else if (element != null && element instanceof String):
+        inferred_type = String.class;
+    else
+        inferred_type = object;
+
+Why these fixes work
+- They either convert the runtime Object[] into a proper String[] (so a cast is valid), or they make the type inference detect the true component type so the mismatch test at line 346 does not wrongly fail.
+
+If you want, tell me:
+- the actual type of the value you pass in (e.g. Object[] created by library X), and
+- what expected_type is (String[] or List<String>), and I’ll give the exact code change to make at lines 337–347.

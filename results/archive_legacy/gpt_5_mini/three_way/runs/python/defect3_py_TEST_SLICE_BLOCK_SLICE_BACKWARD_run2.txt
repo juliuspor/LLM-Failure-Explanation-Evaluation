@@ -1,0 +1,43 @@
+What happened (root cause)
+- The translator walks the UTF‑16 “code unit” array (variable code_units) using an index variable named index, and when it encounters a UTF‑16 high surrogate it consumes two code units (the surrogate pair).
+- The code that advances index is wrong: index gets advanced incorrectly so that eventually code_point_at / to_utf16_code_units is called with index equal to or larger than len(code_units).
+- That triggers the guard at to_utf16_code_units line 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  which raises IndexError during the tests that include a surrogate pair followed by another character (e.g. "\U0001F630A").
+
+Why that happens (concrete mechanics)
+- When you encounter a surrogate pair you must consume two UTF‑16 code units and advance index by 2. If you instead:
+  - advance by 1 only (treating the pair as a single unit but still using code unit indexing), the next loop iteration will try to read the low surrogate as if it's a new high surrogate and may try to read index+1 which can go past the end; or
+  - advance by 2 but then also let the loop increment index again (double increment), index will jump past len(code_units) and a subsequent call will fail the check at lines 35–36.
+- The failing test string "\U0001F630A" is exactly the edge case: a 2‑unit surrogate pair followed immediately by another code unit. The buggy advance logic ends up calling into to_utf16_code_units/code_point_at with an out‑of‑range index.
+
+Where to look in the code
+- to_utf16_code_units: builds code_units and contains the bounds check at lines 35–36 that trips.
+- code_point_at (and/or translate loop): is where index is read and advanced. The bug is in how index is incremented after processing a code point (wrong amount or incremented twice).
+- translate_string (or the main loop that iterates code_units): is where you must ensure the loop increments index exactly by the number of code units consumed (1 for BMP code points, 2 for surrogate pairs), and nowhere else.
+
+Precise fixes (step‑by‑step)
+1. In code_point_at:
+   - When you detect a high surrogate at position index, check that index + 1 < len(code_units) before trying to read the low surrogate. If index + 1 is out of range, either:
+     - treat the high surrogate as an unpaired surrogate (depending on desired behavior), or
+     - raise a clear error earlier instead of allowing a later IndexError.
+2. In the translate loop (translate_string):
+   - Stop using any implicit / extra increment of index. Replace any pattern like:
+       while index < len(code_units):
+           cp = code_point_at(code_units, index)
+           ...process...
+           index += 1
+         (and somewhere else also index += 1 for pairs)
+     with a single controlled advancement:
+       while index < len(code_units):
+           cp, size = code_point_at_and_size(code_units, index)  # size = 1 or 2
+           ...process cp...
+           index += size
+   - Ensure you don't increment index again at the end of the loop or in another place.
+3. Add tests / assertions:
+   - Add an explicit unit test for an unpaired high surrogate at the very end to confirm the chosen behavior.
+   - Keep the existing tests (emoji followed by a char) to ensure the fix prevents the IndexError.
+
+Short summary
+- The IndexError is caused by an incorrect update of the index that walks UTF‑16 code units: the code either fails to check index+1 when reading the low surrogate or advances index incorrectly (off‑by‑one / double increment). Fix by (a) checking index+1 < len(code_units) before reading a low surrogate and (b) advancing index exactly by the number of code units consumed (1 or 2) with no extra increments.

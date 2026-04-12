@@ -1,0 +1,31 @@
+The code fails because the loop that advances pos after a translator consumes code points advances by the number of UTF-16 code units in each consumed code point, but it queries code_point_at(code_units, pos) after increasing pos inside the loop, causing an out-of-range index when a surrogate pair sits near the end. Specifically, in translate():
+
+- At line where consumed = self.translate_codepoint(code_units, pos, out) the translator returns the number of code points consumed (e.g., 1 for a single supplementary code point represented by a surrogate pair).
+- The for pt in range(consumed): loop then does pos += char_count(code_point_at(code_units, pos)). That calls code_point_at(code_units, pos) with pos still pointing at the first code unit of a surrogate pair; char_count returns 2 for that codepoint, and pos is advanced by 2. But on the next iteration (if consumed > 1) or when pos was at length-2 and the surrogate pair is followed by one more code unit (like 'A'), code_point_at is called at an index equal to length (or length-1+1) which is out of range. In the failing test input "\U0001F630A" the UTF-16 code_units length is 3: [high, low, 'A']. When consumed is 1, the loop runs once but inside char_count(code_point_at(code_units, pos)) the code_point_at implementation checks index >= len(code_units) and may index index+1 without proper guards, leading to an IndexError: "String index out of range: 2". The root cause is incorrect advancement logic: the code advances pos using char_count(code_point_at(code_units, pos)) while also relying on translate_codepoint having already handled surrogate pairs. This double-queries code_point_at and can index past the end when pos points to the high surrogate and index+1 equals len(code_units). The error occurs in to_utf16_code_units/code_point_at (see slice lines 35-44) when code_point_at tries to read code_units[index+1] for a high surrogate but index+1 is out of range.
+
+Where it happens:
+- translate(): the for pt in range(consumed): block that updates pos (around lines shown). The problematic call is code_point_at(code_units, pos) inside that loop.
+- to_utf16_code_units()/code_point_at(): index bounds check at line 35 and the subsequent access at line 40 (code_units[index+1]) cause IndexError for index == len(code_units)-1 when index+1 == len(code_units).
+
+Why it happens:
+- translate_codepoint returns the number of code points consumed, not UTF-16 code units. The loop intends to advance pos by the corresponding number of UTF-16 code units, but calling code_point_at(pos) to compute char_count can read index+1 unsafely when pos points to a high surrogate at the end-of-buffer (followed by no low surrogate) or when the buffer length makes index+1 equal to len(code_units).
+
+How to fix (concrete steps):
+1) Replace the for-loop that increments pos by querying code_point_at with a simple advance by UTF-16 code unit count based on the first code unit: if the code unit at pos is a high surrogate (0xD800..0xDBFF) and pos+1 < length and code_units[pos+1] is low surrogate (0xDC00..0xDFFF) then advance pos by 2, otherwise advance by 1. Or
+2) Make translate_codepoint return the number of UTF-16 code units consumed (not code points), and then do pos += consumed. Update all translators accordingly. Or
+3) Compute the codepoints consumed and for each advance use a safe helper that checks bounds before accessing index+1 (same logic as code_point_at but without reading index+1 unless index+1 < length). Implement a safe char_count_from_code_unit(code_units, pos, length) instead of calling code_point_at.
+
+Concrete minimal patch for current code:
+- Replace the for-loop:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with:
+    for pt in range(consumed):
+        if pos < length and 0xD800 <= code_units[pos] <= 0xDBFF and pos+1 < length and 0xDC00 <= code_units[pos+1] <= 0xDFFF:
+            pos += 2
+        else:
+            pos += 1
+
+This avoids calling code_point_at at an index that would access index+1 out of range and fixes the IndexError seen in the test.
+
+Summary: The bug is an unsafe advancement of pos that calls code_point_at which can read index+1 without ensuring it exists; adjust advancement to check bounds or change translated return unit to UTF-16 units.

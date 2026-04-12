@@ -1,0 +1,45 @@
+What happened (what failed)
+- The input string was "fr__POSIX".
+- to_locale raised ValueError("Invalid locale format: fr__POSIX") at line 240 because it decided the characters at positions 3 and 4 (ch3, ch4) were not uppercase letters.
+- For "fr__POSIX" those positions are: locale_str[3] == '_' and locale_str[4] == 'P'. The check at line 239 (if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z') fails because '_' is not in 'A'..'Z', so the method rejects the string.
+
+Why it happened (root cause)
+- The code assumes locale strings use either:
+  - a 2-letter language only ("ll"), or
+  - language + underscore + 2-letter country ("ll_CC"), or
+  - language + underscore + country + underscore + variant ("ll_CC_variant").
+- It does not handle the valid variant form where the country is empty but a variant is present: "ll__variant" (two underscores in a row). In "fr__POSIX" the empty country is encoded as the empty substring between the two underscores, but the code treats the character at index 3 as part of the country (ch3) and requires it to be A–Z. Because ch3 is '_' the validation fails.
+- Concretely: at line 237-240 the code extracts ch3 = locale_str[3] and ch4 = locale_str[4] and insists they are uppercase letters. That logic is wrong for the "ll__variant" case.
+
+Where it occurred (exact lines)
+- to_locale(cls, locale_str: str) defined at line 188.
+- length = len(locale_str) at line 222.
+- The problematic checks and error happen at lines 237–240:
+  - ch3 = locale_str[3] (line 237)
+  - ch4 = locale_str[4] (line 238)
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...) (lines 239–240)
+- Later code (lines 243–247) builds Locale from slices and checks locale_str[5] != '_' for the variant branch; that logic also assumes a country is present.
+
+How to fix it (concrete steps)
+1. Add explicit handling for the empty-country variant form "ll__variant":
+   - After computing length at line 222, check if locale_str has at least 4 characters and locale_str[2] == '_' and locale_str[3] == '_'. If so, return Locale(locale_str[0:2], "", locale_str[4:]) after validating the language (and optionally variant characters).
+   - Example (pseudocode to insert before lines 237–240):
+     - if length >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+         - validate locale_str[0:2] if you need (letters)
+         - return Locale(locale_str[0:2], "", locale_str[4:])
+2. Keep the existing branch for the normal "ll_CC" and "ll_CC_variant" forms, but ensure index and length checks prevent out-of-range access:
+   - Before accessing locale_str[3] and locale_str[4], ensure length >= 5 (i.e., there are at least two country letters).
+   - Replace any accidental condition like if length == 2 with the correct comparisons (e.g., if length == 2 means language-only, but checks for country must require length >= 5).
+3. Add explicit validation and clear comments:
+   - Validate language (locale_str[0:2]) is 2 letters.
+   - For country, require exactly two uppercase letters if present.
+   - For variant, accept the rest after the underscore(s).
+4. Unit tests:
+   - Add tests for "fr", "fr_FR", "fr_FR_POSIX", and "fr__POSIX" to confirm all forms are accepted/parsed correctly.
+   - Add tests for invalid inputs (wrong length, bad characters) to ensure ValueError is still raised where appropriate.
+
+Why this fix works
+- Detecting the "__" pattern explicitly prevents treating the first underscore of the double-underscore as a country-letter and avoids the false failure at lines 237–240.
+- Adding length checks prevents out-of-range indexing and makes the intent clear: either language-only, language+country, or language+empty-country+variant.
+
+If you want, I can produce the exact corrected code snippet to replace the problematic block (showing where to insert the double-underscore branch and the corrected length checks).

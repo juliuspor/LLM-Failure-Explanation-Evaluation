@@ -1,0 +1,56 @@
+What happened (what failed)
+- The test test_translate_surrogate_pair_with_suffix calls CsvEscaper.translate_string on "😰A" (U+1F630 followed by ASCII "A").
+- That triggered an IndexError from to_utf16_code_units at the bounds check (line 35: "if index < 0 or index >= len(code_units): raise IndexError(...)").
+- Root cause: the translator advances the position incorrectly when it encounters a UTF‑16 surrogate pair. The code that walks the input advances the index by 1 (a single Python/character step) even though the current code point is represented as two UTF‑16 code units. Later, code_point_at (which reads from the UTF‑16 code_units list) is called with an index past the end of code_units, causing the bounds check on line 35 to raise.
+
+Why this happens (clear, specific)
+- to_utf16_code_units builds a list named code_units (line shown in the back slice).
+- code_point_at (slice forward) expects an index that indexes into code_units (lines 35–44). It checks index >= len(code_units) and will read code_units[index] and possibly code_units[index + 1] (lines 38–41).
+- The translator loop that calls code_point_at is maintaining an index value that is not kept in the same unit system as code_units:
+  - It uses an index that increments by 1 per Python character processed.
+  - For characters that are represented as a surrogate pair in UTF‑16 (code points > U+FFFF), the UTF‑16 representation consumes two code units, so the parallel code_units list is two entries longer for that character.
+  - After processing the surrogate pair, the translator increases its index by 1 (leaving the caller to request the next code unit index as if only one UTF‑16 code unit was consumed). That next index can be equal to len(code_units) (off the end), so code_point_at's check at line 35 fails.
+
+Where it failed (file/lines/variables)
+- Function: to_utf16_code_units / code_point_at (slices shown).
+- Failing check: line 35 (if index < 0 or index >= len(code_units): raise IndexError(...))
+- Variables: index, code_units
+- The offending index value comes from the translate_string implementation that advances index incorrectly after seeing a surrogate pair.
+
+How to fix it (step-by-step, concrete)
+Pick one of these concrete fixes and apply it to translate_string (or to the iteration logic):
+
+Option A — iterate over UTF‑16 code units (recommended for the existing helper functions)
+1. Convert the input string once: code_units = to_utf16_code_units(s).
+2. Use a while loop over a code-unit index: i = 0; while i < len(code_units):
+   - cp = code_point_at(code_units, i)
+   - append translated output for cp
+   - if cp > 0xFFFF: i += 2 else: i += 1
+3. This keeps the index and code_point_at in the same unit system (code_units), so the bounds check at line 35 cannot be triggered by the off-by-one described above.
+
+Option B — stop using UTF‑16 indexes; use Python code points
+1. Use Python's native iteration (for ch in s) and ord(ch) to obtain code points; Python strings are sequences of Unicode code points on modern builds, so you don't need surrogate handling in most code.
+2. Remove to_utf16_code_units/code_point_at entirely (or only use them when you must generate UTF‑16 code units). This eliminates the mismatch between index units and avoids the bounds error.
+
+Option C — if you must mix both systems, adjust index advancement
+1. When code_point_at returns a supplementary code point (> 0xFFFF), advance the index by 2 instead of 1 because that code point consumed two UTF‑16 code units.
+2. Ensure the translator always advances index in the same unit system used to call code_point_at (i.e., code_unit counts).
+
+Why these steps fix the crash
+- The crash is an off‑by‑one / unit‑mismatch between "number of Python characters processed" and "number of UTF‑16 code units consumed". Using a single consistent index base (either iterate code_units or iterate Python code points) prevents calling code_point_at with an index >= len(code_units), which removes the IndexError at line 35.
+
+Small example of the concrete change for Option A (pseudo-code you can apply)
+- Replace translator loop with:
+  code_units = to_utf16_code_units(s)
+  i = 0
+  out = []
+  while i < len(code_units):
+      cp = code_point_at(code_units, i)
+      out.append(escape_or_identity(cp))
+      if cp > 0xFFFF:
+          i += 2
+      else:
+          i += 1
+  return "".join(out)  # or build proper string from code points
+
+This explanation identifies the exact failing check (line 35), the variable mismatch (index vs code_units), why the index was advanced wrongly (surrogate pairs consume two UTF‑16 units), and gives concrete, testable fixes.

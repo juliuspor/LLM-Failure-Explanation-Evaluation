@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The error occurs inside code_point_at, at the bounds check on line 35:
+  if index < 0 or index >= len(code_units):
+  raise IndexError(...)
+- code_units is the list of UTF‑16 code units created by to_utf16_code_units(s).
+- The translate loop that calls code_point_at passes an index measured in Python string "characters" (Python str indexes are Unicode code points, where a single non‑BMP character counts as one).
+- But code_units contains UTF‑16 code units, where a non‑BMP character is represented as two code units (a surrogate pair).
+- That means the numeric meaning of "index" and the length used in the check (len(code_units)) are from two different coordinate systems. When the translator advances past a surrogate pair it increments the caller's index based on UTF‑16 units (or vice versa), and the check at line 35 can then compare an index from one coordinate system against the length of the other, causing an IndexError.
+
+Why it fails (root cause)
+- Mismatch of indexing domains: code_point_at treats index as an index into code_units (UTF‑16 code units), but the caller is using an index into the Python string (Unicode code points). For non‑BMP characters (like 😰, U+1F630), UTF‑16 uses two code units (high and low surrogate). Because of that difference, the bounds check and subsequent access high = code_units[index] (line 38) can be out of sync and raise IndexError when the translate loop steps across or just past a surrogate pair.
+
+Concrete example (from your failing test)
+- Input: "\U0001F630A" — Python length is 2 (one emoji code point, one 'A').
+- In UTF‑16 code_units length is 3 (high surrogate, low surrogate, 'A').
+- The translate loop increments its index using Python string positions but calls code_point_at which expects a UTF‑16 index. That mismatch leads to an index value that is valid for the Python string but invalid for code_units (or vice versa), so the check on line 35 fails and IndexError is raised.
+
+Where it happens in your file
+- to_utf16_code_units builds the code_units list (line ~10–12).
+- code_point_at performs the check at line 35 and reads high = code_units[index] at line 38, then possibly low = code_units[index + 1] at line 40 and constructs the code point at line 43.
+- The failure is triggered when index refers to a boundary where Python's code point indexing and UTF‑16 code unit indexing disagree.
+
+How to fix it (clear steps)
+You must make indexing consistent — either iterate and index in Python code points or iterate and index in UTF‑16 code units. Pick one and stick to it.
+
+Option A — Work with Python code points (recommended, simpler)
+1. Remove or stop using to_utf16_code_units for indexing.
+2. In your translate loop iterate over the Python string by index i (0 .. len(s)-1).
+3. Use ord(s[i]) to get the code point. If ord(s[i]) is in the high surrogate range (0xD800–0xDBFF), do NOT assume a UTF‑16 low surrogate follows in the Python string; instead:
+   - If you need to handle a non‑BMP code point, check if ord(s[i]) >= 0x10000 (in Python, non‑BMP characters are single code points — so ord(s[i]) will be >= 0x10000); this avoids dealing with surrogate halves entirely.
+4. Only use UTF‑16 surrogate logic if you are explicitly working with UTF‑16 code units; otherwise treat each Python character as one code point.
+
+Option B — Work consistently in UTF‑16 code units
+1. Call to_utf16_code_units(s) once at the start of translate, store its result in code_units.
+2. Iterate over code_units by index j (0 .. len(code_units)-1).
+3. Call code_point_at on that same code_units list with index j (so code_point_at’s index and len(code_units) match).
+4. When you need to advance past a surrogate pair, advance j by 2; otherwise increment j by 1.
+5. Do not use Python string indices in this loop — they will be out of sync.
+
+Exact minimal change to avoid the IndexError (example using Option B)
+- Move the call to to_utf16_code_units(s) out of code_point_at and call it once at the start of translation.
+- Pass both code_units and the index to code_point_at (or make code_point_at accept the precomputed list).
+- Iterate using indices over code_units so the check at line 35 uses the correct length.
+
+Why these fixes work
+- They remove the mismatch between "index into Python str" and "index into UTF‑16 code units".
+- With consistent indexing, line 35's bounds check and the subsequent accesses to high and low are always valid, so the IndexError goes away and surrogate pairs are handled correctly.
+
+If you want, paste the translate loop and I will give the exact patch (3–6 lines) to make the indexing consistent.

@@ -1,0 +1,51 @@
+What happened (root cause)
+- The test passes an array that contains None (test_array = ["Test", None, 99.0]).
+- Inside ClassUtils.to_class the code assumes each element is an object with string methods and calls .upper() on something derived from the element (most likely the element itself or element.__class__.__name__). Calling .upper() on None raises AttributeError: 'NoneType' object has no attribute 'upper'.
+- The failing loop is just before or around line 767 where it finally does classes.append(type(array[i])). That line itself is harmless, but it shows a loop over array[i] — the .upper() call occurs earlier in the same loop and fails before the append is reached for the None element.
+
+Why this is happening (concrete)
+- The code doesn't check for None before calling string methods on an element or on its class-name. For example:
+    - Wrong: name = array[i].__class__.__name__.upper()  # OK for non-None but if array[i] is None and code instead did array[i].upper() it's an error
+    - Or wrong: name = array[i].upper()  # raises AttributeError when array[i] is None
+- The test expects to_class to treat None as a legitimate element and return type(None) for that position, not crash.
+
+Where exactly (references)
+- Method: ClassUtils.to_class
+- Loop index: the loop that processes array[i] (the file slice shows classes.append(type(array[i])) at line 767 — the failing .upper() call is earlier in that same iteration over array[i]).
+- Failing expression: some expression calling .upper() on a value derived from array[i] (the None element).
+
+How to fix (step-by-step, exact changes)
+1. Early return for None input (already tested): if array is None: return None
+2. In the loop that inspects each element, check for None before calling any methods on the element:
+   - Change code that does something like:
+        name = array[i].upper()          # BAD
+        or
+        name = array[i].__class__.__name__.upper()   # BAD if using element directly somewhere
+     to:
+        elem = array[i]
+        if elem is None:
+            classes.append(type(None))
+            continue
+        classes.append(type(elem))
+3. If you actually need the upper-case class name string for other logic, compute it safely:
+        cls_name = type(elem).__name__.upper()    # safe because type(None).__name__ is 'NoneType', but only call type(elem) if you haven't overwritten built-in type
+4. Avoid shadowing builtins (e.g., don't assign to a variable named type or str) — that can hide type() and cause confusing failures.
+
+Minimal patch example (pseudo-Python patch around the loop):
+- BEFORE (problematic):
+    for i in range(len(array)):
+        # ... somewhere here: array[i].upper() or similar
+        classes.append(type(array[i]))
+- AFTER (safe):
+    for i, elem in enumerate(array):
+        if elem is None:
+            classes.append(type(None))
+            continue
+        # now safe to use elem or type(elem)
+        classes.append(type(elem))
+
+Why this exact change fixes the tests
+- It prevents any call to element methods when the element is None, returning type(None) for those entries as the tests expect.
+- It preserves existing behavior for non-None elements (type(elem) yields str, float, int, etc.).
+
+If you want, paste the current implementation of ClassUtils.to_class (the loop around line ~760) and I can give the exact one-line or two-line patch to apply.

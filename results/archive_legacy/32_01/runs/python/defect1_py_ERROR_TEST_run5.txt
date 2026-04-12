@@ -1,0 +1,43 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15). The implementation immediately checks the minutes argument and throws ValueError("Minutes out of range: -15").
+- Root cause: for_offset_hours_minutes treats the minutes parameter as if it must be in the range 0..59 and rejects any negative value. The code is expecting the sign to be carried only by the hours argument, so it never accepts a negative minutes value even though the API (and your test) allow giving a negative minutes to indicate a negative total offset.
+
+Where it happens
+- In the method DateTimeZone.for_offset_hours_minutes(...) the validation block that throws the exception is executed before the method computes the total offset and builds the zone id. That validation is the line that produces the message "Minutes out of range: -15" (the if/minutes-range check inside for_offset_hours_minutes).
+
+Why that is wrong
+- An offset like -2 hours 15 minutes is a valid timezone offset: −02:15. The code’s validation rejects -15 as an invalid minutes value rather than interpreting it as "15 minutes with a negative sign".
+- The correct behavior is to allow minutes to be negative provided its absolute value is within 0..59 and the minutes sign is combined properly with the hours sign when computing the total offset.
+
+Concrete fixes (step‑by‑step)
+1. Change the minutes validation so it accepts negative minutes whose absolute value is <= 59.
+   - Replace the current if that throws for minutes < 0 (or minutes >= 60) with a check against abs(minutes):
+     - if (Math.abs(minutes) > 59) throw new IllegalArgumentException("Minutes out of range: " + minutes);
+2. Compute the total offset in minutes using the signs of hours and minutes together, not by assuming minutes are non‑negative. Example logic:
+   - int sign;
+     if (hours < 0 || (hours == 0 && minutes < 0)) sign = -1; else sign = 1;
+     int totalMinutes = sign * (Math.abs(hours) * 60 + Math.abs(minutes));
+   - This handles cases: (-2, -15) -> -(2*60 + 15) = -135; (-2, 15) -> -(2*60 + 15) = -135; (2, -15) should probably be treated as 2:15 (or considered invalid depending on API rules) — decide and document which you want. A robust approach is to require that hours and minutes have the same sign (or allow either and use the rule above).
+3. Build the id string consistently from totalMinutes (or from sign plus abs(hours), abs(minutes)) so "-02:15" is produced for -135 minutes.
+   - Example id formatting: String id = String.format("%s%02d:%02d", sign < 0 ? "-" : "+", Math.abs(hours), Math.abs(minutes));
+   - If you compute totalMinutes first, derive hours = Math.abs(totalMinutes) / 60; minutes = Math.abs(totalMinutes) % 60; sign = totalMinutes < 0 ? "-" : "+".
+4. Add unit tests for the boundary and sign combinations:
+   - for_offset_hours_minutes(-2, -15) -> "-02:15"
+   - for_offset_hours_minutes(-2, 15)  -> "-02:15" (if you choose to accept mixed signs)
+   - for_offset_hours_minutes(0, -30)  -> "-00:30"
+   - for_offset_hours_minutes(0, 30)   -> "+00:30"
+   - Reject minutes with abs > 59: for_offset_hours_minutes(1, 60) throws.
+
+Minimal code change example (Java-like)
+- Current (problematic):
+  if (minutes < 0 || minutes > 59) throw new IllegalArgumentException("Minutes out of range: " + minutes);
+- Replace with:
+  if (Math.abs(minutes) > 59) throw new IllegalArgumentException("Minutes out of range: " + minutes);
+  int sign = (hours < 0 || (hours == 0 && minutes < 0)) ? -1 : 1;
+  int totalMinutes = sign * (Math.abs(hours) * 60 + Math.abs(minutes));
+  // then build id from totalMinutes or abs(hours)/abs(minutes)
+
+Why this will fix the test
+- After the change, for_offset_hours_minutes(-2, -15) will be accepted, totalMinutes will be computed as -135, and the id formatting will return "-02:15", satisfying the assert.
+
+If you want, tell me the exact file and line numbers and I’ll give a patch with the exact diff.

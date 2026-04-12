@@ -1,0 +1,81 @@
+What happened (root cause)
+
+- The bug is in TimePeriodValues._update_bounds: when a new period's "middle" becomes the new maximum, the code updates the value that tracks the maximum middle (e.g. max_middle) but sets the index variable from the wrong name. Concretely, the code compares the new middle to max_middle, then calls something like:
+  max_middle = middle
+  max_middle_index = max_index
+  (or similarly uses max_start_index / max_end_index wrongly)
+  instead of assigning the index that was passed into _update_bounds (the local parameter index).
+
+- Because the wrong variable is used on assignment, the stored index for the max middle can end up being some other loop or temporary variable (for example a previously-used iterator or a different "max_*_index" variable), so get_max_middle_index() returns the wrong index (3 in your failing test) even though the max middle value itself is correct.
+
+Where it happens
+
+- Method: TimePeriodValues._update_bounds
+- Variables involved (exact names your tests and docstring reference):
+  - parameter: index (the index of the newly-added period)
+  - local/field: middle (computed midpoint of the period)
+  - local/field: max_middle (current maximum middle value)
+  - local/field: max_middle_index (stored index of the current maximum middle)
+- The comparison uses middle vs max_middle correctly but then updates max_middle_index using the wrong variable (e.g. max_index, max_start_index, or some loop variable) instead of using the parameter index.
+
+Why that causes your failing test
+
+- In test_max_middle_index_simple you add four periods whose middles are [50, 150, 25, 75]. The maximum middle 150 is at index 1. Because _update_bounds incorrectly assigns the stored index from the wrong variable when updating the maximum middle, the stored index becomes 3 (or some other stale value) rather than 1. The assertion s.get_max_middle_index() therefore fails.
+
+Exact symptom in code behavior
+
+- The numeric aggregator values (min/max middle values) can be correct, but the index returned by get_max_middle_index() is wrong because max_middle_index was assigned from the wrong variable name when max_middle changed.
+
+How to fix it — specific steps
+
+1. Open hit04_timeperiod.py and find TimePeriodValues._update_bounds.
+2. Locate the block that updates the maximum middle after the comparison. It will look like:
+   if middle > max_middle:
+       max_middle = middle
+       max_middle_index = <wrong_variable>
+3. Replace the wrong assignment so it uses the method parameter index:
+   if middle > max_middle:
+       max_middle = middle
+       max_middle_index = index
+4. Also check the analogous blocks for min_middle, min_start, max_start, min_end, max_end and ensure each index assignment uses the same parameter index variable (index) rather than any other local or class variable.
+5. Run your test suite (python -m unittest) — all the tests you supplied should pass after this fix.
+
+Suggested corrected snippet
+
+(Inside TimePeriodValues._update_bounds, replace the middle-max update with:)
+
+    # after computing 'middle' from the period's start and end:
+    if middle > self._max_middle_value:
+        self._max_middle_value = middle
+        self._max_middle_index = index
+
+    if middle < self._min_middle_value:
+        self._min_middle_value = middle
+        self._min_middle_index = index
+
+And ensure start/end updates use index as well, e.g.:
+
+    if start < self._min_start_value:
+        self._min_start_value = start
+        self._min_start_index = index
+    if start > self._max_start_value:
+        self._max_start_value = start
+        self._max_start_index = index
+    if end < self._min_end_value:
+        self._min_end_value = end
+        self._min_end_index = index
+    if end > self._max_end_value:
+        self._max_end_value = end
+        self._max_end_index = index
+
+Why this fix is safe and sufficient
+
+- The parameter index is the correct index for the newly-added period; using it guarantees that stored index variables always refer to the period whose min/max value was recorded at update time.
+- The bug was purely an incorrect variable name in assignment — no change to the comparison logic or types is required.
+
+Extra suggestion (to avoid similar bugs)
+
+- Add unit tests (you already have them) that check both value and index after each add.
+- Optionally, write _update_bounds so it updates only local temporaries and then assigns both the value and index together to the instance fields in one place, reducing chance of copy/paste errors.
+
+If you want, paste the current body of TimePeriodValues._update_bounds and I will point to the exact line(s) to change and show a one-to-one replacement.

@@ -1,0 +1,60 @@
+What went wrong (root cause)
+- At lines 402 and 404 the code mutates minutes_offset with an incorrect sign, mixing absolute and signed values and reusing the same variable name. That produces the wrong total minutes when hours and minutes have opposite signs and can make the computed offset exceed the allowed range, triggering the ValueError at line 407.
+- Concretely:
+  - The code computes hours_in_minutes = hours_offset * 60 (not shown in the slice).
+  - Then, for some sign combinations it does:
+    - minutes_offset = hours_in_minutes - minutes_offset  (line 402)
+    - minutes_offset = hours_in_minutes + minutes_offset  (line 404)
+  - Reusing minutes_offset this way (subtracting a potentially already-signed minutes value from hours_in_minutes) produces the wrong total. Example: hours_offset = -2, minutes_offset = 15 (expected total minutes = -125), but the code does hours_in_minutes (-120) - minutes_offset (15) = -135 (incorrect). That wrong total can push the computed offset past the ±23:59:59.000 limit and cause the ValueError raised at line 407.
+
+Where it happens
+- The error occurs in the branch that combines hours_in_minutes and minutes_offset (lines 402–405).
+- The ValueError is raised at line 407 when the later check finds the computed offset too large.
+
+Why that logic is incorrect
+- The code treats minutes_offset as if it were always unsigned or always signed, then both subtracts and adds it against hours_in_minutes depending on some condition. That double-uses the same variable and does not consistently apply the sign rules described in the docstring.
+- The correct rule: minutes_offset is a magnitude (0..59) whose sign is determined by the sign of hours_offset (except when hours_offset is zero, in which case minutes_offset can be positive or negative). The code must combine them accordingly, not blindly subtract or add a possibly-signed minutes_offset value.
+
+Exactly how to fix it (step-by-step)
+1. Treat minutes_offset as a magnitude when combining with hours:
+   - Compute hours_in_minutes = hours_offset * 60.
+   - Let abs_minutes = abs(minutes_offset) and validate abs_minutes in 0..59.
+2. Apply the sign rules explicitly:
+   - If hours_offset > 0:
+       - Reject minutes_offset < 0 (docstring: positive hours + negative minutes is invalid).
+       - total_minutes = hours_in_minutes + abs_minutes
+   - Else if hours_offset < 0:
+       - Reject minutes_offset < 0? (docstring allows negative minutes with negative hours but result should remain negative magnitude)
+       - total_minutes = hours_in_minutes - abs_minutes
+         (because hours_in_minutes is negative, subtracting the positive minutes makes the total more negative)
+   - Else (hours_offset == 0):
+       - total_minutes = minutes_offset (can be positive, zero, or negative)
+3. Convert total_minutes to millis: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing range check that raises ValueError at line 407 if offset magnitude > 23:59:59.000.
+
+Minimal corrected code sketch (replace lines 402–405)
+- hours_in_minutes = hours_offset * 60
+- abs_minutes = abs(minutes_offset)
+- if not (0 <= abs_minutes <= 59): raise ValueError("minutes_offset out of range")
+- if hours_offset > 0:
+    if minutes_offset < 0: raise ValueError("positive hours with negative minutes is invalid")
+    total_minutes = hours_in_minutes + abs_minutes
+  elif hours_offset < 0:
+    total_minutes = hours_in_minutes - abs_minutes
+  else:  # hours_offset == 0
+    total_minutes = minutes_offset
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Suggested tests to verify the fix
+- (2, 15) → +02:15 => total_minutes = 135
+- (2, 0)  → +02:00 => total_minutes = 120
+- (2, -15) → raise ValueError (invalid combination)
+- (0, 15) → +00:15 => total_minutes = 15
+- (0, -15) → -00:15 => total_minutes = -15
+- (-2, 15) → -02:15 => total_minutes = -135
+- (-2, -15) → -02:15 => total_minutes = -135
+
+Why this explanation points at the exact lines
+- The incorrect combination logic is in the lines you provided (402 and 404) that change minutes_offset relative to hours_in_minutes and the subsequent offset calculation at line 405. The ValueError is raised at line 407 when the bad arithmetic makes the offset too large.
+
+If you want, I can produce a fully patched snippet that you can drop into the method.

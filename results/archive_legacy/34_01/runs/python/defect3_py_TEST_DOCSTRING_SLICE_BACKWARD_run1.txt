@@ -1,0 +1,44 @@
+What happened
+- The failure occurs inside to_utf16_code_units (shown in your slice, lines 10–36). When translate_string('\U0001F630') runs, to_utf16_code_units raises IndexError at line 36: "String index out of range".
+- The immediate cause is the bounds check on line 35:
+  if index < 0 or index >= len(code_units):
+  That check compares index (an index into the original string s) against len(code_units) (the list of UTF‑16 code units). Those two lengths are not the same for characters outside the BMP (code points > 0xFFFF) because such code points become a surrogate pair (two UTF‑16 code units). For '\U0001F630' the string length is 1 but the UTF‑16 code_units length is 2, so the logic that uses index vs len(code_units) is wrong and triggers the IndexError.
+
+Why this happens (root cause)
+- The function mixes two different indexing domains:
+  - index is an index into the original Python string s (counts Unicode code points).
+  - len(code_units) counts UTF‑16 code units (surrogates and BMP units).
+- For astral characters (like U+1F630), a single Python code point maps to two UTF‑16 code units. The code incorrectly uses len(code_units) when checking a position in the original string, so the bounds check fails or is inconsistent and raises IndexError.
+
+Exactly where (file locations / names / lines)
+- Function: to_utf16_code_units
+- Relevant lines from your slice: 10 (def to_utf16_code_units...), 12 (code_units = []...), and the failing check at lines 35–36:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+
+How to fix it (clear, numbered steps)
+1. Decide what index is supposed to refer to:
+   - If index should be an index into the original string s, compare it to len(s).
+   - If index should be an index into the UTF‑16 code units list, compare it to len(code_units).
+2. If you need to validate an index into s, change the check on line 35 to:
+   if index < 0 or index >= len(s):
+       raise IndexError(f"String index out of range: {index}")
+3. If the function needs to validate an index into code_units, then ensure code_units is fully populated before you do that bounds check. Build code_units first (converting each code point into one or two UTF‑16 units), then do the check against len(code_units).
+4. Ensure correct conversion of astral code points to surrogate pairs when building code_units. Example conversion logic (conceptual):
+   for ch in s:
+       cp = ord(ch)
+       if cp <= 0xFFFF:
+           code_units.append(cp)
+       else:
+           cp -= 0x10000
+           high = 0xD800 + (cp >> 10)
+           low  = 0xDC00 + (cp & 0x3FF)
+           code_units.extend([high, low])
+
+What to test after the fix
+- Run the original test: escaper.translate_string('\U0001F630') and assert result == '\U0001F630'
+- Test mixed strings with BMP and non‑BMP characters, e.g. "A\U0001F630B"
+- Test index boundary cases: index == 0, index == len(s)-1, and invalid negative/index >= len(s)
+
+Summary in one sentence
+The code compares an index into the original string s against len(code_units) (UTF‑16 code units), so astral characters that expand to two UTF‑16 units (like '\U0001F630') break the bounds check — fix it by checking against len(s) or by populating code_units first and using the correct domain for index checks.

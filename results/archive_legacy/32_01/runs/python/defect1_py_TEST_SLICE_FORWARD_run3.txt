@@ -1,0 +1,60 @@
+What happened
+- The failure occurs inside DateTimeZone.for_offset_hours_minutes (the method that builds a zone from hour/minute offsets).
+- The code at lines 406 and 408 mishandles the sign of the minutes parameter when the hours parameter is negative. That produces the wrong total offset for inputs like (-2, -15).
+- As a result, DateTimeZone.for_offset_hours_minutes(-2, -15) computes the offset as -1 hour 45 minutes instead of -2 hours 15 minutes, so zone.id is wrong.
+
+Where it happens (exact lines)
+- The problematic lines are the ones you showed:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Those lines are inside for_offset_hours_minutes just before multiplying minutes by MILLIS_PER_MINUTE and calling for_offset_millis (the return on line 412).
+
+Why it happens (root cause)
+- The code treats the minutes value as if it can be added or subtracted directly without consistently applying the sign rules. For a negative hours value the code ends up subtracting an already-negative minutes value (double-negating) or otherwise combining signs incorrectly.
+- Concretely, with hours = -2 and minutes = -15:
+  - The correct total should be -2*60 + (-15) = -135 minutes => "-02:15".
+  - The buggy code ends up with -120 - (-15) = -105 minutes => "-01:45".
+- The logic assumes minutes are non-negative and/or doesn't normalize minutes to a positive magnitude and then apply the hours sign. It therefore produces an incorrect total minutes for negative hours/minutes combinations.
+
+How to reproduce quickly
+- Call DateTimeZone.for_offset_hours_minutes(-2, -15) and inspect the resulting id. It will show "-01:45" instead of "-02:15".
+- Any combination where hours and minutes are both negative will show the same symptom.
+
+Precise fixes (step-by-step, exact places to change)
+1. Validate minutes first:
+   - Ensure minutes is in the range 0..59 (or 0..59 inclusive) and reject absolute-minute values ≥ 60. If you intend to accept negative minutes as input, normalize them first (see step 2).
+   - This prevents ambiguous cases and simplifies sign handling.
+
+2. Compute total minutes with an explicit sign rule rather than adding/subtracting raw minutes:
+   - Replace the two lines (406 and 408) with logic that uses the sign of hours (or of a combined sign) to apply minutes correctly. Example replacement logic:
+     - minutes_abs = abs(minutes)
+     - if hours >= 0:
+         minutes_offset = hours_in_minutes + minutes_abs
+       else:
+         minutes_offset = hours_in_minutes - minutes_abs
+   - If hours can be zero and you want sign to follow minutes, handle hours == 0 as a separate case:
+     - if hours > 0: minutes_offset = hours*60 + minutes_abs
+       elif hours < 0: minutes_offset = hours*60 - minutes_abs
+       else: minutes_offset = minutes if minutes >= 0 else -abs(minutes)
+
+3. Keep the later lines unchanged:
+   - After computing minutes_offset correctly, continue to multiply by DateTimeConstants.MILLIS_PER_MINUTE using FieldUtils.safe_multiply and call cls.for_offset_millis(offset) as the code already does.
+
+Concrete single-line patch example
+- Replace the problematic lines with:
+
+  minutes_abs = abs(minutes_offset)
+  if hours >= 0:
+      minutes_offset = hours_in_minutes + minutes_abs
+  else:
+      minutes_offset = hours_in_minutes - minutes_abs
+
+(Adjust variable names to match the method’s locals. The intent is: use absolute minutes and then add or subtract according to hours' sign.)
+
+Why this fix works
+- It removes the double-negation and ambiguous addition/subtraction by always treating minutes as a magnitude and applying the hours sign explicitly.
+- For (-2, -15): hours_in_minutes = -120, minutes_abs = 15, hours < 0 so minutes_offset = -120 - 15 = -135 (correct).
+- For (2, 15): minutes_offset = 120 + 15 = 135 (correct).
+
+Notes
+- Also decide on an API rule: either require minutes to be non-negative (0..59) and rely on hours sign, or accept negative minutes but normalize them immediately. Document whichever rule you choose.

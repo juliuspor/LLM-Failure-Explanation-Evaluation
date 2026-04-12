@@ -1,0 +1,32 @@
+What happened (where): in the code that builds an offset in minutes you validate the minutes field at lines 400–401, then you try to combine hours and minutes into a single minutes_offset at lines 406 and 408, and finally convert that to milliseconds at line 409 and return a DateTimeZone via for_offset_millis at line 412. The code fails because lines 406 and 408 are both reached in sequence (the second assignment silently overwrites the first), so the minutes part is applied with the wrong sign for negative offsets.
+
+Why it fails (root cause): there is a missing conditional branch (an else) or an incorrect control flow between lines 406 and 408. The intent is clearly to treat the minutes differently depending on whether the overall sign is negative or positive, but both assignments run one after the other. Concretely, for a negative offset you want:
+
+- total_minutes = hours_in_minutes - minutes_part
+
+but the code executes
+- minutes_offset = hours_in_minutes - minutes_offset  (line 406)
+then immediately
+- minutes_offset = hours_in_minutes + minutes_offset  (line 408)
+
+so the second line undoes the first and produces the wrong total_minutes (or an incorrect sign). That wrong total is then multiplied by MILLIS_PER_MINUTE at line 409 and used at line 412, producing an incorrect offset (or an out-of-range value).
+
+Example symptom: parsing "-01:30" should give -90 minutes but the code ends up computing +30 (or another incorrect value), because the subtraction is overwritten by the addition.
+
+Exactly where to fix it (step-by-step):
+
+1. Around lines 405–408, make the two assignments mutually exclusive. Replace the two separate assignments with an if/else so only one runs. Example structure:
+   - if sign_is_negative:
+       minutes_offset = hours_in_minutes - minutes_part   // line 406 behavior
+     else:
+       minutes_offset = hours_in_minutes + minutes_part   // line 408 behavior
+
+2. Alternatively, use different variable names so you cannot accidentally overwrite the computed value, e.g. compute minutes_from_hours = hours_in_minutes and then:
+   - minutes_offset = minutes_from_hours - minutes_part  (if negative)
+   - minutes_offset = minutes_from_hours + minutes_part  (if positive)
+
+3. Add unit tests that cover both positive and negative offsets, especially cases where minutes != 0 (e.g., "+02:15" and "-02:15") to make sure the sign and total minutes are correct.
+
+Why this fix works: making the two assignments exclusive ensures the minutes part is added or subtracted exactly once according to the sign. That produces the correct integer total minutes before multiplying by MILLIS_PER_MINUTE at line 409 and calling for_offset_millis at line 412.
+
+No other changes are required unless additional validation or overflow checks are needed elsewhere; the immediate bug is the missing else/control-flow between lines 406 and 408.

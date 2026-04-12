@@ -1,0 +1,41 @@
+What happened (where)
+- The code raises ValueError at lines 396–397:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check runs before the later code at lines 402–405 that applies the sign/adjustment to minutes_offset:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  - 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code validates minutes_offset too early, while minutes_offset still carries the parsed sign (or is otherwise negative) or before it has been adjusted relative to hours_in_minutes.
+- If parsing produced a negative minutes value (for example parsing an input like "-00:30" or a negative sign applied separately), the early check at line 396 sees minutes_offset < 0 and throws ValueError, even though the code intends to accept that negative minutes after sign/adjustment at lines 402/404.
+- In short: the validation assumes minutes_offset must already be between 0 and 59, but minutes_offset can legitimately be negative or require combination with hours_in_minutes before it is in that canonical range. The check therefore rejects valid inputs.
+
+Where to fix it (concrete steps)
+1. Move or change the validation so it runs after the sign/adjustment logic (after lines 402/404 and before line 405), i.e. validate the absolute minutes component once you've parsed and normalized sign.
+2. Or validate the absolute value of minutes immediately after parsing the token that produced minutes_offset (use abs(minutes_offset) in the check), so the check reads:
+   - if abs(minutes_offset) < 0 or abs(minutes_offset) > 59: raise ValueError(...)
+   (practically just check 0 <= abs(minutes_offset) <= 59)
+3. Ensure the check uses the intended variable: either the parsed minute component (0..59) or the normalized minute component depending on the parsing flow.
+
+Recommended code changes (exact places)
+- Option A (move check):
+  - Remove lines 396–397.
+  - After the sign/combination logic (after line 404, before line 405) add:
+    - if abs(minutes_offset) > 59:
+    -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Option B (validate parsed minute component):
+  - If you have a separate parsed variable for the minute part (e.g., parsed_minutes), change the check on line 396 to:
+    - if parsed_minutes < 0 or parsed_minutes > 59:
+    -     raise ValueError(f"Minutes out of range: {parsed_minutes}")
+  - Then continue to compute minutes_offset using sign/hours_in_minutes.
+
+Add tests
+- Add unit tests for inputs that triggered the failure (e.g. "-00:30", "-1:15", "+02:05") to confirm accepted/ rejected behavior.
+
+Why this exact fix works
+- Moving the validation ensures you check the minute component after you normalize sign and combine with hours, so you don't reject a valid signed minute value.
+- Or validating the parsed absolute minute component ensures you check the true minute field (0–59) rather than the signed/combined temporary value used later.
+
+This explains where the failure happens (lines 396–397), why (validation happens at the wrong time while minutes_offset can legitimately be negative/unaligned), and gives specific code-change options and tests to fix it.

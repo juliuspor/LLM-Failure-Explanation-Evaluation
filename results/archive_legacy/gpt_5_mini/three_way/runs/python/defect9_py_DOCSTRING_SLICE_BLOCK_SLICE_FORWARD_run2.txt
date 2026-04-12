@@ -1,0 +1,59 @@
+What actually causes the crash
+- At line 82 the code does: len(replacement_list[i]) - len(search_list[i]).
+- If either replacement_list[i] or search_list[i] is None, calling len(None) raises a TypeError and the function crashes before it ever gets to the later logic that was intended to ignore None entries (the checks at lines 102–105 happen much later).
+- In short: the code computes lengths for every entry unconditionally in the capacity-estimate loop (lines 81–85) and only later checks for None. That ordering causes the crash.
+
+Where it happens (exact lines)
+- The failing expression is on line 82:
+    greater = len(replacement_list[i]) - len(search_list[i])
+- The code that intended to ignore None values is at lines 102–105:
+    no_more_matches_for_repl_index[i]
+    or search_list[i] is None
+    or len(search_list[i]) == 0
+    or replacement_list[i] is None
+  but that check runs after the length calculation above. Because the length calculation runs first, None is never ignored — it causes the exception.
+
+Why the current checks don't prevent the crash
+- The later checks (lines 102–105) decide whether to look for matches, but they do not protect the earlier length-based capacity estimate. The algorithm assumes it can safely call len() on all entries, but that assumption is wrong when caller supplies None entries to indicate "ignore this item."
+
+Concrete fixes (exact changes to make)
+1) Skip None/empty entries before using len(). Replace the capacity-estimate loop (lines 81–85) with a guarded version so len() is only called when both values are valid:
+
+Current (lines 81–85):
+  for i in range(search_length):
+      greater = len(replacement_list[i]) - len(search_list[i])
+      if greater > 0:
+          increase += 3 * greater  # assume 3 matches
+
+Replace with:
+  for i in range(search_length):
+      # skip entries that are None or empty; they should be ignored
+      if search_list[i] is None or replacement_list[i] is None:
+          continue
+      if len(search_list[i]) == 0:
+          continue
+      greater = len(replacement_list[i]) - len(search_list[i])
+      if greater > 0:
+          increase += 3 * greater  # assume 3 matches
+
+2) (Optional but recommended) Mirror the same guards in any other place that assumes non-None strings. For example, before calling text.find(search_list[i], start) (line 108), the code already checks for None/empty at 102–105, but ensure those exact conditions are executed before any use of search_list[i] or replacement_list[i].
+
+3) Add unit tests that cover:
+- search_list contains None entries
+- replacement_list contains None entries
+- matching entries mixed with None
+- empty string in search_list
+These ensure the guarded code prevents len(None)/find(None) errors and that None entries are ignored.
+
+Why this fix is safe and minimal
+- It follows the intended contract: None entries are treated as "ignore this replacement".
+- It prevents calls to len(None) and text.find(None), which are the direct causes of runtime errors.
+- The change is minimal and local to the capacity estimate loop; it does not alter the main matching logic other than avoiding invalid operations.
+
+Example failing input that triggered this bug
+- text = "abc"
+- search_list = ["a", None]
+- replacement_list = ["x", "y"]
+The original code crashes at line 82 when i == 1 because len(search_list[1]) is len(None).
+
+If you want, I can produce the exact patched file diff or run through additional possible edge cases (e.g., replacement_list shorter than search_list, non-string types) and suggest strengthened validation.

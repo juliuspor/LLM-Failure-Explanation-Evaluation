@@ -1,0 +1,55 @@
+What fails
+- The loop that advances pos after translate_codepoint(...) moves pos the wrong amount when translate_codepoint returns a value measured in UTF‑16 code units (char) instead of in Unicode codepoints.
+- That causes pos to skip past the buffer end or call code_point_at(...) with an out-of-range index and crash (IndexError / invalid surrogate handling).
+
+Where it happens (specific lines)
+- In the while loop: consumed = self.translate_codepoint(code_units, pos, out)
+- When consumed > 0 you run:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it fails (root cause, plain language)
+- The code assumes a particular unit for consumed but the implementation of translate_codepoint uses the other unit.
+  - If translate_codepoint returns "number of codepoints consumed" (e.g. 1 for a single astral character handled as a surrogate pair), the loop is OK: it iterates once and char_count(...) returns 2 for the surrogate pair, so pos advances by 2 code units.
+  - If translate_codepoint returns "number of UTF‑16 code units consumed" (e.g. 2 for that same astral character), the loop iterates twice. On the first iteration char_count(...) returns 2 and pos += 2 moves pos past the consumed characters; on the second iteration code_point_at(code_units, pos) is called at a position already past the consumed characters (often past length) and fails.
+- In short: consumed's meaning (codepoints vs. code units) is inconsistent with how the code advances pos. That inconsistency leads to double-counting or out-of-bounds access.
+
+Concrete example
+- Input: one astral character (encoded as two UTF‑16 code units).
+- Suppose translate_codepoint handled that character and returned consumed == 2 (thinking in code units).
+- The for loop runs twice:
+  - iteration 1: code_point_at(..., pos) sees the surrogate pair and char_count(...) returns 2, pos += 2 -> pos now points past the string end.
+  - iteration 2: code_point_at(..., pos) is called with pos past the end → error.
+
+How to fix it (concrete steps)
+Pick one clear contract and implement it consistently. Two safe options:
+
+Option A — make translate_codepoint return count in code units (chars)
+1. Document: translate_codepoint must return the number of UTF‑16 code units consumed.
+2. Replace the for-loop with a single increment:
+   pos += consumed
+   (Remove the inner for loop entirely.)
+3. Keep the consumed == 0 branch as-is.
+
+Option B — make translate_codepoint return count in codepoints
+1. Document: translate_codepoint must return the number of Unicode codepoints consumed.
+2. Keep the inner loop, but ensure translate_codepoint implementations return codepoint counts (1 for a surrogate pair).
+3. Verify translate_codepoint implementations do not return code units.
+
+Which to choose
+- Option A is simpler and less error-prone if your rest of code treats pos/indexes as UTF‑16 code units (as the rest of this method does).
+- Option B is OK only if you change all translators and document the codepoint semantics carefully.
+
+Minimal patch (if translate_codepoint returns code units)
+Replace this block:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+with:
+    pos += consumed
+
+Why this is safe
+- pos and length are measured in UTF‑16 code units (len(code_units) is code unit length).
+- If consumed is the number of code units consumed, advancing by consumed keeps pos consistent and avoids repeated calls to code_point_at at invalid positions.
+
+Summary
+The failure comes from a mismatch in units: consumed is being interpreted inconsistently (code units vs codepoints) before advancing pos. Fix by picking one unit, documenting it, and advancing pos accordingly (most straightforward: pos += consumed).

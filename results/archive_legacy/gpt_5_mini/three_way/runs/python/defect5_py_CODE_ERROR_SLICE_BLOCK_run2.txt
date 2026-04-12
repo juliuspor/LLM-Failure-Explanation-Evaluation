@@ -1,0 +1,59 @@
+What happened (where it failed)
+- Failure occurred at lines 346–351 (the if that raises TypeError).
+- The code raised TypeError("Cannot cast object list to str list...") because inferred_type == object while expected_type is str.
+- That means inferred_type was set to object earlier in this function (lines 342–344), so the branch at line 346 executed and raised.
+
+Why inferred_type became object (root cause)
+- The code sets inferred_type with:
+  - if array is not None: inferred_type = type(array)
+  - elif element is not None: inferred_type = type(element)
+  - else: inferred_type = object
+- type(array) is the Python type of the list object (e.g. list), not the element type. So using type(array) gives the wrong value whenever array is a list: you get list, not the element class.
+- In the failing test inferred_type was object because both array and element were None (or element was None and array absent), so the function had no element-type information and fell back to object at line 344.
+- After that fallback, the code unconditionally treats an object-typed list as incompatible with a non-object expected_type and raises the TypeError at line 346 — even if the caller provided expected_type=str and intended to add a None placeholder for a str list. In short:
+  - wrong source of type info for arrays (type(array) is wrong)
+  - losing element type when element is None
+  - then raising when inferred_type == object and expected_type != object
+
+Why that’s the bug (concise)
+- The function asks for element type but reads type(array) (the list object) instead of the element class.
+- When element is None the function has no element-type information and should rely on expected_type (if provided) or handle None specially, but it instead falls back to object and then rejects expected_type.
+
+Exact places to change (concrete fixes)
+1. Determine element type from the array contents, not from the list object:
+   - Replace inferred_type = type(array) (line ~342) with something like:
+     - if array and len(array) > 0: inferred_type = type(array[0])
+     - else: (fall through)
+2. Use expected_type when element is None and array gives no element type:
+   - After checking array elements and element, if inferred_type is still unknown and expected_type is provided, set inferred_type = expected_type.
+3. Only raise TypeError if you truly cannot satisfy expected_type:
+   - Current check (line 346) should be changed: raise only if inferred_type is object AND expected_type is not None AND expected_type != object AND you cannot create a list of expected_type.
+   - Or simply avoid raising when expected_type is provided, because expected_type gives the intended element type.
+
+Concrete replacement (conceptual) for the type-inference block and the raise:
+- Replace lines ~342–344 with:
+    if array:
+        inferred_type = type(array[0]) if len(array) > 0 else None
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = None
+- Then decide:
+    if inferred_type is None and expected_type is not None:
+        inferred_type = expected_type
+- And replace the raise condition (line 346) with:
+    if inferred_type is object and expected_type is not None and expected_type is not object:
+        raise TypeError(...)
+  (or remove the raise if you will create the new list using expected_type)
+
+Why this fixes it
+- You get the element class from actual list contents, not the list object.
+- If there is no element (element is None) and array is empty/absent, you use expected_type when available to create/resize the list instead of defaulting to object and then rejecting.
+- That prevents spurious TypeError when the caller supplied expected_type (like str) but your code lost that info and treated the new list as an object[].
+
+Summary of actionable steps
+1. Replace inferred_type = type(array) with reading the element type from array[0] (when array non-empty).
+2. If element is None and array gives no type, use expected_type to set inferred_type.
+3. Adjust the raise condition so you don't raise just because you defaulted to object when expected_type is provided.
+
+If you want, paste the ArrayUtils._copy_list_grow1 and I’ll give an exact corrected function body and unit-test suggestions.

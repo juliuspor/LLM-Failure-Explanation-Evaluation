@@ -1,0 +1,70 @@
+What happened
+- The failure happened in LocaleUtils.to_locale when you called LocaleUtils.to_locale("fr__POSIX").
+- The method performs a strict validation of the input string and raised ValueError("Invalid locale format: fr__POSIX").
+
+Why it failed (root cause)
+- The method expects locale strings in one of these shapes:
+  - "ll" (language)
+  - "ll_CC" (language + country)
+  - "ll_CC_variant" (language + country + variant)
+- The validation code enforces that the country part, if present, must be exactly two uppercase letters. It detects presence of a country by the single underscore separator after the language.
+- "fr__POSIX" uses two underscores to indicate "language + empty country + variant" (this is a valid JVM/Locale form meaning language=fr, country="", variant=POSIX). The validator, however, treats the second underscore as an indicator that a country is present and then checks the country segment length and content. Because the country segment is empty, the country-length check fails and the code throws ValueError.
+- In short: the validator does not accept the valid "language__variant" form (double underscore with empty country), so it rejects "fr__POSIX".
+
+Where in the code it fails
+- LocaleUtils.to_locale — specifically the validation branch that:
+  - splits the input on '_' (or reads segments),
+  - checks country segment length and casing,
+  - and raises ValueError when the country segment is not exactly two uppercase letters.
+- The ValueError is raised at the line that enforces the country-length/casing rule after parsing the underscore-separated segments.
+
+Concrete fixes (step-by-step)
+1. Recognize the valid JVM form "language__variant": accept an empty country segment between two underscores.
+2. Two possible corrective changes:
+   A. Handle the double-underscore case explicitly:
+      - After splitting on '_', if you get parts like ["fr", "", "POSIX"]:
+        - set language = parts[0]
+        - set country = ""  (empty string)
+        - set variant = parts[2]
+      - Skip the country-length check when parts[1] == "".
+   B. Broaden the validation regex to allow the empty-country form:
+      - Current strict regex (example) might be: ^[a-z]{2}(_[A-Z]{2}(_[A-Za-z0-9]+)?)?$
+      - Replace with a regex that allows an empty country before a variant, e.g.:
+        ^[a-z]{2}((_[A-Z]{2}(_[A-Za-z0-9]+)?)|(__[A-Za-z0-9]+))?$
+      - That permits either _CC(_variant)? or __variant.
+3. Add unit tests for these cases:
+   - LocaleUtils.to_locale("fr") -> Locale("fr","")
+   - LocaleUtils.to_locale("fr_FR") -> Locale("fr","FR")
+   - LocaleUtils.to_locale("fr__POSIX") -> Locale("fr","", "POSIX")
+   - LocaleUtils.to_locale("fr_FR_POSIX") -> Locale("fr","FR","POSIX")
+
+Example minimal code change (pseudo-Python to show logic)
+- before (simplified)
+  parts = locale_str.split('_')
+  if len(parts) == 1:
+      ...
+  elif len(parts) == 2:
+      if len(parts[1]) != 2: raise ValueError(...)
+      ...
+  elif len(parts) == 3:
+      if len(parts[1]) != 2: raise ValueError(...)   # <-- fails for ["fr", "", "POSIX"]
+
+- after
+  parts = locale_str.split('_')
+  if len(parts) == 1:
+      ...
+  elif len(parts) == 2:
+      if len(parts[1]) != 2: raise ValueError(...)
+      ...
+  elif len(parts) == 3:
+      if parts[1] == "":
+          country = ""
+          variant = parts[2]
+      else:
+          if len(parts[1]) != 2: raise ValueError(...)
+          country = parts[1]
+          variant = parts[2]
+
+Summary
+- The validator in LocaleUtils.to_locale is too strict: it rejects the valid "language__variant" form such as "fr__POSIX" because it expects a two-letter country when it sees an underscore after the language.
+- Fix by explicitly allowing an empty country segment (double underscore) and parsing variant accordingly, or update the validation regex to permit that form. Add tests to prevent regression.

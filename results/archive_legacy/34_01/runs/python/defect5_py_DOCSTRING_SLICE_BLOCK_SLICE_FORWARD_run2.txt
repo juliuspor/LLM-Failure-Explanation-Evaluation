@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The failure comes from this check at lines 346–351:
+  - Condition: inferred_type == object and expected_type != object
+  - Action: raise TypeError("Cannot cast object list to {expected_type} list ...")
+- That means: if the code infers the element type as object but the caller asked for a more specific expected_type, the function throws a TypeError instead of returning a list.
+
+Why it happens (root cause)
+- inferred_type becomes object whenever the code cannot determine a more specific element type. That happens in common situations such as:
+  - array is None and element is None (no information to infer type)
+  - array contains only None values (no concrete element to infer)
+  - element is None but expected_type was provided
+- The code then treats "inferred_type == object" as an unrecoverable mismatch and refuses to produce a list of the requested expected_type, raising the TypeError. In other words, the function confuses "unknown element type" with "incompatible element type" and rejects valid calls where the element is None or type inference is impossible.
+
+Why this is wrong / surprising
+- The docstring promises: "If the input list is None, a new one element list is returned whose component type is the same as the element, unless the element itself is None, in which case the return type is List[object]."
+- But if the caller supplies expected_type explicitly (for example expected_type=MyClass) and the element is None, the implementation throws instead of honoring expected_type or returning a List[object] as described. The code treats unknown/inferred==object as a cast error even when expected_type was supplied or when None is a valid element.
+
+Where to look (variables / lines)
+- inferred_type: the variable that holds the deduced element class; it becomes object when deduction fails.
+- expected_type: the optional caller-supplied expected element type.
+- Lines 346–351 perform the check and raise the TypeError.
+
+Exact scenario that reproduces the failure
+- array = None
+- element = None
+- expected_type = SomeClass (SomeClass != object)
+Result: inferred_type == object, expected_type != object → TypeError raised at lines 346–351.
+
+Suggested fixes (concrete steps + code changes)
+Option A — Prefer expected_type when inference yields object
+- Replace the error with assigning inferred_type = expected_type when the code has no real inference data:
+  - Replace lines 346–351 with:
+    if inferred_type == object and expected_type is not None and expected_type != object:
+        # No concrete element type available; use caller-provided expected_type
+        inferred_type = expected_type
+- Rationale: if the caller gave expected_type, use it when you otherwise can't infer. This permits (array=None, element=None, expected_type=SomeClass) to return a list typed as SomeClass (or equivalent behavior in your runtime).
+
+Option B — Only raise when there is an actual incompatible class present
+- Only raise the TypeError if there is concrete type information that cannot be cast to expected_type. For example:
+    if inferred_type != object and expected_type is not None and inferred_type is not expected_type:
+        raise TypeError(...)
+- Rationale: if inferred_type is object (i.e., unknown), do not treat that as an incompatible concrete class.
+
+Tests to add
+- Test 1: array=None, element=None, expected_type=SomeClass -> should not raise (decide whether it becomes SomeClass list or List[object] per design; make behavior consistent with docstring or API)
+- Test 2: array contains only None values, expected_type=SomeClass -> should not raise
+- Test 3: array contains instances of A, element is instance of B where B not assignable to A and expected_type is None -> should raise (existing behavior)
+- Test 4: array contains instances of A, expected_type=SomeClass incompatible with A -> should raise (existing intended behavior)
+
+Minimal change I recommend
+- Implement Option A: if inferred_type == object and expected_type is provided (and not object), set inferred_type = expected_type instead of raising. That keeps the function useful when callers give an expected_type but avoids falsely treating unknown types as cast errors.
+
+If you want, paste the surrounding code (how inferred_type is derived and how expected_type is used downstream) and I will give the exact three-line patch to insert with correct variable names and indentation.

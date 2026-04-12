@@ -1,0 +1,48 @@
+What happened (where it fails)
+- The exception is thrown from this line inside the for-loop:
+  pos += char_count(code_point_at(code_units, pos))
+- That call to code_point_at(code_units, pos) is called when pos == length (or otherwise out of range), which makes code_point_at index past the end of code_units and raises IndexError: String index out of range: 2.
+
+Why it happens (root cause)
+- translate_codepoint(...) returned consumed > 0, so the code assumes it must skip over "consumed" codepoints that the translator handled.
+- The for-loop does the skipping by repeatedly calling code_point_at(code_units, pos) and adding char_count(...).
+- But the loop uses pos as both the reader position and is updated inside the loop. After some iterations pos can reach length; the loop still tries another iteration (because range(consumed) was determined earlier) and then calls code_point_at with pos == length -> out of range.
+- In short: the loop calls code_point_at at positions that can be beyond the end because it advances pos inside the loop but the loop count was fixed up front.
+
+Exactly where to look in your code
+- The problem is in this block:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- code_point_at(...) is called without ensuring pos < length, so when pos == length you get the IndexError.
+
+Concrete ways to fix it (pick one)
+
+1) Precompute and update pos using a temporary index (safe):
+- Compute skips from the current position, never call code_point_at with an out-of-range pos:
+  temp = pos
+  for _ in range(consumed):
+      cp = code_point_at(code_units, temp)   # temp < length here
+      temp += char_count(cp)
+  pos = temp
+
+2) Guard each call (defensive):
+- Stop early if pos reaches length:
+  for _ in range(consumed):
+      if pos >= length:
+          break
+      cp = code_point_at(code_units, pos)
+      pos += char_count(cp)
+
+3) Change the contract / return value of translate_codepoint
+- If translate_codepoint already knows how many code units (UTF-16 code units) it consumed, have it return that number and just do:
+  pos += consumed
+  (Avoids re-parsing code points entirely.)
+
+Which is best
+- If consumed counts codepoints, use option 1 (precompute using a temp) so you don’t call code_point_at with an out-of-range pos.
+- If consumed already counts code units, use option 3 and simplify to pos += consumed.
+- Option 2 is acceptable if you want a quick defensive fix, but it may hide logic errors (it silently stops if translator over-reported consumption).
+
+Summary
+- The loop assumes it can call code_point_at(pos) consumed times, but advancing pos inside the loop can make pos equal length, so a subsequent iteration calls code_point_at out of range.
+- Fix by computing the new pos with a temporary index (or by validating pos before each call, or by changing translate_codepoint to return code-unit count).

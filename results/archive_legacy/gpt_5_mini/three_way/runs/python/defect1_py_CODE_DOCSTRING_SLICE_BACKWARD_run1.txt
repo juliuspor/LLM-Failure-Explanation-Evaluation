@@ -1,0 +1,61 @@
+What happened (where it fails)
+- The minutes validation at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  unconditionally rejects any negative minutes_offset.
+- The docstring and intended behavior permit negative minutes in some cases (e.g. (0, -15) -> -00:15 and (-2, -15) -> -02:15). Rejecting negatives here makes valid inputs raise ValueError immediately.
+
+Why it fails (root cause)
+- The code enforces a minutes range of 0..59 although the docstring requires -59..+59. That single-line check is wrong for intended inputs.
+- There is a related logic issue in the arithmetic after that check: the code does
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  This assumes minutes_offset is always non-negative when hours_in_minutes < 0. If minutes_offset were allowed negative, subtracting a negative minute would produce the wrong total. The validation currently hides that bug by forbidding negatives altogether, but the correct behavior requires treating minutes on negative hours as abs(minutes).
+
+What to change (concrete steps)
+1) Change the minutes range check to allow -59..+59:
+   Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(...)
+   with
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(...)
+
+2) Reject the specific disallowed combination: positive hours with negative minutes should be invalid per docstring:
+   After the above range check, add:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes must be non-negative when hours are positive")
+
+3) Fix the combination arithmetic so negative minutes are handled correctly:
+   Replace the existing combination logic with explicit use of absolute minutes when hours are negative:
+     hours_in_minutes = hours_offset * 60
+     if hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - abs(minutes_offset)
+     else:
+         total_minutes = hours_in_minutes + minutes_offset
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4) Keep the existing overflow catch (try/except) around safe_multiply as you have.
+
+Example test cases to verify after the fix
+- (2, 15) -> +02:15
+- (2, -15) -> raises ValueError (positive hours, negative minutes)
+- (0, -15) -> -00:15
+- (-2, 15) -> -02:15
+- (-2, -15) -> -02:15
+- minutes outside -59..59 or hours outside -23..23 -> raises ValueError
+
+Why this fixes it
+- Step (1) aligns the code with the documented minute range (-59..59).
+- Step (2) enforces the rule that positive hours cannot have negative minutes.
+- Step (3) computes the total minutes correctly when the hour part is negative (using abs(minutes) in that case) and when it is non-negative.
+
+Where to change (specific variables/lines)
+- Lines 396–397 (the minutes validation) — change the bounds check as shown.
+- Immediately after that validation — add the hours>0 && minutes<0 check.
+- Lines where hours_in_minutes and minutes_offset are combined — compute total_minutes using abs(minutes_offset) for negative hours, and use total_minutes in safe_multiply instead of reassigning minutes_offset.
+
+This addresses both the immediate ValueError on valid inputs and the arithmetic bug that would appear if negative minutes were later allowed.

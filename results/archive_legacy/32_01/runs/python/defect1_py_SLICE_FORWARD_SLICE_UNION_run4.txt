@@ -1,0 +1,37 @@
+What happened (where it fails)
+- The code is computing the total offset in minutes and then turning that into milliseconds (line 409). The branch that combines hours and minutes is wrong:
+  - On line 406 it does: minutes_offset = hours_in_minutes - minutes_offset
+  - On line 408 it does: minutes_offset = hours_in_minutes + minutes_offset
+- For a negative sign (e.g. "-01:30") the code is doing hours_in_minutes - minutes_offset instead of adding the minutes and then applying the negative sign. That produces the wrong numeric result (and the wrong sign) for the total minutes.
+- Because the sign/combination is wrong, the final offset value sent to FieldUtils.safe_multiply can be the wrong magnitude or the wrong sign and can exceed the allowed range. That is why the code later reaches the "Offset is too large" ValueError at line 411.
+
+Why it fails (root cause, no jargon)
+- The code mixes up "combine hours and minutes" and "apply the sign". For a negative offset you must compute total_minutes = hours*60 + minutes, then negate it. Instead the code does hours*60 - minutes (line 406), which yields an incorrect total (and you never explicitly negate that result). In short: subtraction was used where addition plus sign inversion was required.
+
+Concrete example
+- Input: "-01:30"
+  - Correct: total_minutes = 1*60 + 30 = 90 -> apply negative -> -90 -> offset = -90 * MILLIS_PER_MINUTE
+  - What the code does (with line 406): minutes_offset = 60 - 30 = 30 -> offset = +30 * MILLIS_PER_MINUTE (wrong sign and magnitude)
+  - That wrong value can push the computed milliseconds outside the allowed range and trigger the "Offset is too large" error at line 411.
+
+Exactly where to change (step-by-step fix)
+1. Compute hours_in_minutes the same way (hours * 60).
+2. Compute total_minutes as hours_in_minutes + minutes_offset (always add the minute component).
+3. Apply the sign: if the parsed sign is negative, set total_minutes = -total_minutes.
+4. Multiply by MILLIS_PER_MINUTE and continue.
+
+Concretely, replace the logic around lines 406/408 with something like:
+- total_minutes = hours_in_minutes + minutes_offset
+- if sign_is_negative:
+    total_minutes = -total_minutes
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+This fixes the wrong subtraction and ensures the sign is applied exactly once.
+
+Reference lines
+- Validation of minutes: line 400–401
+- Faulty combination: lines 406 and 408
+- Multiplication to milliseconds: line 409
+- Error raised when out of range: line 411
+
+That is the single, specific cause: incorrect arithmetic and sign handling when combining hours and minutes (use addition then apply sign).

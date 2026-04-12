@@ -1,0 +1,48 @@
+What happened (where it failed)
+- The runtime tries to cast an Object[] to a String[] and the JVM throws:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+- That cast error comes from code that should have detected the element type earlier, but it did not. The slice you provided shows the relevant logic around lines 335–347:
+
+  335 |         if array is not None:
+  336 |             inferred_type = type(array)
+  337 |         elif element is not None:
+  338 |             inferred_type = type(element)
+  340 |             inferred_type = object
+ 346 |             if inferred_type == object and expected_type != object:
+ 347 |                 raise TypeError(
+
+Why it failed (root cause, referenced to variables/lines)
+- At line 335 the code sets inferred_type = type(array). That records the type of the container object (the list/array), not the type of the items inside it.
+- Because inferred_type holds the container’s type instead of the element type, the check at line 346 (which only raises if inferred_type == object) is skipped, so the code proceeds assuming element types match expected_type.
+- Later a cast is performed from the container’s runtime type (Object[]) to the expected element-array type (String[]), which is illegal and triggers the ClassCastException.
+- In short: the code looked at the wrong thing (type(array) at line 336) and therefore didn’t detect the incompatible element type before attempting the JVM cast.
+
+Exactly where to change it (concrete steps)
+1. Replace the container-type inference with element-type inference when an array/list is provided:
+   - Instead of inferred_type = type(array) (line 336), inspect the array’s element type.
+   - For Python lists: if len(array) == 0 set inferred_type = object (empty -> unknown); otherwise use inferred_type = type(array[0]).
+   - For JVM arrays (if running on JVM interop): use the array class component type, e.g.
+     component = array.__class__.getComponentType(); if component is not None use inferred_type = component.
+2. Ensure empties are handled:
+   - If the array is empty, set inferred_type = object so the existing check at line 346 will raise TypeError when expected_type != object.
+3. Optionally validate all elements:
+   - If you require strict homogeneity, iterate elements and confirm type(element) == inferred_type (or is assignable to expected_type) before casting, and raise a clear TypeError on mismatch.
+
+Example replacement logic (pseudo-Python):
+- Replace lines 335–338 with:
+  if array is not None:
+      if len(array) == 0:
+          inferred_type = object
+      else:
+          inferred_type = type(array[0])
+  elif element is not None:
+      inferred_type = type(element)
+
+Why this fixes it
+- You will detect the actual element type (or an empty/unknown case) before attempting to cast the whole array to String[].
+- The check at line 346 will then correctly raise a TypeError for mismatches instead of letting the JVM throw a ClassCastException later.
+
+No vague suggestions — do these exact changes:
+- Change inferred_type assignment from type(array) to the element-type logic above.
+- Add an empty-array branch that sets inferred_type = object.
+- Optionally add element-by-element verification if your domain requires strict uniformity.

@@ -1,0 +1,44 @@
+What went wrong (short): the loop that advances pos after a translator returns consumed double-counts surrogate pairs and can advance past the end of the array, causing incorrect behavior or an IndexError.
+
+Where it happens (exact lines):
+- The loop that advances pos: "for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))" (the block immediately after you check consumed).
+- The code_point_at function checks bounds at line 35 and reads the high/low surrogate at lines 38–44 (slice shown). That IndexError is the symptom when pos is moved past length.
+
+Why it fails (step-by-step, using your variable names and line refs):
+1. translate_codepoint(...) returns consumed. By contract (your comment) consumed is the number of UTF-16 code units the translator handled (e.g., 2 for a surrogate pair).
+2. You then do: for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))
+   - On the first iteration, code_point_at(code_units, pos) sees the surrogate pair and returns the full supplementary code point (>= 0x10000). char_count on that code point returns 2 (the number of UTF-16 code units).
+   - So pos is incremented by 2 on the first iteration.
+3. But range(consumed) runs consumed times (2 times for a surrogate pair). On the second iteration you call code_point_at(code_units, pos) again — now pos has already advanced past the pair (pos is now original+2). If that new pos equals length or beyond, code_point_at raises IndexError at line 35 ("String index out of range"). Even if it doesn’t raise immediately, you have advanced too far (you advanced by 2 twice => +4), so you skip data and corrupt the traversal.
+
+Root mismatch: consumed is “code units consumed” but inside the loop you add char_count(code_point_at(...)) which returns the number of code units for the next codepoint at the current pos. For surrogate pairs this returns 2, so the loop increments pos by 2 each iteration, effectively multiplying movement (consumed * char_count) instead of moving by consumed exactly once.
+
+Concrete fixes (explicit steps and where to change):
+Option A — simplest, if translate_codepoint returns number of UTF-16 code units consumed:
+- Replace the whole for-loop with a single advance:
+  pos += consumed
+  (i.e., remove the loop and the char_count/code_point_at calls)
+  This moves pos forward by the exact number of code units the translator consumed.
+
+Option B — if you intended to advance by codepoints (not code units):
+- Change translate_codepoint to return number of codepoints consumed (not code units), or compute codepoints consumed inside translate_codepoint.
+- Then in the loop advance pos by the code unit length of each codepoint, but compute each codepoint once and advance appropriately. Example:
+  for pt in range(consumed_codepoints):
+      cp = code_point_at(code_units, pos)
+      pos += char_count(cp)
+
+Option C — if you want to keep the existing loop structure but avoid double-counting:
+- Compute the codepoint once before the loop and advance by its char_count once. (But this is basically Option A for the surrogate case.)
+
+Which to pick:
+- If your contract comment ("they have to understand codepoints and they just took care of a surrogate pair") means translate_codepoint returns the number of code units consumed, use Option A (pos += consumed). It's minimal and correct.
+- If translate_codepoint was intended to return codepoint count, change its return semantics and then use Option B.
+
+Example minimal code change (replace the bad loop):
+- Replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  With:
+    pos += consumed
+
+That fixes the double-counting and the IndexError at line 35.

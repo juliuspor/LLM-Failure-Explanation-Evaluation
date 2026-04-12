@@ -1,0 +1,53 @@
+What happened (root cause)
+- At line 176 the code does:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  This treats -0.0 as an integer because -0.0 == 0 is True. The integer branch then converts the value to an int (value = int(x)) and prints that integer form using str(value).
+- For -0.0 this prints "0" (loss of the negative sign) because str(int(-0.0)) -> "0". The code never preserves the sign before taking that integer path.
+- The code has a later fallback that would print a string form of the original float (str(x), which would be "-0.0"), but that fallback is not reached for values that satisfy the integer branch. In short: negative zero gets classified as an integer and printed as "0", so the sign is lost.
+
+Where it occurs (exact lines)
+- The check is at line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- value is assigned at line 177: value = int(x)
+- The integer printing path prints str(value) at line 192 (which produces "0" for -0.0)
+- The float/string printing fallback is at line 194: self.add(str(x)), but it is not reached for the integer branch
+
+Why this is a bug
+- IEEE floats distinguish +0.0 and -0.0. Code that wants to preserve source-level semantics (the test expects "-0.0") must detect negative zero and keep its sign. Treating -0.0 as an integer zero and printing "0" loses that information.
+
+Precise, actionable fixes (pick one)
+1) Short, explicit negative-zero guard (recommended)
+   - Add an explicit check before the integer branch:
+     if CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+         return
+   - Place this immediately before line 176 so negative zero never enters the integer path.
+
+2) Exclude negative zero from the integer branch
+   - Change the condition at line 176 to also require not negative zero:
+     if x == int(x) and not math.isinf(x) and not math.isnan(x) and not CodeConsumer.is_negative_zero(x):
+         ...
+   - This allows -0.0 to fallthrough to the float printing code that uses str(x) and preserves the sign.
+
+3) Print integers without using int() for zero-suspect values (lower-level alternative)
+   - Detect zero values explicitly:
+     if x == 0.0:
+         if CodeConsumer.is_negative_zero(x):
+             self.add("-0.0"); return
+         else:
+             self.add("0"); return
+   - Then keep the integer branch for non-zero integers. This is more verbose but explicit.
+
+What to change (exact lines to edit)
+- Insert this block immediately before line 176:
+   if CodeConsumer.is_negative_zero(x):
+       self.add("-0.0")
+       return
+  Or modify line 176 to:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x) and not CodeConsumer.is_negative_zero(x):
+
+Why these changes fix it
+- They prevent -0.0 from being classified as an integer and converted to int( ) -> 0, thereby preserving the sign when printing.
+- They use the existing is_negative_zero utility (which your tests check) so logic stays clear and centralized.
+
+Extra note about tests
+- The failing test test_negative_zero expects "-0.0". With one of the fixes above the integer branch won't swallow -0.0 and the output will match the expected "-0.0".

@@ -1,0 +1,44 @@
+What happened (where it fails)
+- The validation at line 396 rejects any negative minutes:
+  - 396–397: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That contradicts the docstring which allows negative minutes in some combinations (for example (0, -15) and (-2, -15) are valid).
+- Because negative minutes are always rejected there, callers who pass a negative minutes_offset that should be valid get a ValueError immediately.
+
+Why that happens (root cause)
+- The code enforces minutes_offset ∈ [0, 59] unconditionally, while the intended valid range is minutes_offset ∈ [-59, 59] plus additional sign rules depending on hours_offset.
+- Later code (lines shown at 402 and 404) attempts to combine hours_in_minutes and minutes_offset with either subtraction or addition, so the author expected signed minutes in some cases. But the early unconditional rejection prevents any negative minutes from reaching that combination logic.
+
+Where to fix it (concrete steps)
+1. Change the range check at line 396 to allow negative minutes:
+   - Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+     with
+     if minutes_offset < -59 or minutes_offset > 59:
+2. Enforce the sign rule that the docstring requires:
+   - After computing hours_in_minutes = hours_offset * 60, add an explicit check to reject minutes that have the wrong sign for a positive hour:
+     - If hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes negative when hours positive")
+   - (Optionally) you may also normalize and compute total minutes in a clear, explicit way instead of relying on the later +/- logic. For example:
+     - If hours_offset > 0:
+         total_minutes = hours_in_minutes + minutes_offset   # minutes_offset must be >= 0 (enforced above)
+     - elif hours_offset < 0:
+         # minutes_offset can be positive, zero or negative: combine so result is more negative
+         if minutes_offset >= 0:
+             total_minutes = hours_in_minutes - minutes_offset
+         else:
+             total_minutes = hours_in_minutes + minutes_offset
+     - else:  # hours_offset == 0
+         total_minutes = minutes_offset   # can be negative or positive
+
+3. Keep the final overflow check you already have (line 407) to ensure combined offset fits in allowed max/min.
+
+Minimal code example of corrected checks (pseudo-Python using your line numbers):
+- Replace lines 396–397 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Immediately after computing hours_in_minutes:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes negative when hours positive")
+    # then compute total_minutes as described above and continue to multiply by MILLIS_PER_MINUTE
+
+Why this fix addresses the failure
+- It allows valid negative minute values to pass validation when the doc permits them, and it still rejects combinations the doc disallows (positive hours with negative minutes). This matches the documented behavior and lets the combination logic at lines 402/404 operate on the intended signed minutes values rather than being short-circuited by an incorrect early check.

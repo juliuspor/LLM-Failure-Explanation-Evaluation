@@ -1,0 +1,47 @@
+What happened (where it fails)
+- The tests trigger an IndexError raised at to_utf16_code_units, specifically at the bounds check on line 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- The IndexError happens when translate() advances the index after seeing a UTF‑16 surrogate pair. The code advances by 2 (to skip the pair) but the index being used in that bounds check is not the same kind of index as len(code_units). In short: the code mixes two different index spaces and so the bounds check is wrong for the index being used.
+
+Why it happened (root cause)
+- There are two different representations in play:
+  - Python str is a sequence of Unicode code points (each Python index addresses a code point).
+  - to_utf16_code_units builds a list of UTF‑16 code units (each element is a 16‑bit code unit). That list has a different length and indexing semantics than the original Python string when surrogate pairs exist.
+- The translator logic advances the loop index by 2 to skip a surrogate pair. That advancement assumes the loop index is counting UTF‑16 code units, but the bounds check at lines 35–36 is comparing that same index against len(code_units) (or vice versa). Because the code uses the wrong length for the index being advanced, index can become equal to or greater than len(code_units) and the check raises IndexError.
+- Concretely: if translate() iterates using the Python string indices but calls to_utf16_code_units and then uses the returned code_units length for bounds checks (or the opposite), then after encountering a supplementary character (which is two UTF‑16 code units but one Python code point) the index arithmetic is inconsistent and goes out of range.
+
+How to reproduce
+- The failing test input is "\U0001F630A" (emoji U+1F630 followed by ASCII 'A'):
+  - In Python str this has length 2 (one code point for emoji, one for 'A').
+  - In UTF‑16 code units it is length 3 (two code units for emoji, one for 'A').
+- Advancing by 2 assuming code‑unit indexing will skip past the last unit and trigger the bounds check against the wrong length.
+
+Concrete fixes (step‑by‑step, pick one)
+1) Keep everything in code points (simplest in Python)
+   - Make translate() and code_point_at operate on the Python string (s) and Python indices.
+   - Remove use of to_utf16_code_units entirely, or use it only for encoding output, not for loop indexing.
+   - Ensure any index arithmetic (index += 1 or index += 2) is done in the same index space as how you check bounds (len(s) when indexing s).
+   Steps:
+     a. Replace checks like "index >= len(code_units)" with "index >= len(s)" if index indexes s.
+     b. Use ord(s[index]) and if ord >= 0x10000 treat it as a supplementary code point (no need to advance by 2 in Python string).
+2) If you must work in UTF‑16 code units
+   - Do all loop indexing and bounds checks against the code_units list only.
+   - Build code_units once (to_utf16_code_units) and iterate using indices into that list. When you encounter a high surrogate followed by a low surrogate, advance the index by 2 in the code_unit index space and use len(code_units) for bounds.
+   Steps:
+     a. Ensure translate() does not use Python string indices at all; use the code_units list.
+     b. Keep the bounds check exactly as line 35–36 but make sure index is the code_unit index.
+3) Make the bounds check explicit and correct
+   - If a function like code_point_at(index) is passed an index that is in code units, change its check to compare against len(code_units). If passed a code point index, compare against len(s).
+   Steps:
+     a. Audit every call site of code_point_at and to_utf16_code_units and ensure the same index space is used consistently.
+     b. Add assertions/comments clarifying "index is UTF-16 code unit index" or "index is code point index."
+
+What to change immediately (minimal code pointers)
+- At to_utf16_code_units: verify whether the index parameter (used in the failing check) is intended to be indexing code_units or the original string. Change the check at lines 35–36 to compare against the correct length:
+  - If index refers to the original string -> compare against len(s).
+  - If index refers to code_units -> compare against len(code_units).
+- In translate_string / CharSequenceTranslator.translate: make index arithmetic and bounds checks use the same basis (either code points or code units). The failing behavior shows they are currently mixed.
+
+Why this explanation is definitive
+- The tests explicitly exercise surrogate pairs followed by another character; that scenario reveals a difference between code point count and UTF‑16 code unit count. An IndexError from the check at lines 35–36 is the exact symptom of mixing the two index spaces. The fix is to choose one index space and make all index arithmetic and bounds checks use that same space, or convert indices explicitly when switching spaces.

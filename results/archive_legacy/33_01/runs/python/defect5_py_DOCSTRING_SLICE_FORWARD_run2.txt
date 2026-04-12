@@ -1,0 +1,61 @@
+Short answer: the function tries to use element or expected_type as if they were concrete classes before checking for None or unsupported typing constructs. That leads to either an AttributeError when element is None or a TypeError when expected_type is a typing construct (e.g. typing.List[int] or Optional[int]) and is used in isinstance().
+
+What happens, where, and why
+- When array is None and element is None:
+  - In the branch that creates the one-element return list the code determines the new list's "component type" by doing something like component_type = element.__class__ (or type(element)).
+  - Because element is None, element.__class__ raises an AttributeError (NoneType has no attribute '__class__' is essentially the same as using type(None) incorrectly in that code path).
+  - Effect: the function crashes when trying to construct the returned list type for the None-element case.
+
+- When expected_type is passed and used with isinstance():
+  - The code does something like if not isinstance(element, expected_type): raise TypeError(...)
+  - If the caller passed a typing construct (typing.Optional[int], typing.Union[int, str], List[int], etc.) or any object that is not a real class/tuple of classes, Python raises TypeError: "Subscripted generics cannot be used with class or instance checks" or "isinstance() arg 2 must be a type or tuple of types".
+  - Effect: the type check path raises TypeError at the isinstance() call even when the element actually matches the intended type.
+
+Why those are the root causes
+- Accessing element.__class__ (or otherwise assuming element is not None) before testing element is None is a direct cause of an AttributeError because None has no useful runtime class for your intended purpose.
+- Using isinstance() with typing.* objects is invalid because typing constructs are not runtime classes; isinstance requires a class or tuple of classes.
+
+Concrete locations in your code (based on variable names from the docstring)
+- The failure occurs in the branch handling array is None (the "create a new one-element list" branch) when you reference element.__class__ or similar.
+- The failure also occurs in the type-check branch where you call isinstance(element, expected_type) without ensuring expected_type is an actual runtime type or converting typing constructs.
+
+How to fix it (step-by-step)
+1. Handle element is None first:
+   - Before using element.__class__ or type-dependent logic, check if element is None.
+   - If array is None and element is None, return a one-element list whose element type you decide explicitly (the docstring says List[object] in this case) — e.g. return [None] and treat the component type as object.
+   - Example:
+     - if array is None:
+         if element is None:
+             return [None]  # component type object
+         component_type = type(element)
+         return [element]  # or construct new list from array if needed
+
+2. Make expected_type checks safe:
+   - Ensure expected_type is a real runtime class or a tuple of classes before passing it to isinstance().
+   - If you want to accept typing constructs (typing.Optional[T], Union[T1, T2], etc.), normalize expected_type with typing.get_origin and typing.get_args (Python 3.8+ / typing library):
+     - If expected_type is typing.Union[...] or Optional[T], extract its arguments (get_args) and use those classes in isinstance().
+     - If expected_type is a typing alias that does not map to runtime classes (e.g. List[int]), decide whether you need to accept it; for element-level checking you probably want the inner type (int), not List[int].
+   - Alternatively, restrict callers to pass concrete classes and document that expected_type must be a class or tuple of classes. Then validate early and raise a clear TypeError if an unsupported typing object is passed.
+
+3. Avoid mutating the input array:
+   - If you intend to return a fresh list, do not call array.append(element). Use new_array = list(array) followed by new_array.append(element) so the original array is unchanged.
+
+4. Add clear, early validation and informative errors:
+   - At the top of the function, validate expected_type:
+       if expected_type is not None:
+           if not (isinstance(expected_type, type) or
+                   (isinstance(expected_type, tuple) and all(isinstance(t, type) for t in expected_type))):
+               raise TypeError("expected_type must be a class or tuple of classes; got: {}".format(expected_type))
+   - Check element is None before any attribute access.
+
+Summary of specific fixes to apply to your code:
+- Replace any use of element.__class__ in the array is None branch with:
+    if element is None:
+        return [None]
+    component_type = type(element)
+- Replace any direct isinstance(element, expected_type) with:
+    - If you accept typing constructs: normalize expected_type with typing.get_origin/get_args and build a tuple of runtime classes for isinstance().
+    - Otherwise, validate expected_type is a class/tuple first and raise a clear error if not.
+- When adding the new element, copy the list via new_array = list(array) and then new_array.append(element) rather than mutating array in place.
+
+If you paste the actual code slice (the function body or the type-check branch), I can point exactly to the offending line(s) and show a corrected code snippet.

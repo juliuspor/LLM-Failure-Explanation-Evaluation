@@ -1,0 +1,32 @@
+What happened
+- The IndexError is raised at line 36 of to_utf16_code_units ("if index < 0 or index >= len(code_units): raise IndexError...").
+- The translator (CsvEscaper.translate_string / whatever loop calls code_point_at) is advancing the index incorrectly when it encounters a UTF-16 surrogate pair. That causes a later call into code_point_at / to_utf16_code_units with index == len(code_units), which triggers the check on line 36 and raises IndexError.
+
+Why it fails (root cause)
+- The code is iterating over UTF-16 code units (the helper to_utf16_code_units returns a list of code units). A Unicode code point above U+FFFF (an emoji) is represented as two UTF-16 code units (a high surrogate and a low surrogate).
+- When the translator sees a surrogate pair it both:
+  - consumes two code units to produce a single code point (correct), and
+  - also advances the loop index in a way that ends up adding an extra +1 beyond those two units.
+- Concretely, for the test input "\U0001F630A":
+  - UTF-16 units = [high_surrogate, low_surrogate, ord('A')] (length = 3).
+  - The translator reads the surrogate pair at index 0 and should advance to index 2 to process 'A'.
+  - Because the translator's loop increments the index in two places (the surrogate-handling branch and the loop itself), it advances to index 3 and then calls code_point_at(index) with index == len(code_units).
+  - to_utf16_code_units then hits the bounds check at line 36 and raises IndexError.
+
+Where it occurs (specific names / lines)
+- The exception originates in to_utf16_code_units at the bounds check (line 36 in the slice you provided).
+- The caller (CsvEscaper.translate_string / code_point_at) is advancing its index incorrectly after detecting a surrogate pair (the double-advance happens in the translator loop and causes the out-of-range index to be passed to code_point_at).
+
+How to fix it (clear steps)
+1. Make index arithmetic single-source:
+   - Use a while loop that updates index in exactly one place, or
+   - If you use a for loop, do not also mutate the loop index inside the body.
+2. When you consume a surrogate pair, advance index by exactly 2 (index += 2) and then continue to the next iteration without any additional index increment.
+3. When you consume a single code unit, advance index by exactly 1.
+4. Add a unit test that reproduces this exact case (you already have it: "\U0001F630A") to ensure the fix prevents passing index == len(code_units) to to_utf16_code_units.
+5. Optionally, add an assertion in the translator before calling code_point_at to ensure 0 <= index < len(code_units), to catch incorrect increments earlier during development.
+
+Why these steps fix the bug
+- They eliminate the double-advance that produces index == len(code_units). The bounds check at line 36 will then only be hit for truly out-of-range indexes (bugs elsewhere), and the translator will correctly process the 'A' following the surrogate pair.
+
+If you want, paste the translate_string loop here and I will show the exact small edit to stop the double increment.

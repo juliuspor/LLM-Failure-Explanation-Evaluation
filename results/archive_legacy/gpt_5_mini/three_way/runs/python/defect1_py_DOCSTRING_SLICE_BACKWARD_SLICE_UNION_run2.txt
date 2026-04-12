@@ -1,0 +1,36 @@
+What happened (root cause)
+- At line 396 the code rejects any negative minutes:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  - raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That single check prevents any negative minutes from ever reaching the later logic at lines 402 and 404, where the code intends to adjust minutes based on the sign of hours_offset.
+- Because of that early rejection, valid cases described by the docstring are broken. For example:
+  - (-2, -15) should produce -02:15 (allowed by the docstring), but is rejected at line 396.
+  - (0, -15) should produce -00:15, but is rejected at line 396.
+- The later checks (offset computation at line 405 and the “Offset is too large” raise at line 407) never get a chance to operate on negative minutes because the input is already refused.
+
+Why this causes the failure
+- The docstring allows minutes in the range -59..+59 and permits negative minutes when hours are zero or negative. The code’s validation enforces minutes in 0..59 only. That mismatch between documentation and implementation is the direct cause: correct inputs per the docstring trigger "Minutes out of range" at line 396 and fail early.
+
+Exactly where to change it (concrete steps)
+1. Relax the minutes validation at line 396 to allow negative minutes in range -59..+59:
+   - Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+   - With
+     if minutes_offset < -59 or minutes_offset > 59:
+2. Add an explicit check after that to enforce the documented prohibition of a positive hours with negative minutes:
+   - If hours_offset > 0 and minutes_offset < 0:
+       raise ValueError(f"Positive hours with negative minutes: hours={hours_offset}, minutes={minutes_offset}")
+   (This reproduces the doc rule that combinations like (2, -15) are invalid.)
+3. Keep the existing adjustment logic at lines 402 and 404 that combines hours and minutes into a single minute value (e.g. hours_in_minutes - minutes_offset or hours_in_minutes + minutes_offset) and then multiplies by MILLIS_PER_MINUTE at line 405.
+4. Retain (or ensure) the final limit check that raises "Offset is too large" at line 407 if the computed millis exceeds +/- 23:59:59.000.
+
+Notes and tests to add
+- Add unit tests for bound cases:
+  - (2, 15) => +02:15
+  - (2, -15) => ValueError (positive hours, negative minutes)
+  - (0, -15) => -00:15
+  - (-2, -15) => -02:15
+  - minutes = ±59 and hours = ±23 to verify the "Offset is too large" check behaves correctly
+- Confirm behavior matches the docstring and that no other code paths expect minutes always non-negative.
+
+This pinpoints the failure: the validation at line 396 rejects negative minutes outright, preventing the intended sign-handling at lines 402/404. The fix is to accept -59..+59 and then explicitly enforce the documented combination rules.

@@ -1,0 +1,40 @@
+What happened
+- At line 335 your code sets inferred_type = type(array). That records the type of the whole array object, not the type of items inside it.
+- At runtime the array object is a Java Object[] (printed as [Ljava.lang.Object;). type(array) therefore becomes the array class (Object[]), not str (or java.lang.String).
+- Later the code tries to use that inferred_type to decide whether a cast to expected_type is safe. Because inferred_type is the array class instead of the element class, the function does not detect the actual mismatch and ends up attempting a cast from Object[] to String[] inside the Java layer, producing the ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;.
+
+Where it occurs (exact variables and lines)
+- Line 335: if array is not None: inferred_type = type(array) — this is the root cause.
+- Line 336–338: fallbacks using element or setting inferred_type = object are correct in intent but not reached in this scenario.
+- Line 346–347: the guard if inferred_type == object and expected_type != object: raise TypeError(...) does not fire because inferred_type is Object[] (not equal to object), so the code proceeds and a Java cast is attempted, causing the ClassCastException you saw.
+
+Why that causes the specific error
+- type(array) returns the array’s class (Object[]) rather than the element type (String or str). When you later cast array to expected_type (String[]), Java checks the runtime class of the array (Object[]) and rejects the cast because Object[] is not a subtype of String[] — hence the ClassCastException.
+
+Concrete fixes (step-by-step)
+1. Infer the element type, not the array type:
+   - If array is a Python iterable and not a Java array, use the first element: inferred_type = type(array[0])
+   - If array may be a Java array object, query the component type: inferred_type = array.getClass().getComponentType() (or the equivalent in your interop layer)
+2. Handle empty arrays:
+   - If array is empty (len(array) == 0 or Java array length == 0) fall back to element (if provided) or to expected_type or to object explicitly, and raise a clear TypeError if no reliable element type is available.
+3. Make the guard strict and explicit:
+   - Keep the existing check at lines 346–347, but ensure it triggers when you truly cannot infer element type:
+     if inferred_type is None or inferred_type == object and expected_type != object: raise TypeError(...)
+4. Add unit tests:
+   - Test passing a Java Object[] containing Strings — should succeed.
+   - Test passing a Python/Java empty array where element type is unknown — should raise the TypeError with a clear message.
+
+Example code change (illustrative)
+- Replace line 335:
+   inferred_type = type(array)
+  with something like:
+   if is_java_array(array):
+       inferred_type = array.getClass().getComponentType()
+   elif len(array) > 0:
+       inferred_type = type(array[0])
+   else:
+       inferred_type = None
+
+Then keep the existing check at 346 but change the condition to check for inferred_type being None or object.
+
+That will stop using the array class itself (Object[]) as the element type and prevents the Object[] -> String[] cast that throws the ClassCastException.

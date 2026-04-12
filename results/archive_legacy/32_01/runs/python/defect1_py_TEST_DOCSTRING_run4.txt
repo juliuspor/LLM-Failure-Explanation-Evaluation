@@ -1,0 +1,47 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15) and expects the zone id "-02:15".
+- The implementation computes the offset by subtracting the minutes component instead of adding it. Concretely, the code uses something like:
+  offsetMillis = hours * 3600000 - minutes * 60000
+  (or offsetMinutes = hours * 60 - minutes)
+- With hours = -2 and minutes = -15 that becomes:
+  offsetMinutes = -120 - (-15) = -105 -> -01:45
+  So the produced id is "-01:45" (or otherwise incorrect), which makes the assertion fail.
+
+Why this is wrong (root cause)
+- The minutes value already carries its sign. Subtracting minutes unconditionally treats negative minutes as if they were positive (double-negation), flipping the intended sign. The correct algebra is to add the minutes value to the hours value (after converting to the same unit), not to subtract it.
+- The incorrect subtraction is the single root cause; it appears where the method turns hours/minutes into a total offset (millis or minutes).
+
+Where it occurs
+- In DateTimeZone.for_offset_hours_minutes, at the line that calculates the total offset from hours and minutes. (Look for the line that multiplies hours and minutes by 3600000/60000 and uses a minus operator between them.)
+
+How to reproduce
+- Call DateTimeZone.for_offset_hours_minutes(-2, -15) and inspect the returned zone.id. With the buggy subtraction you'll get "-01:45" (or some wrong sign/amount) instead of "-02:15".
+
+Concrete fix (steps)
+1. Find the offset calculation line in DateTimeZone.for_offset_hours_minutes. It will look like one of:
+   - offsetMillis = hours * 3600000 - minutes * 60000
+   - offsetMinutes = hours * 60 - minutes
+2. Replace the subtraction with addition so the minutes sign is preserved:
+   - offsetMillis = hours * 3600000 + minutes * 60000
+   - or offsetMinutes = hours * 60 + minutes
+3. Keep or add the existing validation so invalid sign combinations are rejected:
+   - if minutes < 0 and hours > 0: raise ValueError
+   - if hours out of range (-23..23) or minutes out of range (-59..59): raise ValueError
+   - ensure the resulting total offset does not exceed +/- 23:59:59.000
+4. Run unit tests:
+   - for_offset_hours_minutes(2, 15) -> "+02:15"
+   - for_offset_hours_minutes(2, -15) -> ValueError
+   - for_offset_hours_minutes(0, -15) -> "+00:15" or "-00:15" per your id format (should be "-00:15")
+   - for_offset_hours_minutes(-2, 15) -> "-02:15"
+   - for_offset_hours_minutes(-2, -15) -> "-02:15"  (this is the failing case fixed)
+
+Minimal corrected code example
+- Replace the buggy line with:
+  totalMinutes = hours * 60 + minutes
+  totalMillis = totalMinutes * 60_000
+  (plus existing validations shown above)
+
+Why this fix works
+- Adding preserves the explicit sign of minutes. For (-2, -15): -120 + (-15) = -135 minutes -> -02:15. For (2, 15): 120 + 15 = 135 -> +02:15. The invalid combo (2, -15) can still be detected and rejected by validation.
+
+If you want, paste the exact implementation of for_offset_hours_minutes (the lines around the offset calculation) and I will point to the exact line and give the one-line patch to apply.

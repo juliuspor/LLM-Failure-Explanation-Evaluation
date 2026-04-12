@@ -1,0 +1,58 @@
+What happened
+- The routine crashes when a search_list or replacement_list element is None because the code uses that element as if it were a string before checking for None.
+- Two places in the shown slice show the problem:
+
+1) Pre-scan/increase calculation (around lines 83–85)
+- The code computes an "increase" using expressions like len(search_list[i]) (or otherwise assumes search_list[i] is a string) to estimate buffer growth:
+  83 |             if greater > 0:
+  84 |                 increase += 3 * greater  # assume 3 matches
+  85 |         increase = min(increase, len(text) // 5)
+- If search_list contains None, calling len(search_list[i]) or using it in string-length calculations raises TypeError: object of type 'NoneType' has no len().
+
+2) Appending replacements (around lines 92–94 and the match search loop 102–115)
+- The code later appends replacement_list[replace_index] without guarding that replacement_list[replace_index] is not None:
+  92 |             parts.append(replacement_list[replace_index])
+  94 |             start = text_index + len(search_list[replace_index])
+- Even though the outer matching loop later checks for None:
+ 102 |                     no_more_matches_for_repl_index[i]
+ 103 |                     or search_list[i] is None
+ 104 |                     or len(search_list[i]) == 0
+ 105 |                     or replacement_list[i] is None
+- that check comes too late for the earlier length- and append-uses. In short: the code uses search_list[i] and replacement_list[i] as strings (len(...) and append(...)) before it tests whether they are None.
+
+Why this produces the test failures you saw
+- For test_null_safety_inside_arrays_single: search_list = ["a"], replacement_list = [None]. The code tries to append replacement_list[0] (None) into parts (line 92) or uses replacement_list in the pre-scan, causing wrong behavior or an exception. Expected behavior is to ignore a None replacement (leave the matched substring unchanged). Instead the code either throws TypeError or inserts None into parts and later errors when joining.
+- For test_null_safety_inside_arrays_mixed: search_list contains strings and replacement_list contains None for some indices. The same unguarded len(...) or append(...) on None triggers the crash.
+
+Root cause (concise)
+- The algorithm assumes every element of search_list and replacement_list is a string and uses len(...) and direct indexing/append before verifying elements are not None, so None raises TypeError or causes invalid state. The later checks that try to skip None entries are located after the places that already used those entries.
+
+Concrete fixes (step-by-step)
+1. In the pre-scan / increase calculation (lines ~83–85):
+   - Skip any index i where search_list[i] is None or replacement_list[i] is None (or where len(search_list[i]) == 0).
+   - Only call len(search_list[i]) when search_list[i] is not None.
+
+   Example change:
+   - Surround any length-based calculation with:
+     if search_list[i] is None or replacement_list[i] is None:
+         continue
+     # then safe to use len(search_list[i])
+
+2. When producing output parts (lines 92–94):
+   - Do not append replacement_list[replace_index] blindly.
+   - If replacement_list[replace_index] is None, append the original matched substring instead (i.e., text[text_index : text_index + len(search_list[replace_index])]) — this implements the "ignore None replacement" semantics the tests expect.
+   - Also ensure len(search_list[replace_index]) is used only if search_list[replace_index] is not None.
+
+   Example change:
+   - Before:
+       parts.append(replacement_list[replace_index])
+     After:
+       if replacement_list[replace_index] is None:
+           parts.append(text[text_index:text_index + len(search_list[replace_index])])
+       else:
+           parts.append(replacement_list[replace_index])
+
+3. Ensure the main matching loop (lines 102–115) keeps checking for None as it already does, but make sure those checks are performed before any use of search_list[i] or replacement_list[i].
+
+Summary
+- The bug is that None elements are used as if they were strings (len(...) and appending) before the code checks for None. Fixes are to skip None when doing length estimates and to treat a None replacement as "no replacement" when constructing the output (append the original substring). After applying those two concrete fixes at the lines I pointed to, the tests you included will pass.

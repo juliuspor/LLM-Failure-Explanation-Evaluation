@@ -1,0 +1,50 @@
+What happened (where it fails)
+- At line 396 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That unconditional check causes calls like (0, -15) and (-2, -15) to raise immediately even though the doc and table say those combinations are valid.
+
+Why it fails (root cause)
+- The minutes validation is too strict. The doc allows minutes in the range -59..+59, but with sign rules depending on hours. The code currently treats minutes as only valid when 0..59 and never allows negative minutes, so it incorrectly rejects valid inputs where minutes are negative and hours are zero or negative.
+- Because negative minutes are blocked at line 396, the later sign-handling logic at lines 402 and 404 (which attempts to combine hours and minutes with the correct sign) never runs for those inputs. In short: the early validation prevents the code from applying the intended sign-adjustments that follow.
+
+Where in the code this matters
+- Line 396: wrong validation of minutes range (rejects negative minutes unconditionally)
+- Lines 402 and 404: sign-adjustment logic that should run for negative minutes is unreachable when minutes are negative because of the check at 396
+- Line 405/406: offset calculation depends on the adjusted minutes but will never be reached for the cases described
+- Line 407: final check for offset being too large is unaffected, but the function fails earlier
+
+Concrete examples
+- Calling with (0, -15) should produce +00:-15 (document says -00:15) but instead fails at line 396 with "Minutes out of range: -15".
+- Calling with (-2, -15) should produce -02:15 (allowed per table) but also fails at line 396.
+
+How to fix it (step-by-step)
+1. Allow minutes in -59..+59 instead of 0..59:
+   - Replace the check at line 396 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Add explicit sign/combination validation that matches the documented rules:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (this is the one disallowed combination in the table).
+   - Otherwise allow:
+       - hours > 0 & minutes >= 0 → add minutes
+       - hours == 0 → minutes sign defines sign of offset
+       - hours < 0:
+           - if minutes >= 0 → treat total minutes as hours*60 - minutes (so -2 hours, +15 minutes => -135 minutes)
+           - if minutes < 0 → total minutes = hours*60 + minutes (both negative)
+3. Compute total offset in minutes and then convert to milliseconds:
+   - total_minutes = hours_offset * 60 + adjusted_minutes (where adjusted_minutes has the correct sign applied per step 2)
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing final range check (line 407) to ensure offset doesn't exceed allowed limits.
+
+Minimal code sketch for replacement of the problematic section:
+- Validate minutes: if minutes_offset < -59 or minutes_offset > 59 -> raise
+- If hours_offset > 0 and minutes_offset < 0 -> raise
+- If hours_offset < 0 and minutes_offset > 0 -> minutes_used = -minutes_offset
+  else minutes_used = minutes_offset
+- total_minutes = hours_offset * 60 + minutes_used
+- offset = FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE)
+
+That sequence matches the documented behavior, allows the combinations in the doc table, and ensures the sign is applied correctly before creating the zone.
+
+Summary
+The immediate bug is the unconditional negative-minute rejection at line 396. Change the minutes range check to allow -59..+59 and add the documented cross-check for hours positive + minutes negative; then compute total minutes using sign-aware combination logic (lines 402/404 were intended for that but are never reached because of the bad check).

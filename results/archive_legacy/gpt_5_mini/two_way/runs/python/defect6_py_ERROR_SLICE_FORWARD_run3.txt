@@ -1,0 +1,62 @@
+What happened (root cause)
+- At line 177 you do value = int(x). Converting -0.0 to an int produces 0, and the negative sign is lost. Python’s int(-0.0) -> 0, so value no longer carries the negative-zero sign.
+- Later you call self.add(str(value)) (line 192). That adds "0" (no sign), so the test sees 0 instead of -0.0 and the assertion fails: Expected -0.0, got 0.
+
+Where it occurs
+- The sign loss occurs exactly at line 177 (value = int(x)).
+- The wrong output is produced at line 192 (self.add(str(value))). The code path that checks/normalizes mantissa and exp (lines 180–183 and 190) also uses value, so the sign loss can affect those outputs as well.
+
+Why int() is the problem
+- int() only preserves numeric magnitude; it does not preserve the sign of a signed zero. Negative zero is a distinct floating-point value (x == 0.0 is True but sign is negative), and int() maps both -0.0 and 0.0 to the same integer 0.
+- Because you rely on value for later string output, you lose the negative-zero information.
+
+Concrete fixes (choose one)
+
+1) Detect negative zero before converting and store the sign
+- Add a sign check using math.copysign before line 177, then use that sign when forming strings:
+
+  import math
+  # just before line 177
+  neg_zero = (x == 0.0 and math.copysign(1.0, x) < 0)
+
+  value = int(x)
+  mantissa = value
+  ...
+  # when adding the integer representation (line 192)
+  if neg_zero and value == 0:
+      self.add("-0")
+  else:
+      self.add(str(value))
+
+  # and if the test wants "-0.0" specifically when adding the float (line 194),
+  # produce that with the sign:
+  if neg_zero:
+      self.add("-0.0")
+  else:
+      self.add(str(x))
+
+2) Avoid converting to int for string output
+- If the purpose of value is only formatting, keep x as a float and format it directly (str(x) preserves "-0.0"). Only use int(x) for arithmetic where an integer is required.
+  Example:
+  value = None
+  if need_integer_arithmetic:
+      value = int(x)
+  ...
+  # for output use str(x) instead of str(value)
+
+3) Use sign-bit inspection for portability
+- If you want a low-level test of the sign bit:
+  import math, struct
+  def is_negative_zero(f):
+      return f == 0.0 and math.copysign(1.0, f) < 0
+  # same usage as option 1
+
+Tests to run after change
+- x = -0.0 should produce "-0.0" (or "-0" where appropriate) in outputs added by self.add at lines 190/192/194 as your tests expect.
+- x = 0.0 should still produce "0" or "0.0".
+- Typical positive values should be unchanged.
+- Values with integer math (>=100 path) should behave the same aside from sign-handling.
+
+Summary
+- Root cause: int(x) at line 177 removes the negative-zero sign.
+- Fix: detect negative zero (math.copysign) before int(), then preserve and use that sign when you build strings at lines 190/192/194 (or avoid using int(x) for formatting). This will make the test see "-0.0" instead of "0".

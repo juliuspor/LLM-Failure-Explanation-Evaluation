@@ -1,0 +1,49 @@
+What happens
+- The failure occurs inside translate(...), in this block:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- code_point_at(...) throws IndexError("String index out of range: {index}") when called with index == len(code_units). The slice you included shows that check at line 35 in code_point_at raised the exception.
+
+Why it happens (root cause)
+- translate_codepoint(...) returns a positive consumed (number of codepoints it handled).
+- The code then runs the for pt in range(consumed) loop to advance pos by the number of UTF-16 code units per consumed codepoint.
+- Inside that loop you call code_point_at(code_units, pos) before advancing pos.
+- If, during earlier iterations of the loop, pos has already reached length (the end of code_units), the next call code_point_at(code_units, pos) uses index == len(code_units) and code_point_at immediately raises IndexError (see the bounds check at line 35).
+- In short: the loop calls code_point_at with pos == length (out of range). That happens because the loop iterates consumed times but does not guard that pos is still < length before calling code_point_at.
+
+Where it occurred (specific names & lines)
+- Method: translate(self, input_seq: Optional[str], out: List[int])
+- Problematic lines: the for pt in range(consumed): block that does pos += char_count(code_point_at(code_units, pos)).
+- Exception location: code_point_at(code_units, index) raised IndexError at its bounds check (your slice shows the check at line 35).
+
+How to fix it (concrete steps)
+Option A — explicit safe advancement using code units (recommended):
+Replace the loop with code that advances pos without calling code_point_at when pos might equal length:
+
+for _ in range(consumed):
+    if pos >= length:
+        break                      # or raise a controlled error if this should never happen
+    high = code_units[pos]
+    # if high is a high surrogate and there's a following low surrogate, consume 2 code units
+    if 0xD800 <= high <= 0xDBFF and pos + 1 < length and 0xDC00 <= code_units[pos + 1] <= 0xDFFF:
+        pos += 2
+    else:
+        pos += 1
+
+This uses the same surrogate logic as code_point_at, but it checks pos < length before accessing code_units[pos].
+
+Option B — guard before calling code_point_at:
+for pt in range(consumed):
+    if pos >= length:
+        break
+    pos += char_count(code_point_at(code_units, pos))
+
+Option C — change translate_codepoint contract (longer change):
+Make translate_codepoint(...) return the number of UTF-16 code units it consumed (1 or 2) instead of number of codepoints, so you can simply do pos += consumed without per-iteration lookups. This is larger API work but removes the fragile loop.
+
+Which to choose
+- If translate_codepoint is already defined to count codepoints (not code units), use Option A or B to avoid calling code_point_at at pos == length.
+- Option A is safest and fastest because it advances pos using plain code unit checks and never calls code_point_at out of bounds.
+
+Final note
+- The bug is an off-by-one / out-of-range access caused by calling code_point_at(code_units, pos) after pos reached length. Fix by ensuring pos < length before calling code_point_at or by advancing pos using code unit checks instead of code_point_at.

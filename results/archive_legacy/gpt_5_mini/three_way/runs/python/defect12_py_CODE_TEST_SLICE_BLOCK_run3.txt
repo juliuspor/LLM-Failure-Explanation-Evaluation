@@ -1,0 +1,57 @@
+What happened
+- The test calls WordUtils.abbreviate("0123456789", lower=15, upper=20, append_to_end=None). The input text length is 10.
+- In abbreviate you first clamp upper:
+  if upper == -1 or upper > len(text):
+      upper = len(text)
+  After that you do:
+  if upper < lower:
+      upper = lower
+  Because lower is 15 and upper was just set to 10, this sets upper = 15.
+- Later you call substring_java(text, 0, upper). That passes end = 15 while the string length is 10.
+- substring_java then checks bounds and raises IndexError ("String index out of range: 15"), as shown in the slice block:
+  32 |     if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):
+  33 |         raise IndexError(f"String index out of range: {end}")
+
+Root cause
+- The code sets upper = lower when upper < lower without ensuring lower is within the text length. That creates an end index (upper) larger than len(text), which substring_java rejects. In short: you allowed upper to become > len(text) by copying lower into it, and substring_java enforces strict bounds.
+
+Where it occurs (references)
+- Variable names: lower, upper, text, result
+- Methods: abbreviate(...) and substring_java(...)
+- Specific failure point: the substring_java check raising IndexError (slice block lines 32–33) because end (upper) > len(text)
+- The problematic lines in abbreviate are the two lines that set upper based on len(text) and then set upper = lower when upper < lower.
+
+How to fix (concrete steps)
+Pick one of these two clear fixes (both are acceptable; choose depending on desired semantics):
+
+1) If you want behavior that matches the Java test (return the whole text when lower > len(text)):
+   - After normalizing upper, add a check that returns the original text when lower >= len(text):
+     if lower >= len(text):
+         return text
+   - Place this check before any substring_java call or any use of lower/upper to compute indices.
+
+2) If you prefer to clamp lower into the string bounds:
+   - After handling upper, clamp lower to len(text):
+     if lower > len(text):
+         lower = len(text)
+   - Then keep the existing "if upper < lower: upper = lower" logic (this will set upper = len(text) at worst, not > len).
+
+3) Or avoid making upper = lower; instead, when upper < lower set upper = len(text) (but that changes original intended semantics):
+     if upper < lower:
+         upper = len(text)
+
+Which to choose
+- The Java test expects case (1): when lower is beyond the end, abbreviate should just return the full string. So add the explicit check:
+    if lower >= len(text):
+        return text
+
+Minimal patch example (apply inside abbreviate after the upper normalization):
+    if upper == -1 or upper > len(text):
+        upper = len(text)
+    # new check to match expected behavior
+    if lower >= len(text):
+        return text
+    if upper < lower:
+        upper = lower
+
+This prevents passing end > len(text) into substring_java and stops the IndexError.

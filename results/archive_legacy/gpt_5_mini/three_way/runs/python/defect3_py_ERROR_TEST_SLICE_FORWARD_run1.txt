@@ -1,0 +1,38 @@
+What happened (root cause)
+- The failure happens when code_point_at(index) tries to read code_units[index] on line 38:
+  high = code_units[index]
+  That raised IndexError: String index out of range: 2 because index was equal to len(code_units).
+- index became equal to len(code_units) because the caller advanced the index past the last code unit when handling a surrogate pair. In other words, the translator loop increments the index twice for the same characters:
+  - once when it explicitly advances over the low surrogate after recognizing the pair, and
+  - again by the loop control (or another increment) so the next iteration calls code_point_at with index == len(code_units).
+- The guard inside code_point_at (line 39) only protects access to the low surrogate (it checks index + 1 < len(code_units)), it does not protect the initial access at line 38. So if the caller passes an index == len(code_units), the first access fails immediately.
+
+Where this occurs
+- In hit03_translator.py, code_point_at reads code_units[index] at line 38.
+- The translator method (CsvEscaper.translate_string / CharSequenceTranslator.translate) is the caller that advances index incorrectly when it encounters a high-surrogate/low-surrogate pair. That incorrect advance is what leads to code_point_at being called with an out-of-range index.
+
+Why the current checks are insufficient
+- The check at line 39 (index + 1 < len(code_units)) only prevents reading the low surrogate when index points to the last code unit, but it doesn't prevent the situation where index already equals len(code_units).
+- You must ensure that no code ever calls code_point_at with index >= len(code_units), or make code_point_at itself validate index before reading.
+
+Concrete fixes (steps you can apply)
+1) Fix the caller (recommended)
+   - Inspect translate_string / translate loop where you iterate over code units and advance index.
+   - Use a while loop with manual control of index so you only increment index exactly the right amount:
+     - When you consume a single code unit, do index += 1.
+     - When you consume a surrogate pair, do index += 2.
+   - Do not rely on an outer for loop that will also increment the index; that double-increment is the common cause.
+   - Verify loop condition is while index < len(code_units).
+
+2) Add defensive check in code_point_at (optional but helpful)
+   - At the top of code_point_at, explicitly check if index < 0 or index >= len(code_units) and raise a clear error (ValueError/IndexError) with a helpful message. This will fail fast and clarify the caller is wrong.
+   - Example:
+     if index < 0 or index >= len(code_units):
+         raise IndexError(f"index {index} out of range for length {len(code_units)}")
+   - Keep the existing surrogate-pair logic after that.
+
+3) Add tests to catch the regression
+   - The provided test that reproduces the bug (emoji followed by 'A') is good. Add a test that exercises a surrogate pair at the final positions to ensure index increments are correct for both pair-at-end and pair-followed-by-char cases.
+
+Summary
+- The immediate crash is caused by calling code_point_at with index == len(code_units). That happened because the translate loop advanced index incorrectly (double increment) when handling surrogate pairs. Fix the index advancement in translate_string (use a while loop and increment by 1 or 2 explicitly), and optionally add a precondition check inside code_point_at to make the problem obvious if it happens again.

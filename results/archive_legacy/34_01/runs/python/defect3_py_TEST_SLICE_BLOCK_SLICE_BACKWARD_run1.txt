@@ -1,0 +1,38 @@
+What happened (what failed)
+- The test calls CsvEscaper.translate_string('\U0001F630') (the emoji U+1F630).
+- That code path converts the Python str into UTF-16 code units by calling to_utf16_code_units(...).
+- to_utf16_code_units raised IndexError at line 36:
+  "IndexError(f"String index out of range: {index}")"
+  because the function checked index against len(code_units) at line 35 and found index >= len(code_units).
+
+Why it failed (root cause)
+- The string contains a code point outside the BMP (U+1F630). In UTF-16 this is encoded as a surrogate pair (two 16-bit code units).
+- The code mixes two different indexing domains: "string code point index" (indexing Python characters) and "UTF-16 code unit index" (indexing the produced 16-bit units).
+- translate_string (caller) advances or computes an index in terms of Python string characters, then passes that index into to_utf16_code_units or uses it to look up in code_units. But for a non-BMP character the number of UTF-16 code units differs from the number of Python characters, so the passed index can be out of range for code_units.
+- Concretely: to_utf16_code_units builds code_units (length 2 for the single emoji) but the caller uses an index that assumes a single code unit per character. That index can equal 1 (or more) while len(code_units) is 2 or vice versa; the check at line 35 (if index < 0 or index >= len(code_units)) triggers and raises IndexError.
+
+Where it occurred (exact places)
+- Caller: CsvEscaper.translate_string(...) — the translate function is using a string index in a place that expects a UTF-16 code-unit index.
+- Callee: to_utf16_code_units(s: str) — line 35–36 performs the bounds check and raises the IndexError.
+
+How to fix it (concrete steps)
+Pick one of these fixes (each is explicit and safe):
+
+1) Keep all indexing in code-point space (recommended if your caller works with Python string indices)
+   - Change translate_string so it never passes Python string indices into routines that expect UTF-16 unit indices.
+   - If you need UTF-16 units for escaping logic, build them locally inside to_utf16_code_units and operate only on those local indices, returning a new string or escaping result without exposing unit indices to the caller.
+
+2) Keep all indexing in UTF-16 code-unit space
+   - Change translate_string to compute and use UTF-16 code-unit indices everywhere (so index values mean the same thing through the call chain).
+   - To compute code-unit indices reliably, produce code_units once (e.g. in translate_string) and use that same list for all indexing and lookups instead of Python string indices.
+
+3) Avoid manual UTF-16 handling and use standard Python APIs
+   - Replace to_utf16_code_units with a robust conversion using bytes: units = list(int.from_bytes(b[i:i+2], 'little') for i in range(0, len(b), 2)) where b = s.encode('utf-16-le'). This produces a stable array of 16-bit units. Use these units consistently; do not mix with Python-string indices.
+   - Or even better, do the escaping using Unicode code points (ord(c)) rather than UTF-16 units unless you specifically need UTF-16 behavior (e.g., interacting with a system that requires surrogate pairs).
+
+Concrete minimal code changes (examples)
+- If you want to build code_units inside to_utf16_code_units and never accept external indices, remove any parameter that expects an external index and ensure all indexing uses the code_units length.
+- If translate_string must operate on code_units, have translate_string call to_utf16_code_units once and then use the returned list for all further indexing; never use Python-string positions against that list.
+
+Summary
+The error is caused by mixing Python string (code point) indexes with UTF-16 code-unit indexes. The mismatch makes an index fall outside the code_units array and triggers the check at lines 35–36 in to_utf16_code_units. Fix by choosing a single indexing domain (preferably code points in Python) or by consistently converting and using UTF-16 units everywhere.

@@ -1,0 +1,42 @@
+What happened (where the error is raised)
+- The IndexError is raised at line 35 in to_utf16_code_units (the check:
+  if index < 0 or index >= len(code_units): raise IndexError(f"String index out of range: {index}")).
+- The failing test calls CsvEscaper.translate_string on the input "\U0001F630A" (an emoji then 'A').
+- Somewhere a call asks for code_point_at(..., index=2). That triggers the check above and raises "String index out of range: 2" because len(code_units) is 2, so index 2 is >= len.
+
+Why that happens (root cause)
+- The code builds a list named code_units that is supposed to represent UTF-16 code units (16-bit words) so that surrogate pairs are two entries and ordinary BMP chars are one entry.
+- For the input "\U0001F630A" you should get three UTF-16 code units: [high_surrogate, low_surrogate, ord('A')] so len(code_units) == 3 and index 2 would be valid.
+- In the current implementation len(code_units) is 2. That means the emoji was encoded as a single entry in code_units instead of two UTF-16 code units. Consequently later code calls code_point_at with index==2 (expecting third unit) but the list has only indices 0 and 1.
+- The most likely concrete mistake (visible in lines 38–44):
+  - The code reads high = code_units[index] and then tests whether high is in the high-surrogate range (0xD800..0xDBFF). But if code_units was built from Python code points (ord(ch)) instead of explicit UTF-16 units, then the emoji is represented as a single integer > 0xFFFF, not as a surrogate high value. The test 0xD800 <= high <= 0xDBFF fails, so code_point_at returns high (a full code point) instead of reading two separate code units.
+  - Because code_units does not contain separate surrogate words, the rest of the translator still advances the index assuming UTF-16 units (increments by 1 expecting to handle the low surrogate next), which leads to attempts to access index 2 when only indices 0..1 exist.
+
+In short: the code mixes two different representations:
+- It treats the internal list as UTF-16 code units in some places (expecting surrogate pairs to occupy two indices).
+- But when building code_units it treats Python characters as code points and stores a single integer for a supplementary character. That mismatch produces a too-short list and causes the index-out-of-range.
+
+Concrete steps to fix (explicit)
+1. Decide on one canonical internal representation. Two good options:
+   - Work with Python code points (the str itself and ord(ch)). Then do not try to emulate UTF-16 indexing; treat each Python character as one unit. Adjust code_point_at and any index arithmetic accordingly (no surrogate-pair splitting).
+   - Or correctly build a UTF-16 code_units list where every UTF-16 code unit is a separate entry (16-bit value). For each Python code point cp = ord(ch):
+     - If cp <= 0xFFFF: append(cp)
+     - Else (cp > 0xFFFF): compute surrogate pair and append both:
+         high = 0xD800 + ((cp - 0x10000) >> 10)
+         low  = 0xDC00 + ((cp - 0x10000) & 0x3FF)
+         append(high); append(low)
+   - I recommend this option if the rest of the translator expects UTF-16 units.
+2. If you use the UTF-16 list, make index advancement consistent:
+   - When you detect a high surrogate at code_units[index] and a valid low surrogate at code_units[index+1], code_point_at should return the combined code point, and the outer loop must increase the index by 2 after consuming the pair. If only one unit is consumed, increase by 1.
+3. Alternatively, avoid re-implementing UTF-16 splitting by using Python's native encoding to get code units:
+   - bytes_le = s.encode('utf-16-le'); then read 2-byte words into integers to make a true UTF-16 code_units list.
+   - That prevents subtle mistakes in surrogate math.
+4. Add unit tests that assert len(code_units) for known inputs:
+   - For "\U0001F630A" assert code_units == [high_surrogate, low_surrogate, ord('A')] so you detect the mismatch early.
+
+Files/lines to inspect and change
+- to_utf16_code_units: fix the construction of code_units so supplementary characters produce two entries.
+- code_point_at (lines 35–44): keep the guard that raises IndexError, but ensure it is only reached with valid indices (i.e., code_units has correct length).
+- Any loop in CsvEscaper.translate_string that walks the code_units list: ensure it advances index by 2 when a surrogate pair is consumed.
+
+This explains where (line 35), why (mismatched representation of surrogate pairs), and what concrete steps to take to fix it.

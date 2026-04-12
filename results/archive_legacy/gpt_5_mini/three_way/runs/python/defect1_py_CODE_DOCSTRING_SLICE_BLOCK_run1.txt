@@ -1,0 +1,54 @@
+What happened (where)
+- The failure is caused by the input validation at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes_offset, but the docstring explicitly allows negative minutes in some cases (for example (0, -15) => -00:15 and (-2, -15) => -02:15). So valid inputs per the doc are being rejected at that check.
+
+Why it fails (root cause)
+- The code enforces minutes in the range 0..59, while the documented contract expects minutes in -59..+59 with additional sign rules depending on hours:
+  - minutes must be between -59 and +59 inclusive
+  - minutes negative is allowed for hour == 0 and for hour < 0 (it produces a negative total offset)
+  - minutes negative is not allowed when hours > 0 (doc says (2, -15) => ValueError)
+- Because the code uses a strict non-negative check, calls like for_offset_hours_minutes(0, -15) or for_offset_hours_minutes(-2, -15) fail immediately at the minutes validation instead of being accepted and processed.
+
+What else to watch (secondary issues)
+- The code later reassigns minutes_offset as a combined-minute value:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  This logic expects minutes_offset may be negative and computes the final minutes count accordingly. So the validation preventing negative minutes is directly contradictory to the later computation.
+- You should also ensure the final computed offset (in milliseconds) is bounded to the documented maximum (+/- 23:59:59.000). The try/except around arithmetic handles overflow, but an explicit magnitude check is clearer.
+
+How to fix it (concrete steps)
+1. Allow minutes_offset in the range -59..+59 (change the validation).
+2. Enforce the sign rule: if hours_offset > 0 and minutes_offset < 0 then raise ValueError (as doc requires).
+3. After computing the combined minutes, validate the magnitude doesn't exceed 23*60 + 59 minutes (or check final millis magnitude) and raise if out of range.
+4. Optionally avoid reusing minutes_offset for intermediate combined minutes to keep code clearer.
+
+Suggested minimal code changes (replace the validation block and add sign/magnitude checks):
+
+    # allow negative minutes but only in [-59, 59]
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    # minutes negative not allowed when hours positive per doc
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours are positive")
+
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+
+    # validate total_minutes magnitude does not exceed 23:59
+    max_minutes = 23 * 60 + 59
+    if abs(total_minutes) > max_minutes:
+        raise ValueError("Offset is too large")
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    return cls.for_offset_millis(offset)
+
+Summary
+- The immediate failure point is the minutes validation at lines 396–397: it disallows negative minutes even though the method supports them in some cases. Change the validation to accept -59..+59, add the sign-rule check for positive hours, and validate the final total offset magnitude. That will make the behavior match the docstring and remove the unexpected rejections.

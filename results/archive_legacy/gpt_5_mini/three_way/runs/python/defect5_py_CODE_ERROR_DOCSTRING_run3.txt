@@ -1,0 +1,74 @@
+What happened (where it failed)
+- The TypeError was raised by this block near the end of the function:
+  if expected_type is not None:
+      if inferred_type == object and expected_type != object:
+          raise TypeError(...)
+
+- The exception message shows "Cannot cast object list to str list ...", so inferred_type was object and expected_type was str. That caused the raise.
+
+Why that happened (root cause, with exact variables / lines)
+1. The code computes inferred_type at the top like this:
+       if array is not None:
+           inferred_type = type(array)
+   But type(array) returns the Python list class (e.g. <class 'list'>), not the type of the list elements. So this line never gives you the element/component type you intended.
+2. In the specific failing test, inferred_type ended up as object (from the final else branch: inferred_type = object). That can happen when both array and element are None:
+       elif element is not None:
+           inferred_type = type(element)
+       else:
+           inferred_type = object
+   So inferred_type == object, expected_type == str, and the code raises the TypeError in the check quoted above.
+3. So the code is making two mistakes:
+   - It uses type(array) instead of the element type (so even when array is present it doesn't infer element type correctly).
+   - It treats inferred_type == object as a fatal incompatibility with expected_type, even in cases where there is nothing to infer (array and element both None). That leads to an unnecessary TypeError.
+
+Consequence
+- If both array and element are None, the function decides the component type is object and then immediately errors out when expected_type is provided (e.g. str). The docstring says if element is None and array is None, the return type should be List[object], so raising here contradicts the docstring/intent.
+
+Concrete fixes (exact changes to make)
+1. Infer element type from array contents, not from the list object:
+   - Replace:
+         if array is not None:
+             inferred_type = type(array)
+     with something like:
+         if array:
+             inferred_type = type(array[0])        # use first element's type
+         elif array is not None:
+             inferred_type = None                 # array exists but is empty
+   (This distinguishes empty lists from None and gets an element type when possible.)
+2. Prefer expected_type when nothing else can be inferred:
+   - After deciding inferred_type from array or element, do:
+         if inferred_type is None and expected_type is not None:
+             inferred_type = expected_type
+3. Use the element's type if array gave no info:
+   - If inferred_type is still None and element is not None:
+         inferred_type = type(element)
+4. Only raise on a real incompatibility:
+   - Replace the current check with a compatibility check, e.g.:
+         if expected_type is not None and inferred_type is not None:
+             if not issubclass(inferred_type, expected_type) and inferred_type is not object:
+                 raise TypeError(...)
+   - Or, specifically handle the "unknown (object) component" case by not raising when inferred_type == object but both array and element were None (i.e. allow List[object] to be returned), or set inferred_type = expected_type earlier so there's nothing to raise on.
+
+Minimal replacement algorithm (pseudocode to paste in)
+    if array and len(array) > 0:
+        inferred_type = type(array[0])
+    else:
+        inferred_type = None
+
+    if inferred_type is None and element is not None:
+        inferred_type = type(element)
+
+    if inferred_type is None and expected_type is not None:
+        inferred_type = expected_type
+
+    if inferred_type is None:
+        inferred_type = object
+
+    # then copy/grow and only raise if there is a real incompatibility:
+    if expected_type is not None and inferred_type is not object:
+        if not issubclass(inferred_type, expected_type):
+            raise TypeError(...)
+
+Why this fixes the failing test
+- It no longer uses type(array) (the list class) as the element type.
+- If both array and element are None, inferred_type becomes object (or expected_type if you prefer), but the function will not raise just because object != expected_type; instead it will only raise on an actual incompatible element/array type situation. That matches the docstring and avoids the spurious TypeError you saw.

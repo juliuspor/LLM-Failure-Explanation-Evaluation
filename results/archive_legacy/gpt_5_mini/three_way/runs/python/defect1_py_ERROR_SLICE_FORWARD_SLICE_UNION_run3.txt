@@ -1,0 +1,54 @@
+What happened (where it failed)
+- The ValueError was raised at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  The exception message shows minutes_offset was -15, so the code hit this validation and threw "Minutes out of range: -15".
+
+Why it happened (root cause)
+- minutes_offset is supposed to be a non‑negative number of minutes (0–59) extracted from a parsed timezone or offset string, but at the point of the check it can already be negative.
+- Later code (lines 402 and 404) expects to manipulate minutes_offset relative to hours_in_minutes and a sign, e.g.:
+    minutes_offset = hours_in_minutes - minutes_offset   (line 402)
+    minutes_offset = hours_in_minutes + minutes_offset   (line 404)
+  That indicates the code intends minutes_offset to be an absolute minute value and combine it with hours_in_minutes after applying sign.
+- The validation at line 396 happens too early (or uses the raw signed minutes) so a legitimately negative minute value (for example parsed from "-0:15" as -15) triggers the range check and fails even though the overall offset is valid.
+
+Consequence
+- Any input that produces a negative minutes component (for negative offsets) causes the early check to fail incorrectly. The root is a mismatch between how minutes_offset is validated (expects non‑negative) and how it is parsed/used (minutes_offset may be negative before sign handling).
+
+Concrete steps to fix (exact changes to apply)
+1. Treat minutes as an absolute value for range checking; apply the sign when you combine with hours.
+   - Compute the sign for the whole offset (e.g. sign = +1 if hours >= 0 else -1).
+   - Use absolute value of minutes for validation and combination.
+
+2. Example patch (replace the relevant block around lines 396–405):
+
+   - Before:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     ...
+     if negative_sign:
+         minutes_offset = hours_in_minutes - minutes_offset   # line 402
+     else:
+         minutes_offset = hours_in_minutes + minutes_offset   # line 404
+
+   - After (explicit, minimal change):
+     # determine sign for offset from hours (or separate sign variable)
+     sign = -1 if hours < 0 else 1
+     minutes_abs = abs(minutes_offset)
+     if minutes_abs < 0 or minutes_abs > 59:   # minutes_abs < 0 is redundant but keeps parity
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     # combine using absolute minutes and sign
+     if sign < 0:
+         minutes_offset = hours_in_minutes - minutes_abs
+     else:
+         minutes_offset = hours_in_minutes + minutes_abs
+
+3. Verify with test cases:
+   - Positive offset: "02:15" -> hours=2, minutes=15 -> minutes_abs=15 -> passes -> minutes_offset = 120 + 15 = 135
+   - Negative offset with nonzero hours: "-02:15" -> hours=-2, minutes=-15 -> minutes_abs=15 -> minutes_offset = -120 - 15 = -135 (or compute via hours_in_minutes - minutes_abs)
+   - Negative offset with zero hours: "-00:15" or "-0:15" -> hours=0 (or -0 depending on parser) and minutes=-15 -> minutes_abs=15 -> minutes_offset = 0 - 15 = -15 -> valid; prior code raised because it saw -15 at the range check.
+
+Why this fixes the issue
+- The validation then checks the magnitude of the minutes component (0–59) regardless of sign, which matches how the code combines minutes with hours later. That prevents valid negative minute values from being rejected before sign handling.
+
+If you want, paste the surrounding method (parsing & sign-detection lines) and I will insert the exact patch in your code so line numbers and variable names match precisely.

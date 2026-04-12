@@ -1,0 +1,55 @@
+What went wrong (root cause)
+- The value returned in consumed is being interpreted inconsistently.
+  - translate_codepoint(...) returns a count in one unit (it actually reports how many UTF-16 code units it consumed).
+  - The caller loop treats consumed as a count of code points and advances pos by calling char_count(code_point_at(...)) once per consumed item.
+- As a result pos is advanced by a mix of char_count() results instead of the actual number of code units the translator consumed. That makes pos move the wrong amount, so the loop skips or re-reads code units and eventually fails.
+
+Where this happens in your code
+- The variable consumed is set on this line:
+  - consumed = self.translate_codepoint(code_units, pos, out)
+- The caller assumes consumed is a number of code points and runs:
+  - for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  (that loop is the bug site)
+- code_point_at is the function shown in the slice (lines 38–44) that returns a Unicode code point by combining a high and low surrogate when present. char_count returns 2 for supplementary code points and 1 for BMP code points.
+
+Concrete example that demonstrates the mismatch
+- Suppose translate_codepoint consumed a surrogate pair and returned consumed = 2 (meaning "I took two UTF-16 code units").
+- The for loop will run twice:
+  - First iteration: code_point_at(pos) sees the surrogate pair and char_count(...) returns 2, so pos += 2 (moves past the pair).
+  - Second iteration: pos is now after the pair; code_point_at(pos) looks at the next code unit and char_count(...) returns 1, so pos += 1.
+- Net advance = 3 code units, but the translator actually consumed 2. The caller has now skipped one code unit of input, corrupting the parsing and causing incorrect behavior.
+
+Why the behavior looks like a failure
+- The caller and translator have different contracts: one counts code units, the other expects counts of code points. Mismatched counts cause incorrect position advancement (skipping or double-reading) and then wrong translation state or infinite loops.
+
+How to fix it (clear, actionable steps)
+Pick one of the two consistent approaches and apply it everywhere:
+
+Option A — Make translate_codepoint return code-point counts
+1. Change translate_codepoint so it returns the number of Unicode code points it consumed (1 for a BMP char or for a surrogate pair; 0 means "I didn't handle this code point").
+2. Keep the caller loop as-is:
+   - for pt in range(consumed):
+         pos += char_count(code_point_at(code_units, pos))
+3. Verify unit tests that include surrogate pairs (supplementary characters) and sequences of BMP characters.
+
+Option B — Make the caller treat consumed as code-unit counts
+1. Keep translate_codepoint returning the number of UTF-16 code units it consumed.
+2. Replace the for-loop with a single advance by consumed code units:
+   - pos += consumed
+   (no per-iteration char_count() calls)
+3. Remove or adjust comments that say "Contract with translators is that they have to understand codepoints" to reflect the actual contract.
+4. Add tests for mixed sequences (BMP + surrogate pairs) to ensure correctness.
+
+Extra checks and tests to add
+- Add unit tests for:
+  - A single BMP char
+  - A single supplementary character (surrogate pair)
+  - Sequences combining BMP and supplementary characters
+  - Translators that consume 0, 1, or 2 code units
+- Add assertions in translate (temporary) to validate the contract while debugging:
+  - If chosen Option A: assert consumed >= 0
+  - If chosen Option B: assert consumed >= 0 and consumed <= remaining_code_units
+
+Summary
+- The code fails because consumed is interpreted inconsistently: the translator returns code-unit counts but the caller treats it as code-point counts (or vice versa). Fix by making the contract explicit and implementing one of the two options above; then add tests for surrogate pairs to ensure correctness.

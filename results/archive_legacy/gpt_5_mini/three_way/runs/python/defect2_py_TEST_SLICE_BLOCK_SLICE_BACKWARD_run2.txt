@@ -1,0 +1,50 @@
+What happened (where it fails)
+- The failure occurs in GrayPaintScale.get_paint at lines shown in the slice. The method computes:
+  - line 71: g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - lines 74–75: if g < 0 or g > 255: raise ValueError(...)
+- When tests pass values outside the configured bounds (e.g. value = -0.5 with default bounds 0.0..1.0, or 1.5), the formula at line 71 produces g = -127 (for -0.5) or g = 382 (for 1.5). Because g < 0 or g > 255, the code raises ValueError on line 74 instead of returning a clamped black or white color.
+- The tests expect clamping to the lower/upper bounds (black (0,0,0) and white (255,255,255)), but the implementation raises an exception instead. The root cause is that no clamping is applied to the input value or to g before the range check/raise.
+
+Why it happened (root cause)
+- The method assumes inputs will always map into 0..255 and uses a strict range check that raises an exception for out-of-range intermediate g.
+- Tests (and original Java behavior) expect out-of-range values to be clamped, not to raise.
+- Also note a secondary potential issue: if upper_bound == lower_bound, the denominator (self._upper_bound - self._lower_bound) would be zero; get_paint should handle that too.
+
+Concrete fixes (exact steps and code to change)
+1. Clamp the input value to the configured bounds before converting to g. Add this before line 71:
+   - value = min(max(value, self._lower_bound), self._upper_bound)
+   This ensures the computed g is always in 0..255 for a normal bound range.
+
+2. (Alternative) Or clamp g after computing it and before the range-check/raise:
+   - g = max(0, min(255, g))
+   - Remove the ValueError raise for g out-of-range.
+
+3. Handle zero-range bounds (avoid division by zero):
+   - If self._upper_bound == self._lower_bound, set g to either 0 (black) or 255 (white) depending on whether value <= lower or >= upper, or simply set g = 0 (or some defined behavior).
+
+Exact minimal code change example (replace the current block around line 71–75):
+
+    # clamp value to configured bounds to avoid producing out-of-range g
+    value = min(max(value, self._lower_bound), self._upper_bound)
+
+    # avoid division by zero
+    span = self._upper_bound - self._lower_bound
+    if span == 0:
+        g = 0
+    else:
+        g = int((value - self._lower_bound) / span * 255.0)
+
+    # ensure g inside 0..255 (safety)
+    g = max(0, min(255, g))
+
+    return (g, g, g)
+
+Why this fixes the tests
+- Clamping value to bounds ensures for value=-0.5 you get value=0.0 -> g=0, and for value=1.5 you get value=1.0 -> g=255, matching test expectations.
+- Removing the raise (or making it unreachable by clamping) prevents ValueError from being raised for out-of-range inputs.
+- The extra divide-by-zero guard prevents a crash if upper==lower.
+
+Where to change (precise places)
+- Make the change inside GrayPaintScale.get_paint, before or instead of the current lines 71–75. Replace the computation + raise with the clamping/compute/return snippet above.
+
+That addresses the exact failure: the method currently raises ValueError for values the tests expect to be clamped; clamp the input (or g) and return the clamped RGB tuple instead.

@@ -1,0 +1,42 @@
+What went wrong (root cause)
+- The loop that advances pos after a translator handled a codepoint assumes translate_codepoint(...) returns "number of codepoints consumed".
+  - Comment above the loop says translators "have to understand codepoints" and "just took care of a surrogate pair" — so the code expects translate_codepoint to return the count in codepoints.
+- In your failing run with the single supplementary character U+1F630 (a surrogate pair), translate_codepoint actually returned 2 (the number of UTF‑16 code units), not 1 (the number of codepoints). Because of that mismatch the loop ran twice and advanced pos too far.
+  - First iteration: pos was advanced by char_count(code_point_at(code_units, pos)) -> 2, moving pos from 0 to 2.
+  - Second iteration: the loop attempts code_point_at(code_units, pos) with pos == length (2), which is out of range and causes the failure (IndexError or similar).
+- In short: translate_codepoint returns code unit count but the code treats its return value as codepoint count. That off‑by‑semantic error makes pos advance past the input and crashes.
+
+Where exactly it fails in your code
+- The problem happens in this block:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The call to code_point_at(code_units, pos) is the place that tries to read past the end when consumed is the number of code units (2) instead of the number of codepoints (1).
+
+How to fix it (concrete steps)
+Pick one of these two correct approaches, depending on intended contract:
+
+A) Make translate_codepoint return codepoint-count (preferred if the comment/contract is correct)
+1. Change translate_codepoint implementation so it returns the number of codepoints it consumed (1 for a single codepoint, even if that codepoint is a surrogate pair, and n for n codepoints).
+2. No changes needed to the loop; it will then iterate once per codepoint and advance pos by the correct number of code units via char_count(...).
+
+B) Keep translate_codepoint returning code-unit-count and change the loop to advance by code units
+1. Replace the loop with a single addition of consumed (which is code-unit count), not a per-codepoint loop that calls code_point_at:
+   pos += consumed
+2. Or, if you really must iterate per codepoint for some reason, convert consumed (code units) into codepoints before looping:
+   - Walk the code_units slice and count codepoints (use code_point_at and char_count) until you've consumed the requested number of code units, updating pos accordingly.
+
+Minimal safe change (example for option B)
+- Replace the for-loop with:
+  pos += consumed
+- This matches the case where translate_codepoint returns code-unit count and avoids reading past the end.
+
+Which to choose
+- If your API/contract (comment, other code) indicates translators operate in codepoints, fix translate_codepoint to return codepoint counts (option A).
+- If translators are already implemented to return code-unit counts across the codebase, change the advancing logic to add consumed directly (option B).
+
+Why the suggested fixes work
+- Option A restores the original semantic contract: the outer code expects "consumed" to be codepoints and advances by the correct number of code units by examining each codepoint exactly once.
+- Option B avoids calling code_point_at with an out-of-range pos by not looping more times than there are actual codepoints; adding consumed when consumed is in code units moves pos to the correct place in one step.
+
+Summary
+- The failure is a semantic mismatch: translate_codepoint returned code units, but the caller treated the return as codepoints. Fix either the return value semantics of translate_codepoint or change the pos-advancing loop to match what translate_codepoint actually returns.

@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The bug is in translate(), in the block that runs when translate_codepoint(...) returns a non‑zero consumed value. Specifically the loop starting at
+  for pt in range(consumed):
+    pos += char_count(code_point_at(code_units, pos))
+  is wrong. (This is where the failure occurs.)
+
+Why it fails (root cause, with variables and lines)
+- translate_codepoint(...) returns consumed measured in UTF‑16 code units (char units). In other words, for a surrogate pair it returns 2, for a single BMP code unit it returns 1.
+- The loop treats consumed as “how many codepoints to skip” and on each iteration calls code_point_at(code_units, pos).
+- code_point_at (lines 38–44) will combine a high surrogate and the following low surrogate into a single codepoint only when the current code unit is a high surrogate (0xD800..0xDBFF) and a valid low surrogate follows. If pos happens to point at the low surrogate (0xDC00..0xDFFF), code_point_at returns that low surrogate value as if it were a standalone code unit.
+- Example failure: translate_codepoint returned consumed == 2 for a surrogate pair (it consumed two code units). The loop runs twice:
+  - First iteration: pos points at the high surrogate; code_point_at sees the pair and returns a supplementary codepoint; char_count(...) returns 2; pos += 2.
+  - Second iteration: pos now points at the low surrogate (because we incremented by 2 but we still have a second loop iteration). code_point_at sees a low surrogate, does NOT combine it (lines 38–44 return the low unit), char_count(...) returns 1; pos += 1.
+  Total advancement = 2 + 1 = 3 code units, so pos overshoots by 1. That corrupts parsing and causes wrong behavior (skipping/overrunning characters).
+- In short: consumed is in code units, but the loop iterates consumed times and each iteration advances by a variable amount based on code_point_at. Mixing these different unit meanings causes incorrect pos updates. The problematic lines are the for loop in translate() and the code_point_at implementation shown at lines 38–44.
+
+How to fix it (concrete steps)
+Pick one of these explicit fixes (do only one):
+
+Option A — advance by the number of code units directly (recommended if consumed is code units):
+1. Replace the whole for loop block
+     for pt in range(consumed):
+         pos += char_count(code_point_at(code_units, pos))
+   with a single line:
+     pos += consumed
+   Rationale: consumed already counts code units consumed by the translator, so adding that many code units moves pos correctly.
+
+Option B — make translate_codepoint report codepoints, not code units:
+1. Change translate_codepoint so it returns the number of codepoints consumed (1 per BMP codepoint or 1 per surrogate pair), not the number of code units.
+2. Then keep the loop, but make it advance exactly one code unit per codepoint:
+     for pt in range(consumed):
+         if 0xD800 <= code_units[pos] <= 0xDBFF and pos + 1 < length and 0xDC00 <= code_units[pos + 1] <= 0xDFFF:
+             pos += 2
+         else:
+             pos += 1
+   (Or reuse char_count but call it on codepoint extracted from the high surrogate only. This is more complex and error prone.)
+
+Option C — iterate by code units (simpler variant):
+1. Replace the for loop with:
+     for _ in range(consumed):
+         pos += 1
+   Rationale: If consumed is code units, incrementing pos by one per unit is correct. This is equivalent to Option A but iterative.
+
+Which to choose
+- If translate_codepoint is already defined to return how many UTF‑16 code units it consumed (which the code and bug indicate), use Option A or C. Option A is simplest: pos += consumed.
+- If you prefer translators to speak in codepoints, update translate_codepoint to return codepoint counts and use Option B — but that is a larger change.
+
+Summary (short)
+- The loop incorrectly mixes "code units" and "codepoints". translate_codepoint returns code units (2 for a surrogate pair), but the loop advances using char_count(code_point_at(...)), causing an extra increment when the second loop iteration lands on a low surrogate. Change the loop to advance by consumed code units (pos += consumed) or make translate_codepoint return codepoint counts.

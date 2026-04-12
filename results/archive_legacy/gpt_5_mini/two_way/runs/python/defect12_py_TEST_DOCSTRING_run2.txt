@@ -1,0 +1,65 @@
+What happened
+- The test test_abbreviate_lower_beyond_length calls WordUtils.abbreviate("0123456789", 15, 20, None).
+- In the current implementation of WordUtils.abbreviate that input causes an IndexError because the method tries to access characters at positions that do not exist in text (positions ≥ len(text)).
+
+Why it fails (root cause)
+- The method accepts parameters named text, lower, upper (and an abbrevMarker argument). When lower is larger than text length the code still uses direct indexing into text (for example text[lower] or text[lower - 1]) to decide where to place the abbreviation marker or to find spaces to break on.
+- In Python (and in Java substring/indexing), trying to read text[index] where index >= len(text) raises an IndexError (or IndexOutOfBoundsException). The implementation never checks that lower is within [0, len(text)] before doing those index accesses.
+- This is exactly what the failing test shows: lower == 15 and len("0123456789") == 10, so accessing text[15] triggers the exception.
+
+Where it occurs in the code
+- Inside WordUtils.abbreviate, at the points where the code does direct character access to inspect or search around the lower/upper boundaries. Look for lines that reference text[lower], text[lower - 1], text[upper - 1], text[index], or that call text.index(...) (or substring equivalent in a direct-indexing form) without first clamping lower/upper to the text length.
+  - Typical problematic operations are:
+    - text[lower] or text[lower - 1] to test whether a boundary is a space or punctuation
+    - text[upper - 1] when upper > len(text)
+    - substring/text slicing implemented using indexing rather than safe slicing with bounds checks
+
+Concrete, actionable fixes (step‑by‑step)
+1. Null/empty handling (already present in tests)
+   - If text is None: return None.
+   - If text == "": return "".
+
+2. Normalize lower and upper before any character access
+   - If lower < 0: set lower = 0.
+   - If upper == -1: treat as "no limit" by setting upper = len(text) (or handle it as a special case).
+   - Clamp both boundaries: lower = min(lower, len(text)); upper = min(upper, len(text)).
+
+3. Short-circuit when lower is beyond text length
+   - After clamping: if lower >= len(text): return text (nothing to abbreviate because starting point is past the end). This is exactly what the test expects.
+
+4. Avoid direct indexing without checks
+   - When you need to inspect a character around a boundary, ensure the index is valid first. Example:
+     - Instead of doing char = text[lower] directly, do:
+         if lower < len(text):
+             char = text[lower]
+         else:
+             # handle as if no character exists (e.g., break or return text)
+   - Prefer safe slicing (text[a:b]) for extracting substrings; in Python slicing beyond bounds is safe, but indexing is not.
+
+Example patch sketch (Python)
+- Near the top of WordUtils.abbreviate(text, lower, upper, abbrevMarker):
+    if text is None:
+        return None
+    length = len(text)
+    if length == 0:
+        return ""
+    if lower < 0:
+        lower = 0
+    # upper == -1 means "no limit"
+    if upper == -1:
+        upper = length
+    # clamp to length
+    if lower >= length:
+        return text
+    if upper > length:
+        upper = length
+
+- After doing the above normalization, you can safely use lower and upper in further logic. Whenever you need to peek at a character, check index validity first.
+
+Why this fix satisfies the tests
+- For input ("0123456789", 15, 20, None), clamping makes lower >= length and the method will return the original text "0123456789" instead of trying to access text[15].
+- For other tests (None input, empty string, upper == -1) the early checks ensure correct behavior.
+
+Summary
+- Root cause: unguarded character indexing when lower or upper exceed len(text).
+- Fix: normalize and clamp lower/upper at start of method, short-circuit when lower >= len(text), and avoid direct indexing without bounds checks. Implement these precise checks and the IndexError goes away and the tests will pass.

@@ -1,0 +1,65 @@
+What happened (where it fails)
+- In the to_locale method, you compute length = len(locale_str) at line 227.
+- Later, at line 236 the code enters a branch guarded by the wrong length check: it uses the branch that assumes at least 5 characters (it immediately does locale_str[3] and locale_str[4] at lines 242–244).
+- If locale_str is shorter than 5 characters (for example "en" with length == 2), those index accesses raise IndexError at line 242 because locale_str[3] does not exist.
+
+Why it fails (root cause)
+- The code checks the wrong length before accessing position 3 and 4. The branch that accesses locale_str[3] and locale_str[4] must only run when the string is long enough (length >= 5), but the code enters it even for shorter strings due to incorrect conditional logic.
+- Concretely: a string of length 2 will cause an out-of-range index access at line 242 (ch3 = locale_str[3]) — you are validating or slicing characters that are not present.
+
+Exactly where to change it
+- Method: to_locale
+- Problem lines: 236 (branch condition), 242–244 (index access), 248–252 (country/variant handling after those accesses).
+- The branch that performs checks on locale_str[3] and locale_str[4] must be executed only when length == 5 (for "en_GB") or length > 5 (for "en_GB_xxx"), not when length == 2.
+
+Concrete fixes (step-by-step)
+1. Handle the simple 2-letter case first (length == 2) and return immediately:
+   - If length == 2:
+       return Locale(locale_str[0:2], "")
+   This prevents any later code from accessing indexes that do not exist.
+
+2. Then handle the 5-character country-only case (length == 5) and the longer variant case (length >= 7) — both require the underscore at position 2 and uppercase country letters at positions 3–4:
+   - If length == 5:
+       - check locale_str[2] == '_' (separator must be underscore)
+       - check locale_str[3] and locale_str[4] are 'A'..'Z'
+       - return Locale(locale_str[0:2], locale_str[3:5])
+   - If length >= 7:
+       - check locale_str[2] == '_'
+       - check locale_str[3] and locale_str[4] are 'A'..'Z'
+       - check locale_str[5] == '_' (separator before variant)
+       - return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+3. Validate the language code is lowercase (positions 0–1) before returning.
+
+Minimal corrected code sketch (replace the problematic part)
+- After length = len(locale_str):
+  if length == 2:
+      # validate language lower-case
+      if locale_str[0] < 'a' or locale_str[0] > 'z' or locale_str[1] < 'a' or locale_str[1] > 'z':
+          raise ValueError(...)
+      return Locale(locale_str[0:2], "")
+  if length == 5:
+      if locale_str[2] != '_':
+          raise ValueError(...)
+      if locale_str[3] < 'A' or locale_str[3] > 'Z' or locale_str[4] < 'A' or locale_str[4] > 'Z':
+          raise ValueError(...)
+      return Locale(locale_str[0:2], locale_str[3:5])
+  if length >= 7:
+      if locale_str[2] != '_' or locale_str[5] != '_':
+          raise ValueError(...)
+      if locale_str[3] < 'A' or locale_str[3] > 'Z' or locale_str[4] < 'A' or locale_str[4] > 'Z':
+          raise ValueError(...)
+      return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+  raise ValueError(...)
+
+Tests to add
+- "en" -> success
+- "en_GB" -> success
+- "en_GB_xxx" -> success
+- "e" -> ValueError (too short)
+- "eng" -> ValueError (wrong format)
+- "en-gb" or "en_gb" with wrong-case letters -> ValueError (case checks)
+- "" or None -> None or ValueError as per method contract
+
+Why this is precise
+- The bug is purely an index-out-of-range caused by running the wrong branch for short strings. Reordering/adjusting the length checks prevents invalid indexed access and enforces the intended strict validation described in the docstring.

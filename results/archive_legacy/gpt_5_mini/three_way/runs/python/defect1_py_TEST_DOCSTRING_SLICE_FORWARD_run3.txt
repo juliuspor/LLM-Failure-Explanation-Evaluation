@@ -1,0 +1,64 @@
+What happened (where)
+- The bug is in hit01_timezone.py inside DateTimeZone.for_offset_hours_minutes, around the code that combines hours and minutes into a total minutes value.
+- The relevant variables and lines are:
+  - hours_in_minutes (contains hours * 60)
+  - minutes_offset (the minutes argument, reused)
+  - offset (final milliseconds)
+- The problematic lines (from your SLICE_FORWARD) are:
+  402: minutes_offset = hours_in_minutes - minutes_offset
+ 404: minutes_offset = hours_in_minutes + minutes_offset
+ 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code reassigns minutes_offset to contain the total minutes, but does it twice and with the wrong arithmetic in at least one branch. Reusing minutes_offset for two different meanings (the input minutes vs total minutes) makes the logic confusing and leads to incorrect sign handling.
+- Specifically:
+  - For negative hours with positive minutes (e.g. hours = -2, minutes = 15), the code should compute total_minutes = hours_in_minutes - minutes_abs (i.e. -120 - 15 = -135). One line does that (hours_in_minutes - minutes_offset), but another path uses hours_in_minutes + minutes_offset which gives -120 + 15 = -105 — wrong sign/amount.
+  - Because of that wrong arithmetic, the computed total minutes can be incorrect and then the computed offset in milliseconds (offset) is wrong. That then either produces the wrong zone id (like "-01:45" instead of "-02:15") or causes the "Offset is too large" ValueError when further bounds checks are applied.
+- The root problem is mixing the roles of minutes_offset and making the adjustment sign depend on the wrong expression. The code fails when hours and minutes have mixed signs (the cases the docstring treats explicitly), because the code does not consistently apply the minutes sign relative to hours.
+
+Exactly where to change it (concrete fix)
+- Replace the muddled reuse of minutes_offset with a clear calculation of total_minutes. Compute total_minutes = hours * 60 plus or minus the absolute minutes depending on the sign rules in the docstring.
+- Example replacement (pseudo-code you can drop into that function, replacing the two reassignment lines and the multiplication):
+
+    # compute hours_in_minutes earlier as hours_offset * 60
+    minutes_abs = abs(minutes_offset)
+    if hours_offset > 0:
+        if minutes_offset < 0:
+            raise ValueError("Minutes must not be negative when hours are positive")
+        total_minutes = hours_in_minutes + minutes_abs
+    elif hours_offset < 0:
+        # for negative hours the minutes extend the negative offset in either sign
+        total_minutes = hours_in_minutes - minutes_abs
+    else:  # hours_offset == 0
+        # preserve sign of minutes when hours are zero
+        total_minutes = minutes_offset
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- Notes on the logic above and how it matches the DOCSTRING:
+  - (+, +) -> hours_in_minutes + minutes_abs
+  - (+, -) -> raise (ValueError)
+  - (0, +) -> +minutes
+  - (0, -) -> -minutes
+  - (-, +) -> compute hours_in_minutes - minutes_abs (makes the total more negative)
+  - (-, -) -> hours_in_minutes - minutes_abs (same as above, docstring says (-2,15) and (-2,-15) both produce -02:15)
+
+Why this exact change fixes the bug
+- It uses a separate variable total_minutes (no reuse) and always applies minutes_abs with the correct sign relative to hours, following the docstring rules.
+- This removes ambiguous +/- mixing and prevents incorrect totals (and the consequent wrong IDs or out-of-range errors).
+
+What to verify after the fix (test list)
+- test_zero_offset: (0,0) -> UTC
+- test_positive_hours_minutes: (2,15) -> +02:15
+- test_positive_hours_zero_minutes: (2,0) -> +02:00
+- test_negative_hours_zero_minutes: (-2,0) -> -02:00
+- test_negative_hours_negative_minutes: (-2,-15) -> -02:15
+- test_zero_hours_positive_minutes: (0,15) -> +00:15
+- test_zero_hours_negative_minutes: (0,-15) -> -00:15
+- test_mixed_signs_invalid: (2,-15) raises ValueError, (-2,15) -> -02:15
+- boundary and out-of-range tests also pass
+
+Summary
+- Root cause: incorrect sign arithmetic and reuse of minutes_offset at lines ~402 and ~404 produces wrong total minutes.
+- Fix: compute a separate total_minutes using hours_in_minutes and abs(minutes) with clear conditional sign logic (sample code above).
+- After applying the change, run the unit tests you provided to confirm the behavior matches the DOCSTRING.

@@ -1,0 +1,49 @@
+What happened (what the failure is)
+- The code raises ValueError "Minutes out of range: X" at lines 400–401 when parsing an offset that includes a negative sign (for example "-01:30").
+- The root cause is that the minutes field has already been given the negative sign before the range check at line 400. The check expects minutes to be in 0..59, but because the code applied the sign early the value is negative (e.g. -30) and the check fails.
+
+Why it happens (root cause, precisely)
+- The variable minutes_offset is treated in two different ways in this method:
+  - At lines 400–401 it is validated as if it were the unsigned minutes component (must be between 0 and 59).
+  - Later at lines 406–409 minutes_offset is reused to build the total minutes (hours_in_minutes +/- minutes_offset) after the sign is applied.
+- If the sign is applied to the minutes component before the validation (so minutes_offset is negative when you reach line 400), the condition minutes_offset < 0 is true and you get the ValueError even though the logical minutes component (30 in "-01:30") is valid.
+- In short: the code applies the negative sign to the minutes value too early and then validates the signed value instead of the absolute minutes magnitude.
+
+Where it occurs (exact lines to inspect)
+- The failing check is at lines 400–401:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The combination/usage that expects an unsigned minutes value occurs at lines 406–409:
+  406 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 408 |                 minutes_offset = hours_in_minutes + minutes_offset
+ 409 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+How to fix it (concrete steps)
+1. Parse and record the sign separately from the numeric minute value.
+   - Add a local variable sign (e.g. +1 or -1) based on the offset sign character.
+   - Ensure minutes_offset holds only the unsigned minutes magnitude (0..59) at the time of validation.
+
+2. Validate the unsigned minutes before applying any sign:
+   - Replace the current validation at lines 400–401 with a check that uses the unsigned minutes:
+     - Example: if minutes < 0 or minutes > 59: raise ValueError(...)
+   - Do not validate a signed minutes value.
+
+3. When building total offset minutes (lines 406–409), apply the sign to the combined hours+minutes:
+   - Compute total_minutes = sign * (hours_in_minutes + minutes)
+   - Then compute offset millis with total_minutes as currently done:
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Concretely, change the code flow to something like:
+   - sign = -1 if sign_char == '-' else +1
+   - hours = parsed_hours
+   - minutes = parsed_minutes  # always non-negative
+   - if minutes < 0 or minutes > 59: raise ValueError(f"Minutes out of range: {minutes}")
+   - total_minutes = sign * (hours * 60 + minutes)
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Why this fix works
+- By validating the absolute minute component (0..59) before applying the sign you prevent false negatives from negative minute values created by an early sign application.
+- By applying sign only to the final combined total (hours*60 + minutes) you preserve the intended semantics for offsets like "-01:30" (which should become -90 minutes), and you avoid triggering the "Minutes out of range" error incorrectly.
+
+If you want, paste the surrounding method header and the few lines where you parse the sign/hours/minutes and I will produce the exact patch (with the exact line numbers) to apply.

@@ -1,0 +1,32 @@
+What fails
+- The code computes the final offset in minutes by reusing the parameter minutes_offset as a temporary for the total minutes. That reuse hides the original intent and produces an incorrect calculation path that leads to an overflow/invalid offset being produced and sent into FieldUtils.safe_multiply. The failure happens in the block shown at lines 406–409 (the assignments at 406/408 and the call at 409).
+
+Where it goes wrong (step‑by‑step, with line numbers)
+1. Line 400: you validate the incoming minutes_offset is in 0..59. That check is fine.
+2. Line 406 / 408: you then overwrite minutes_offset with the total minutes:
+   - if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+   - else: minutes_offset = hours_in_minutes + minutes_offset
+   Overwriting the input parameter is the problem — the variable name no longer holds “the minutes portion” but the “total minutes”. That makes the code harder to reason about and causes the following problem.
+3. Line 409: you call FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE). Because minutes_offset has been repurposed to mean total minutes, safe_multiply receives a value much larger (in magnitude) than  0..59. In some inputs that leads to arithmetic overflow in safe_multiply and you end up hitting the exception path ("Offset is too large"). The code raises that error even though the original hours/minutes inputs were within the documented ranges — the root cause was the incorrect reuse of minutes_offset and the mixing of “minute-of-hour” and “total minutes” concepts.
+
+Why this is a real bug (no guesswork)
+- The code validates the parameter minutes_offset as a minute-of-hour (0..59) but then later repurposes that same variable to mean total minutes. That mismatch between validation and later usage is why valid inputs can cause a failure later in the method (the failure is produced inside the arithmetic/multiplication at line 409). The bug is localized to the sign/accumulation block at lines 406–409.
+
+Concrete fixes (step-by-step)
+1. Do not overwrite the input minute parameter. Introduce a new variable total_minutes and compute the total offset in minutes into that:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+     else:
+       total_minutes = hours_in_minutes + minutes_offset
+2. Use total_minutes when converting to milliseconds:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. (Optional but recommended) Add a bounds check on total_minutes to ensure the combined offset is within the allowed total range (e.g., between -23*60-59 and +23*60+59) before calling safe_multiply, so you fail early with a clear message rather than depending on a multiplication overflow.
+
+Minimal corrected snippet (showing exact places to change)
+- Replace the assignments at lines 406/408 and the multiply at 409 with:
+    total_minutes = hours_in_minutes - minutes_offset if hours_in_minutes < 0 else hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- You keep the original meaning of minutes_offset for validation, compute the final total minutes explicitly in a new variable, and avoid confusing parameter reuse that led to unexpected overflow/invalid results later.

@@ -1,0 +1,47 @@
+What happened (where it failed)
+- At lines 396–397 the code runs:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That check threw ValueError.
+- The same method later (line 402 and 404) treats minutes_offset as signed and combines it with hours_in_minutes:
+  402: minutes_offset = hours_in_minutes - minutes_offset
+  404: minutes_offset = hours_in_minutes + minutes_offset
+  (then minutes_offset is multiplied to produce offset milliseconds).
+
+Why it failed (root cause)
+- minutes_offset is being validated for the range 0..59 before the code applies the sign logic. In other words, minutes_offset may already carry a negative sign when it reaches the check at lines 396–397 (for example, the parser stored the sign on the minutes value). The check rejects any negative minutes immediately, even though a negative minutes value can be valid when it represents "minutes part" of a negative offset (e.g. -05:30 should allow 30 minutes with a negative sign).
+- Because the sign-handling/combining logic is executed only after the validation (lines 402/404), valid inputs that encode a negative offset end up failing the early check and raising "Minutes out of range".
+
+Consequence
+- Valid timezone offsets that include a negative sign on the minutes portion (or however your parsing represents sign) will incorrectly raise ValueError at lines 396–397, preventing the code from reaching the sign-combining logic that would produce a valid offset.
+
+Concrete fixes (step-by-step)
+Pick one of these fixes depending on how minutes and sign are represented in your parser:
+
+1) Validate the absolute minutes, not the signed value:
+   - Replace the check at lines 396–397 with:
+       if abs(minutes_offset) < 0 or abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Better: explicitly use an unsigned minutes variable. If minutes_offset currently carries sign, use minutes = abs(minutes_offset); then validate minutes in 0..59.
+
+2) Move validation after sign handling:
+   - Defer the range check until after you compute the combined minutes (the code at 402/404). For example:
+       # parse sign and hours/minutes into sign, hours, minutes
+       if minutes < 0 or minutes > 59:
+           raise ValueError(...)
+       # then apply sign and combine with hours_in_minutes
+   - Concretely, ensure minutes_offset used in the range check is the parsed minute magnitude (0..59), not the signed value.
+
+3) Parse minutes and sign separately (cleanest):
+   - When parsing, produce two variables: minutes_value (0..59) and sign (1 or -1).
+   - Validate minutes_value with:
+       if minutes_value < 0 or minutes_value > 59:
+           raise ValueError(f"Minutes out of range: {minutes_value}")
+   - Then compute minutes_offset = sign * minutes_value and combine with hours.
+
+Which to choose
+- If the parser currently stores sign into minutes_offset, use option (1) or (3). Option (3) is most explicit and least error-prone.
+- If the parser can be rearranged easily, option (2) (move validation after sign application) also works but is more fragile if future code assumes minutes_offset is unsigned.
+
+Summary in one sentence
+The code validates minutes_offset before applying the sign logic, so a legitimately signed minute value is rejected at lines 396–397; fix by validating the unsigned minutes (abs/minutes_value) or by moving validation after sign handling (see steps above).

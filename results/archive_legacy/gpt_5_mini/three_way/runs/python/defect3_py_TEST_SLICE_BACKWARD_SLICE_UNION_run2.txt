@@ -1,0 +1,48 @@
+What happened
+- The code that converts Python str to UTF-16 code units (to_utf16_code_units) does not actually emit UTF‑16 surrogate halves for characters outside the BMP (code points > 0xFFFF). Instead it appends ord(ch) as a single integer.
+- The rest of the translator code (and code_point_at) expects a sequence of UTF‑16 code units where non‑BMP characters occupy two 16‑bit units (a high surrogate + a low surrogate). Because to_utf16_code_units produces one item per Python character, the translator's indexing becomes wrong and eventually calls code_point_at with an index equal to len(code_units). That triggers the IndexError at:
+
+  - to_utf16_code_units / code_point_at: line 35
+    if index < 0 or index >= len(code_units):
+        raise IndexError(f"String index out of range: {index}")
+
+Why it fails (step-by-step, with variables & lines)
+1. Input in the failing test: input_str = "\U0001F630A" (emoji U+1F630 followed by 'A').
+2. to_utf16_code_units(s) is supposed to return a list of 16‑bit code units. For this input it should be: [high_surrogate_for_1F630, low_surrogate_for_1F630, ord('A')].
+3. The buggy to_utf16_code_units instead appends ord(ch) for each Python character. For the emoji ord("\U0001F630") == 0x1F630, so code_units becomes [0x1F630, 0x41].
+   - That means len(code_units) == 2, not 3.
+4. The translator logic iterates over code units and when it encounters what it thinks is a high surrogate, it will look ahead (index + 1) to consume the low surrogate and advance the index accordingly. Because the translator expects two entries for the emoji, it advances the index as if there were two code units consumed, but the underlying list has only one element for the emoji.
+5. Later the translator calls code_point_at(index) with index equal to len(code_units) (one past the last element). That invokes the check at line 35 and raises IndexError: "String index out of range: {index}".
+6. So the root cause is: to_utf16_code_units does not split non‑BMP code points into surrogate halves, causing the translator's index math (which assumes UTF‑16 code units) to go out of bounds.
+
+Where it occurs
+- In to_utf16_code_units: the conversion loop that builds code_units must be producing single integers > 0xFFFF instead of two 16‑bit surrogate values.
+- The error is raised at the bounds check in code_point_at (line 35 in your slice), because the caller passed an index equal to len(code_units) after miscounting code unit length.
+
+How to fix it (concrete steps)
+1. Change to_utf16_code_units so it emits actual UTF‑16 code units. For each code point cp = ord(ch):
+   - If cp <= 0xFFFF: append cp.
+   - Else (cp > 0xFFFF): compute the surrogate pair and append two 16‑bit values:
+     - cp' = cp - 0x10000
+     - high = 0xD800 + (cp' >> 10)
+     - low  = 0xDC00 + (cp' & 0x3FF)
+     - append high, then low
+2. Keep the rest of the translator code (and code_point_at) unchanged; they will then see the expected two code units for non‑BMP characters and the index arithmetic will remain correct.
+3. Add unit tests (you already have them) for sequences of non‑BMP characters followed by other characters (emoji + 'A') to verify the fix.
+
+Minimal example replacement for the conversion loop
+- For each character ch in s:
+  cp = ord(ch)
+  if cp <= 0xFFFF:
+      code_units.append(cp)
+  else:
+      cp -= 0x10000
+      code_units.append(0xD800 + (cp >> 10))
+      code_units.append(0xDC00 + (cp & 0x3FF))
+
+Why this matches the expectation
+- Java's String/CharSequence operate in UTF‑16 code units; the translator code was written to operate on that unit model (high/low surrogates). Python's str is sequence of Unicode code points, so ord(ch) for non‑BMP characters is a single integer > 0xFFFF. Converting Python str to a UTF‑16 code unit list must perform the surrogate splitting; otherwise the translator's assumptions about unit counts and lookahead/advances are violated, causing out‑of‑range indexes as you observed.
+
+References to your code lines
+- The IndexError is raised at the if index < 0 or index >= len(code_units): raise IndexError(...) check (slice lines 35–36).
+- The surrogate-pair combination logic (checking 0xD800..0xDBFF then index+1 < len(code_units) and combining) is at lines 38–44; those lines work only if code_units contains actual surrogates (two entries) for non‑BMP chars.

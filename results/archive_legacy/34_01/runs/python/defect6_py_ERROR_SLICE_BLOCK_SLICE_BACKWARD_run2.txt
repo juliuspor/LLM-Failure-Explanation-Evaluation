@@ -1,0 +1,38 @@
+What happened
+- The code inserted an extra space between a minus sign and the numeric literal, so the output lost the negative sign when later processed. The break happens in add() at line 133.
+
+Where it happened (exact lines)
+- add(self, newcode) at lines 126–138; the decision to insert a space is on line 133:
+  if (self.is_word_char(c) or c == '\\') and self.is_word_char(self.get_last_char()):
+      self.append(" ")
+
+Why that removes the minus sign
+- Suppose the buffer currently ends with '-' and you call add("0.0") to append the number -0.0.
+  - newcode[0] is '0' so c is a word character (self.is_word_char(c) is True).
+  - get_last_char() returns '-', and is_word_char('-') also returns True (incorrectly).
+  - Both sides of the condition are True, so the code inserts a space between '-' and '0' and then appends "0.0".
+  - The result in the buffer becomes "- 0.0" (minus separated by a space). Downstream code that canonicalizes or prints the token sequence then treats '-' as a separate token (or removes an isolated unary minus) and you end up with "0" instead of "-0.0".
+- In short: the code treats '-' as a "word character" so it splits '-' from the numeric token, losing the negative sign.
+
+Root cause
+- is_word_char('-') returns True. The condition at line 133 assumes is_word_char(last_char) means the last character is something that must be separated from the next token (letters/digits/underscore), but '-' is not such a character and should not be classified as a word char here.
+
+Concrete steps to fix (pick one)
+1) Fix is_word_char to not treat '-' as a word character
+   - Edit the implementation of is_word_char so '-' returns False.
+   - Rerun tests.
+
+2) Change the separation logic to special-case '-' (if you cannot change is_word_char)
+   - Replace the condition at line 133 with an explicit check that excludes '-' as a separator, e.g.:
+       last = self.get_last_char()
+       if (self.is_word_char(c) or c == '\\') and self.is_word_char(last) and last != '-':
+           self.append(" ")
+   - Rerun tests.
+
+How to verify
+- Add a focused unit test:
+   - Start buffer containing '-' (append '-' via whatever API), call add("0.0"), assert buffer contains "-0.0".
+- Run the full test suite to ensure no other tokenization rules relied on is_word_char('-').
+
+Why this explanation is definitive
+- The failure message expects "-0.0" but got "0": that only happens if the minus sign became a separate token and was dropped or neutralized. The only code path in the provided slice that can split characters is the space insertion at line 133, which only activates when is_word_char(last_char) is True — so the only plausible root cause is that '-' is classified as a word character.

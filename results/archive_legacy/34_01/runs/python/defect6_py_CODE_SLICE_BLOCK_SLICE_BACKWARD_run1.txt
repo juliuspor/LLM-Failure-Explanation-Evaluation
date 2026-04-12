@@ -1,0 +1,28 @@
+What happens (where it fails)
+- At add_number (top of your snippet) you call self.add(" ") when x < 0 and the previous character is '-'. You also call self.add(str(x)) or self.add(str(value)).
+- add (lines 126–138) then does some work and ends by calling self.append(newcode) (lines 136 and 138).
+- The code that defines append is not shown in your slice, so likely append is implemented in the same class as a wrapper that calls add (or otherwise delegates back to add). That makes add -> append -> add -> append ... and causes infinite recursion until the interpreter raises a RecursionError / stack overflow.
+
+Why this is the root cause (concise)
+- add is supposed to be the higher-level method that formats and decides spacing before actually writing characters.
+- append should be the low-level method that pushes text into the internal buffer.
+- If append calls add (instead of writing directly to the buffer), the control flow loops: add calls append, append calls add, etc. The call from add_number to self.add(" ") triggers this loop immediately when the negative-number spacing branch runs (and similarly for self.add(str(x))).
+
+Exactly where it occurs
+- add_number: the problematic calls are at the two lines that call self.add(" ") and self.add(str(...)) (top block).
+- add: lines 136 and 138 call self.append(newcode) and are the other half of the cycle.
+- The missing piece is the implementation of append: if it ends up invoking add, that completes the infinite recursion loop.
+
+How to fix it (step-by-step)
+1. Inspect the implementation of append. If append calls add (or otherwise leads back to add), change it so append writes directly to the internal buffer (for example, self._buf.append(...) or self._out += newcode), not via add.
+2. If append must perform some checking, expose a private low-level method (name it _append or write_raw) that does the actual buffer write. Then:
+   - Have add call the low-level method (self._append(newcode)).
+   - Have append (if it remains public) either be an alias for the low-level method or be removed to avoid confusion.
+3. Alternatively, in add_number, if you intended to bypass add's spacing logic for the single-space case, call the low-level write method directly (self._append(" ")) instead of self.add(" ").
+4. After change, run the code path that previously tasted negative numbers to confirm no RecursionError happens and spacing/formatting still match expectations.
+
+Why those fixes are safe
+- They break the circular call chain by guaranteeing one function (append/_append) is the terminal writer that never calls back into add.
+- They preserve the intended separation: add decides spacing and formatting, append/_append performs the raw buffer write.
+
+If you want, paste the append implementation and I’ll point exactly which line to change and show the minimal patch.

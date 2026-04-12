@@ -1,0 +1,57 @@
+What happened (where it fails)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- The implementation of LocaleUtils.to_locale splits the input on underscores and then validates each part strictly:
+  - it expects language to be 2 lower-case letters,
+  - if a country is present it expects the country to be 2 upper-case letters,
+  - if a variant is present it expects a third part.
+- For the input 'fr__POSIX' split('_') produces ['fr', '', 'POSIX'].
+- The code then runs the “country must be length 2” check against the empty string (''). That check fails and the method raises ValueError (so the assert never sees Locale('fr', '', 'POSIX')).
+
+Why this is the root cause (clear, non-jargon)
+- The format 'language__variant' (double underscore; empty country) is a valid locale form: language + blank country + variant. The implementation treats the empty country as “no country” in some contexts but still applies the strict “if country part exists then length must be 2” rule to the empty string, so it rejects 'fr__POSIX' instead of accepting language='fr', country='', variant='POSIX'.
+- Concretely: the code uses a strict length check like `if len(country_part) != 2: raise ValueError` without first checking whether the country part is non-empty.
+
+Exactly where to change (method and check)
+- In LocaleUtils.to_locale, find the block after splitting the input into parts (typically something like `parts = locale_str.split('_')`) that validates parts[1] (country).
+- Change the country validation from “always require length == 2” to “require length == 2 only when the country part is non-empty”.
+
+Concrete fix (step-by-step)
+1. Locate the code in LocaleUtils.to_locale that looks like:
+   - parts = locale_str.split('_')
+   - language = parts[0]
+   - country = parts[1]   # may be ''
+   - if len(country) != 2: raise ValueError('invalid country')
+   - variant = parts[2] if len(parts) > 2 else ''
+2. Replace the country-length check with a conditional that allows an empty string:
+   - if country and len(country) != 2:
+         raise ValueError('country must be 2 uppercase letters')
+   - (Optionally also validate that when country is non-empty it is uppercase: `if country and not country.isupper(): raise ValueError(...)`)
+3. Ensure the variant handling accepts a third part even when country == '':
+   - if len(parts) == 3:
+         variant = parts[2]
+     elif len(parts) == 2:
+         variant = ''  # or parts[1] if you intend language_country form
+   - (Be careful to map the parts correctly when parts[1] is empty: language, '', variant.)
+4. Add/adjust unit tests:
+   - test LocaleUtils.to_locale('fr__POSIX') returns Locale('fr', '', 'POSIX')
+   - test other valid and invalid cases to ensure no regressions (e.g. 'en', 'en_GB', 'en_GB_variant', invalid lengths).
+
+Example of the corrected validation snippet (conceptual)
+- After splitting:
+    language = parts[0]
+    country = parts[1] if len(parts) > 1 else ''
+    variant = parts[2] if len(parts) > 2 else ''
+- Then:
+    if not (len(language) == 2 and language.islower()):
+        raise ValueError('language must be 2 lower-case letters')
+    if country and not (len(country) == 2 and country.isupper()):
+        raise ValueError('country must be 2 upper-case letters when present')
+    # variant may be any non-empty string when present (optional additional checks possible)
+
+Why this exact change fixes it
+- It preserves strict validation for real country codes (when a country is supplied it must be two uppercase letters).
+- It allows the valid special case where the country part is intentionally omitted but a variant is present (double underscore form), so 'fr__POSIX' becomes language='fr', country='', variant='POSIX' instead of being rejected.
+
+If you want, I can:
+- Provide a minimal patch / diff for your exact file if you paste the current LocaleUtils.to_locale implementation; or
+- Suggest a regex replacement that accepts language, optional country (possibly empty), and optional variant.

@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The ValueError is thrown at lines 400–401:
+  - 400 |         if minutes_offset < 0 or minutes_offset > 59:
+  - 401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The code later (lines 406, 408) expects to handle negative offsets by combining hours and minutes with sign logic:
+  - 406 |                 minutes_offset = hours_in_minutes - minutes_offset
+  - 408 |                 minutes_offset = hours_in_minutes + minutes_offset
+
+Why it fails (root cause)
+- The method rejects any negative minutes at line 400, but the subsequent sign-handling code assumes minutes can be negative when the overall offset is negative. In other words, callers sometimes pass a negative minutes value when the requested offset is negative (for example hours = -5, minutes = -30). The early check treats that as an invalid input and raises "Minutes out of range", so the later sign logic never runs.
+- The mismatch is: the validation requires minutes to be in [0, 59], while the later arithmetic expects minutes may be negative (or at least expects the code to accept signed minutes and normalize them).
+
+Concrete evidence in the snippet
+- The throw occurs at lines 400–401. The sign-dependent arithmetic that would have normalized a negative minutes value is at lines 406 and 408. Because the check prevents negative minutes, that normalization never gets a chance to run.
+
+Exact, actionable fixes (choose one)
+1) Enforce unsigned minutes at API boundary (make callers change)
+   - Change documentation and method contract so callers must pass minutes as a non-negative value (0..59) always.
+   - Update public docs and add an input-validation error message telling callers to pass absolute minutes and use the sign on hours for negative offsets.
+   - No code change needed other than perhaps clarifying the exception text.
+
+2) Allow signed minutes and normalize inside the method (recommended if callers currently pass negative minutes)
+   - Change the validation at line 400 to allow negative minutes but limit magnitude:
+     - Replace
+       if minutes_offset < 0 or minutes_offset > 59:
+     - With
+       if abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Then normalize minutes to the sign of hours before combining:
+     - After validation, do:
+       minutes_offset = abs(minutes_offset)
+       if hours < 0:
+           minutes_offset = -minutes_offset
+     - Then use the existing lines 406/408 to combine hours_in_minutes and minutes_offset.
+   - This keeps backward compatibility for callers who pass negative minutes.
+
+3) Normalize any mixed sign input robustly
+   - Reject inconsistent signs (e.g., hours positive and minutes negative) or normalize by applying the sign of hours to minutes:
+     - If hours == 0, use the sign of minutes.
+     - If hours and minutes have opposite signs, either raise a clear ValueError or convert minutes to the sign of hours, depending on your API policy.
+   - Example steps:
+     - If abs(minutes_offset) > 59 -> raise.
+     - If hours == 0: keep minutes_offset as signed.
+     - Else: minutes_offset = abs(minutes_offset) * sign(hours)
+
+Tests to add
+- forOffsetHoursMinutes(5, 30) -> accepted
+- forOffsetHoursMinutes(-5, -30) -> accepted and treated as -(5*60 + 30) minutes
+- forOffsetHoursMinutes(-5, 30) -> either accepted and treated as -(5*60 + 30) or rejected if you decide to forbid mixed signs (choose consistency)
+- forOffsetHoursMinutes(0, -30) -> accepted and treated as -30 minutes (if you allow signed minutes)
+
+Summary
+- The immediate cause is the validation at lines 400–401 forbids negative minutes, but the code at lines 406 and 408 expects to be able to handle negative minutes. Either make callers pass absolute minutes, or change the validation and add normalization so negative minutes are allowed and correctly combined with the hours.

@@ -1,0 +1,47 @@
+What happened (where): The error is raised at line 239 inside to_locale, because this code assumes characters at indexes 3 and 4 are uppercase letters for a region code. For the input "fr__POSIX" the characters at those positions are:
+
+- locale_str[0:2] == "fr" (ok)
+- locale_str[2] == '_' (separator)
+- locale_str[3] == '_' (NOT an uppercase letter)
+- locale_str[4] == 'P'
+
+Because ch3 is '_' the condition on lines 237–239 fails and the code executes
+raise ValueError(f"Invalid locale format: {locale_str}") — which is the error you saw.
+
+Why it happened (root cause): The code only handles these shapes:
+- "ll" (length == 2)
+- "ll_CC" where CC are two uppercase letters (indexes 3 and 4)
+- "ll_CC_variant" where a '_' follows the two-letter region and a variant follows
+
+It does not handle the valid locale form that has an empty region and a variant, which is written as "language__variant" (two underscores in a row). In that case the region field is empty and the second underscore (at index 3) is not an uppercase letter, so the uppercase-letter check at line 239 rejects it. The input "fr__POSIX" is precisely that case (language = "fr", empty region, variant = "POSIX"), so the code flags it as invalid even though it is a valid locale format.
+
+Exactly where to change (what to change): Adjust the parsing logic around lines 237–247 to accept an empty region (a second underscore) and treat the variant as starting at index 4. Concretely:
+
+1. After detecting the initial '_' at locale_str[2], check whether locale_str[3] == '_'.
+2. If locale_str[3] == '_' then interpret region as empty and return Locale(language="fr", region=None (or ""), variant=locale_str[4:]).
+3. Otherwise keep the existing two-letter-region checks for locale_str[3] and locale_str[4] and the subsequent handling for optional variant.
+
+Suggested code replacement (drop in where lines 237–247 are):
+
+    # existing: ch3 = locale_str[3]; ch4 = locale_str[4]
+    ch3 = locale_str[3]
+    # handle empty region (e.g. "fr__POSIX")
+    if ch3 == '_':
+        # variant begins at index 4
+        return Locale(locale_str[0:2], None, locale_str[4:])
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    # existing branch: region present
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    if locale_str[5] != '_':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Notes and steps to fix:
+- If your Locale type expects region to be a string, use "" instead of None for an empty region as appropriate.
+- Run unit tests for inputs: "fr", "fr_FR", "fr__POSIX", "en_US_POSIX", and malformed inputs like "fr_F" and "fr_XYextra" to verify all branches.
+- Consider writing a small table of accepted forms and tests so future edits don’t regress this case.
+
+This explains exactly why the code raised ValueError for "fr__POSIX" (underscore at index 3 instead of uppercase), where it happened (lines 237–239), and gives concrete code and steps to accept the empty-region + variant form.

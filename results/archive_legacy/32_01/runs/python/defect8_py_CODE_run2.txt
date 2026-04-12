@@ -1,0 +1,52 @@
+What happens
+- The failure comes from the length-check logic at the top of to_locale:
+
+      length = len(locale_str)
+      if length != 2 and length != 5 and length < 7:
+          raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why that is the root cause
+- The intent is: accept exactly 2-character language codes ("en"), accept 5-character language+country codes ("en_US"), and accept any string of length >= 7 (language + '_' + country + '_' + variant).
+- The condition as written is confusing and easy to misread. The correct logical test is "if the length is not 2, not 5, and also not >= 7 then raise" — in boolean form that is:
+
+      if not (length == 2 or length == 5 or length >= 7):
+          raise ...
+
+- The current code uses the equivalent written with AND/inequalities, but because of human reading mistakes it's easy to get the sense of it wrong. More importantly, the written form allows some wrong inputs through and rejects some correct inputs. Example failures:
+  - A long string (length 100) will be accepted by that test (it shouldn't necessarily be accepted if the rest of the format is wrong), but the function may then try to index specific characters that are missing underscores in the expected positions and raise later with an IndexError or produce wrong results.
+  - A borderline length that should be rejected can be accepted or vice versa depending on the exact length because the expression is hard to reason about.
+
+Where it occurs
+- In method to_locale, at the three-line block that assigns length and immediately checks it (the two lines shown above). Any call that reaches that check is affected.
+
+Concrete examples
+- Input "enUS" (length 4): length != 2 (True), length != 5 (True), length < 7 (True) → all True → raises ValueError (correct).
+- Input "enUSXX" (length 6): length != 2 (True), length != 5 (True), length < 7 (True) → raises ValueError (correct).
+- Input "enUSYYYY" (length 8) but missing expected underscores: length != 2 (True), length != 5 (True), length < 7 (False) → condition is False → no immediate raise; later the code will check locale_str[2] == '_' and raise ValueError at that later check (so not catastrophic, but logic is fragile).
+- Hard to read/maintain: it's easy to make a small mistake that produces a subtle acceptance/rejection error.
+
+Clear fix (exact steps)
+1. Replace the length test with a clearer, explicit boolean that directly expresses the intent:
+
+      length = len(locale_str)
+      if not (length == 2 or length == 5 or length >= 7):
+          raise ValueError(f"Invalid locale format: {locale_str}")
+
+2. Keep the remainder of the method unchanged. The rest of the code already validates underscore positions and letter case.
+
+Why this fix works
+- The new expression reads exactly as the intended rule (allow 2, 5, or ≥7) and avoids ambiguity from mixed inequality operators and ANDs.
+- It prevents accidental acceptance or rejection because the allowed lengths are spelled out directly.
+
+Optional extra guard (recommended)
+- If you want to be stricter about very-long inputs (e.g., limit variant length), add an explicit max length check after deciding to accept length >= 7, or use a regex to validate the full pattern in one place:
+
+      import re
+      if not re.fullmatch(r'[a-z]{2}(_[A-Z]{2}(_[A-Za-z0-9]+)?)?', locale_str):
+          raise ValueError(...)
+
+This gives a single, readable, and maintainable validation.
+
+Summary
+- Root cause: unclear/misleading length-check boolean at the top of to_locale that can produce incorrect accept/reject behavior.
+- Fix: replace with an explicit, readable boolean: if not (length == 2 or length == 5 or length >= 7): raise ValueError(...)

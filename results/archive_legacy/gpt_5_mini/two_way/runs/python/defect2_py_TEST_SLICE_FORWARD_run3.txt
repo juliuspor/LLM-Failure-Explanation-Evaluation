@@ -1,0 +1,58 @@
+What fails
+- The failing assertion is in test_mid_value_interpolation: the test calls gps.get_paint(0.5) and expects (127, 127, 127) (see the comment and the assert on the call around the middle of the file).
+- The root cause is that the implementation of GrayPaintScale.get_paint is producing 128 (or otherwise a different integer) for 0.5 instead of 127. The test expects 127 because it interprets the mapping as truncating 127.5 → 127.
+
+Why this happens (precise technical root cause)
+- The arithmetic to map a normalized value v in [lower, upper] to a byte gray value is: scaled = (v - lower) / (upper - lower) * 255.
+- For v = 0.5 with lower = 0.0 and upper = 1.0, scaled = 127.5.
+- If the implementation converts scaled to an integer using rounding (e.g. round(scaled) or int(round(scaled))) you get 128. If it uses Python’s round() without converting carefully, you also get 128 (round(127.5) → 128.0).
+- The test expects truncation toward zero (int(127.5) → 127) or an explicit floor operation. So the mismatch between “round to nearest” and “truncate/floor” is the concrete reason the test fails.
+
+Where it occurs in your code (what to look for)
+- In GrayPaintScale.get_paint, look for the line that turns the floating-point scaled gray into an integer byte value. Typical suspects:
+  - int(round(scaled))
+  - round(scaled)
+  - int(math.floor(scaled)?) — this would give expected result; if you see round or round+int, that’s the likely offender.
+- Also check any clamping code (min/max) — if clamping happens after conversion it can also cause off-by-one, but the primary failure described by the tests is the midpoint 0.5 result.
+
+How to fix it (step-by-step, exact changes)
+1. Clamp the input value to the [lower, upper] range first:
+   - v_clamped = max(lower, min(upper, v))
+2. Compute normalized fraction f = (v_clamped - lower) / (upper - lower) (handle the degenerate case upper==lower if necessary).
+3. Compute scaled = f * 255.0
+4. Convert to an integer by truncating (or flooring) rather than rounding:
+   - gray_byte = int(scaled)  # truncates toward zero, gives 127 for 127.5
+   - or gray_byte = math.floor(scaled) then int(...) — same result for positive numbers
+5. Ensure final returned color is a 3-tuple of ints: (gray_byte, gray_byte, gray_byte)
+
+Minimal example replacement for get_paint body (pseudo-Python you can drop in)
+- import math at top if needed
+- inside get_paint(self, v):
+    lower = self.lower  # or however the object stores it
+    upper = self.upper
+    # 1. clamp
+    v = max(lower, min(upper, v))
+    # 2. normalize (guard division by zero)
+    span = upper - lower
+    if span == 0:
+        f = 0.0
+    else:
+        f = (v - lower) / span
+    # 3. scale and truncate
+    scaled = f * 255.0
+    gray = int(scaled)   # truncates 127.5 -> 127
+    # 4. make safe bounds again (0..255)
+    gray = max(0, min(255, gray))
+    return (gray, gray, gray)
+
+Why this fix matches the tests
+- For v = 0.5 with lower=0.0, upper=1.0: scaled = 127.5, int(127.5) -> 127. Tests expect 127.
+- For v < lower (e.g. -0.5) we clamp to lower and return 0 -> (0,0,0).
+- For v > upper (e.g. 1.5) we clamp to upper and return 255 -> (255,255,255).
+- For custom bounds the same math applies and the midpoint maps to 127.
+
+Notes and alternatives
+- If you prefer to round to the nearest integer instead of truncating, update the tests to expect 128 for 0.5 or explicitly document which behavior you want. The current test suite expects truncation (127).
+- Be consistent in where clamping happens (before conversion) and always return plain ints in a 3-tuple, not floats or a custom color object.
+
+If you paste the current get_paint method here, I can point to the exact line to change and provide the precise replacement.

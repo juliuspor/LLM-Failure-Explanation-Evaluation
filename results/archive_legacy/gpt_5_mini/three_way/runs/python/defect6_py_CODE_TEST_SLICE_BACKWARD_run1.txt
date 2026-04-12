@@ -1,0 +1,47 @@
+What happened (root cause)
+- At line 176 you treat any float equal to its int (x == int(x)) as an integer. That is true for -0.0 because -0.0 == 0.0 and int(-0.0) == 0. So the code enters the integer branch for -0.0.
+- Inside that branch you set value = int(x) (value becomes 0) and ultimately call self.add(str(value)) which prints "0". That drops the negative sign and the fractional part, so "-0.0" becomes "0".
+- The earlier attempt to detect negativity (x < 0) does not help because in Python -0.0 < 0 is False. So the negative sign is never detected before you coerce to int.
+
+Where in the code
+- prev = self.get_last_char() (top of the method) is fine for the space-insertion logic.
+- The problematic check is at the shown slice (line 176):
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  This causes -0.0 to be treated as an integer and lose its sign.
+
+Why it fails the tests
+- test_negative_zero expects "-0.0". Your code prints "0" because int(-0.0) -> 0 and str(0) -> "0". The sign bit is lost before you print.
+
+Concrete fixes (step-by-step)
+1. Detect negative zero before you coerce or check integerness. Add an is_negative_zero check and branch early:
+   - Example using math.copysign:
+     def is_negative_zero(x):
+         return x == 0.0 and math.copysign(1.0, x) < 0.0
+   - Or using bit-level test:
+     import struct
+     def is_negative_zero(x):
+         return x == 0.0 and (struct.unpack('!Q', struct.pack('!d', x))[0] >> 63) == 1
+
+2. In add_number, handle negative zero first:
+   if self.is_negative_zero(x):
+       self.add("-0.0")
+       return
+
+3. Then keep the existing integer branch, but exclude negative zero from it (the early return does that). Alternatively, change the integer-condition to:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x) and not self.is_negative_zero(x):
+
+Why these steps fix it
+- By detecting negative zero before int coercion you preserve the sign bit and avoid converting -0.0 into 0.
+- math.copysign(1.0, x) < 0.0 reliably distinguishes -0.0 from +0.0 in Python without bit hacks.
+
+Minimal replacement example
+- Add utility:
+    @staticmethod
+    def is_negative_zero(x):
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+- At the top of add_number:
+    if self.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+That will make test_negative_zero pass and leaves your other formatting logic intact.

@@ -1,0 +1,68 @@
+What failed
+- Where it happens: in ArrayUtils.add, around lines 335–347 in your slice.
+- What happened: when both array and element are None but the caller passes expected_type=str (your test test_add_null_to_null_with_expected_type), the method raises TypeError instead of returning [""] or [None] typed as str. In Java the analogous bug produced a ClassCastException; here the code rejects the case outright.
+
+Why it fails (root cause, precise lines and variables)
+1. Wrong inference source: at line 336 the code does
+   inferred_type = type(array)
+   But type(array) when array is a Python list returns <class 'list'> — not the component type (e.g. str). So this doesn't actually give the element/component type you want when array is non-None.
+2. Bad fallback for both-None case: when both array and element are None the code ends up at line 340 and sets
+   inferred_type = object
+   (this is a generic fallback).
+3. Inconsistent check that raises the error: at lines 346–347 the code does
+   if inferred_type == object and expected_type != object:
+       raise TypeError
+   So when the fallback produced inferred_type == object but the caller supplied expected_type=str (expected_type != object), code raises TypeError. That is exactly what your failing test triggers: array is None, element is None → inferred_type becomes object → expected_type is str → raise TypeError. The method never returns the intended list [None] or a list with the expected component type.
+
+Why this is wrong
+- The method should honor the caller's expected_type when the method cannot infer anything from array or element (both None). Raising TypeError in that situation is incorrect: the caller explicitly requested str, so the function can and should create an array/list compatible with expected_type.
+- Using type(array) to infer component type is incorrect: it gives the list class, not the element type. You must inspect the array's elements (or have an explicit expected_type) to know the component type.
+
+Concrete, actionable fixes
+1. Prefer the caller's expected_type when provided:
+   - At the start of the inference, if expected_type is not None (or not object), use expected_type as the inferred component type immediately.
+   - Do not raise TypeError if inferred_type is object but expected_type is supplied. Instead use expected_type.
+
+2. Infer from element before falling back to object:
+   - Use this order:
+     a) if expected_type is provided (and not generic object), set component_type = expected_type
+     b) elif array is not None: try to infer component_type from the array's existing elements (e.g. look for first non-None element and take type(element)); if array is empty, you cannot infer from it
+     c) elif element is not None: component_type = type(element)
+     d) else: component_type = object (or use expected_type if it was provided earlier)
+   - This avoids using type(array) (the list type) as the component type.
+
+3. Remove the raising behavior in lines 346–347:
+   - Instead of raising TypeError when inferred_type == object and expected_type != object, accept expected_type and proceed to create the new list typed for the caller.
+   - Only raise if there is an actual type mismatch (e.g., expected_type is not compatible with a non-None element already present in the array), not because you couldn't infer the type.
+
+Minimal patch sketch (pseudo-Python)
+- Replace the inference block (lines ~335–347) with:
+
+    if expected_type is not None and expected_type is not object:
+        component_type = expected_type
+    elif array is not None:
+        # try to infer from existing elements in array
+        component_type = None
+        for e in array:
+            if e is not None:
+                component_type = type(e)
+                break
+        if component_type is None and element is not None:
+            component_type = type(element)
+        if component_type is None:
+            component_type = object
+    elif element is not None:
+        component_type = type(element)
+    else:
+        # both array and element are None, fall back to expected_type if present,
+        # otherwise to object
+        component_type = expected_type if expected_type is not None else object
+
+- Then stop raising TypeError simply because component_type == object and expected_type != object.
+
+Extra note about tests and behavior
+- Your test expects ArrayUtils.add(None, None, expected_type=str) to return [None]. Given Python's dynamic typing you can't enforce the runtime "component type" for a list, but you can honor expected_type as the declared/semantic component type and return the correct list structure rather than raising.
+- Also fix any other uses of type(array) (line 336) that assume it gives element type — that will break inference for non-empty arrays of homogeneous elements.
+
+Summary in one line
+The code infers the wrong type (using type(array) which yields list class) and then, when both array and element are None, sets inferred_type to object and incorrectly raises TypeError if expected_type differs; instead the method should honor expected_type first, infer from element(s) not from type(array), and not raise simply for missing inference.

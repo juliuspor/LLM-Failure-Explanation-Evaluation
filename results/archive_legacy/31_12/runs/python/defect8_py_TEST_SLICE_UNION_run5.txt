@@ -1,0 +1,49 @@
+What happened
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- The code mis-parses that input and raises a ValueError at line 244 ("Invalid locale format") because ch3 = locale_str[3] is '_' and the code checks that ch3 is between 'A' and 'Z'. That check fails and the method rejects the input.
+
+Why it fails (root cause)
+- The method assumes a country code occupies locale_str[3:5] and unconditionally checks those characters for being uppercase letters (lines 242–244).
+- It does not handle the valid case of an empty country with a variant separated by a double underscore (language__variant), e.g. 'fr__POSIX'.
+- For 'fr__POSIX' the bytes are:
+  - index 0 = 'f', 1 = 'r', 2 = '_', 3 = '_', 4 = 'P' ...
+  The code reads index 3 ('_') as if it were the first letter of a country code and rejects it because '_' is not between 'A' and 'Z'.
+- Also the branching around length is suspicious (line 236: "if length == 2:") — the code later indexes positions that require length >= 5 or more, so the length checks and index logic are inconsistent.
+
+Where it occurs (lines to inspect)
+- to_locale (definition at line 193)
+- length check at line 236
+- reading locale_str[3] and locale_str[4] at lines 242–244
+- raising ValueError at line 244
+- subsequent branch that expects locale_str[5] == '_' at line 250 and returns variant at 252
+
+Concrete steps to fix (step-by-step)
+1. Normalize the expected patterns to handle these four cases:
+   - "ll" (language only)
+   - "ll_CC" (language + country)
+   - "ll__VAR" (language + empty country + variant)
+   - "ll_CC_VAR" (language + country + variant)
+2. At the start of the branch that handles language prefixes, check that locale_str[2] exists and is '_' before touching indices >= 3. Replace the incorrect length/branching at line 236 with explicit checks for the underscore separators and minimal lengths:
+   - if len(locale_str) == 2: return Locale(locale_str[0:2])
+   - else if len(locale_str) >= 3 and locale_str[2] == '_': proceed to parse the country/variant.
+3. Distinguish the two underscore cases:
+   - If locale_str[3] == '_' (double underscore): treat country as empty and set variant = locale_str[4:]. Accept that variant can be any non-empty string; do not validate as uppercase letters only.
+   - Else parse country = locale_str[3:5]; validate length and characters for country when present. If there is a variant, require locale_str[5] == '_' and set variant = locale_str[6:].
+4. Add proper length checks before indexing (e.g. ensure len >= 5 before reading locale_str[3:5], ensure len >= 6 before reading locale_str[5]) to avoid IndexError.
+5. Example corrected-logic outline (pseudocode):
+   - if len == 2: return Locale(lang)
+   - if len >= 3 and locale_str[2] == '_':
+       if len == 3: return Locale(lang, '')   # uncommon but explicit
+       if locale_str[3] == '_':               # double underscore -> empty country
+           if len <= 4: raise ValueError("missing variant")
+           return Locale(lang, '', locale_str[4:])
+       else:
+           if len < 5: raise ValueError("incomplete country")
+           country = locale_str[3:5]
+           if not country.isalpha(): raise ValueError(...)
+           if len == 5: return Locale(lang, country)
+           if locale_str[5] != '_': raise ValueError(...)
+           return Locale(lang, country, locale_str[6:])
+6. Add unit tests for all four patterns including 'fr__POSIX' to ensure the fix works.
+
+This explains exactly where and why the input 'fr__POSIX' is rejected (line 242–244) and gives explicit, numbered steps to make the parsing accept the double-underscore empty-country case.

@@ -1,0 +1,44 @@
+What happened (symptom)
+- The test builds a TimePeriodValues series s and adds four SimpleTimePeriod entries.
+- The assertion expects s.get_max_middle_index() to return 1, but it fails because get_max_middle_index() returns a wrong (stale) value.
+
+Where it fails in the code
+- get_max_middle_index simply returns self._max_middle_index (see lines 449 and 451 in your slice).
+- The failure happens because self._max_middle_index does not reflect the real index of the entry with the largest middle time after the sequence of add(...) calls.
+
+Root cause (clear, concrete)
+- The code that updates the “max middle” information when you add entries does not store the computed result back into the instance attribute self._max_middle_index.
+- In other words, add(...) computes which element has the largest middle time but either:
+  - assigns that result to a local variable named max_middle_index (or similar) and never writes self._max_middle_index = max_middle_index, or
+  - fails to update self._max_middle_index when the insertion shifts indexes (insertion logic changes indices but the attribute is left unchanged).
+- As a result, get_max_middle_index() (lines 449 and 451) returns the old/stale value of self._max_middle_index instead of the correct index after the four adds.
+
+Why this explains your specific failure
+- You create two entries first (indices 0 and 1). The second entry (index 1) has the largest middle at that point, so code likely computed max_middle_index = 1.
+- Subsequent adds insert elements before/between the existing ones (SimpleTimePeriod(0,50) and (50,100)), which change element indexes. Because self._max_middle_index was never updated (or updated incorrectly), get_max_middle_index() returns the wrong index for the largest middle element and the assert fails.
+
+Exactly what to change (step-by-step fixes)
+1. Inspect add(...) (or whatever method performs insertion). Find where it computes the index of the element with the largest middle time. You will likely see a local variable named max_middle_index or similar.
+2. After the code computes the correct index value, assign it into the instance attribute:
+   - Add a line: self._max_middle_index = max_middle_index
+   - Place this assignment in every code path where the max index can change (initial add, insert, replacement, removal).
+3. If add(...) inserts elements (shifting indices of existing entries), ensure you recompute or adjust self._max_middle_index to reflect the shift. Two correct approaches:
+   - Recompute the max middle index from scratch after any insertion/removal (safe, simpler).
+   - Or update self._max_middle_index by incrementing/decrementing it when the insert/remove occurs before/after the stored index (only if you carefully handle all cases).
+4. Add a unit test that exercises out-of-order inserts (exactly your TEST sequence) to prevent regressions:
+   - Create the series, add the four ranges in the order you showed, then assert s.get_max_middle_index() == 1.
+5. Run the test suite and verify no other code path relies on the previous (wrong) behavior.
+
+Minimal example patch (conceptual)
+- Before (problem): local assignment only
+    max_middle_index = computed_value
+    # no assignment to self._max_middle_index
+- After (fix):
+    max_middle_index = computed_value
+    self._max_middle_index = max_middle_index
+
+Why this is safe
+- get_max_middle_index() is trivial (line 449/451). Making sure self._max_middle_index is set correctly guarantees that method returns the true current value.
+- If you prefer safety over micro-optimizations, recomputing the max index after any structural change avoids subtle bugs around index shifts.
+
+If you want, paste the add(...) method here and I will point to the exact line(s) to change and provide a ready-to-apply patch.

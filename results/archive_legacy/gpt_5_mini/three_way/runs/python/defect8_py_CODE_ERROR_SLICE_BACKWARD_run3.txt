@@ -1,0 +1,56 @@
+What happened (what failed)
+- Input: "fr__POSIX" (length 9).
+- The code raised ValueError at the uppercase-country check (around lines 237–240):
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why it failed (root cause)
+1. The string "fr__POSIX" encodes language="fr", an empty country, and variant="POSIX". That means index 2 is '_' and index 3 is also '_' (no country characters).
+2. The code assumes that whenever length != 2 the country must be exactly two uppercase letters (ch3 and ch4). It therefore reads locale_str[3] and locale_str[4] and requires them to be 'A'..'Z'.
+3. For "fr__POSIX", locale_str[3] == '_' (not an uppercase letter) so the check fails and ValueError is raised.
+4. The initial length check logic (line ~222):
+     if length != 2 and length != 5 and length < 7:
+   is also misleading/fragile (it does not clearly express the intended allowed lengths), but it is not the direct cause here. The direct cause is the code does not allow an empty country part (two consecutive underscores), yet the input uses an empty country with a variant.
+
+Where this occurs (specific lines)
+- length is computed at line 222.
+- the language-only fast return is at line 231 (if length == 2).
+- the country-character extraction and validation that fails are at lines 237–240 (ch3/ch4 and their range checks).
+
+How to fix it (concrete steps)
+Option A — Support an empty country (minimal change)
+1. After confirming locale_str[2] == '_' (line ~235), check whether the country is present:
+   - If locale_str[3] == '_', treat country as "" and proceed to parse the variant starting at index 4 (or 5 depending on underscores).
+2. Adjust the extraction/validation so you only require two uppercase letters when the country substring is present.
+   Concretely:
+   - If locale_str[3] == '_' then set country = "" and expect the next underscore for a variant at locale_str[4] (or adjust indexing accordingly).
+   - Else read ch3/ch4 and validate they are 'A'..'Z' as the code currently does.
+
+Option B — Simpler and robust: split and validate components
+1. Replace the positional index parsing with splitting:
+   parts = locale_str.split('_', 2)   # max 2 splits -> up to 3 parts
+   This yields [language], [language,country], or [language,country,variant].
+2. Validate:
+   - parts[0] length == 2 and parts[0].islower()
+   - if len(parts) > 1: parts[1] length is 0 or 2 and (if 2) all uppercase
+   - if len(parts) == 3: parts[2] non-empty (variant can be any)
+3. Construct Locale(parts[0], parts[1] or "", parts[2] if present)
+
+Why Option B is better
+- Easier to read and reason about than relying on multiple index arithmetic checks.
+- Correctly handles empty country (empty string between two underscores) and variant-only forms.
+- Avoids off-by-one indexing bugs and the confusing length condition.
+
+Example minimal change (pseudocode)
+Replace the block from checking locale_str[2] onward with:
+   if locale_str[2] != '_': raise ...
+   parts = locale_str.split('_', 2)
+   language = parts[0]
+   country = parts[1] if len(parts) > 1 else ""
+   variant = parts[2] if len(parts) > 2 else None
+   # validate language, country (if non-empty must be 2 uppercase letters), etc.
+
+Summary
+- The code fails because it assumes a two-letter uppercase country always exists when a variant follows, but "fr__POSIX" uses an empty country (two underscores), so locale_str[3] is '_' and the uppercase-letter check fails. Fix by allowing an empty country (handle double underscore) or switch to splitting and explicit validation.

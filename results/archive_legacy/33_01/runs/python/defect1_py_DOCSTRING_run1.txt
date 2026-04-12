@@ -1,0 +1,75 @@
+I can’t tell exactly which line in your source is throwing the error because you didn’t include the code, but I can explain, precisely and concretely, the root cause that matches the behavior you described and the docstring, and I’ll give exact, actionable fixes with the variable and method names you showed.
+
+What happened
+- You called the factory with a positive hours_offset and a negative minutes_offset (for example hours_offset == 2 and minutes_offset == -15).
+- The factory raised ValueError. That is exactly what the docstring says should happen: the combination (+ve hour, -ve minute) is invalid.
+- In other words, the code is enforcing the rule that the sign of minutes must not be negative when hours is positive. The failure is not a random crash — it’s an intentional validation failure.
+
+Why it fails (root cause)
+- The method takes two inputs: hours_offset and minutes_offset.
+- It performs validation that enforces:
+  - hours_offset is between -23 and +23,
+  - minutes_offset is between -59 and +59,
+  - and minutes_offset must have a sign consistent with hours_offset (specifically, minutes < 0 is not allowed when hours > 0).
+- The combination (2, -15) violates the “sign consistency” rule. The code detects that and raises ValueError.
+- This is consistent with the docstring which explicitly lists (2, -15) => ValueError.
+
+Where in the code this likely happens
+- The check will be in the factory method that you described, probably named something like get_time_zone_for_offset or get_fixed_offset_zone (your docstring calls it “this factory”).
+- Look for a block that validates hours_offset and minutes_offset. It will look like one of these patterns:
+  - if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("minutes must not be negative when hours is positive")
+  - or a stronger combined-offset check that computes total_seconds = hours_offset*3600 + minutes_offset*60 and then checks for invalid sign combinations or bounds and raises ValueError when out of range.
+
+Why you might have expected it not to fail
+- If you expected (2, -15) to normalize to +01:45 or to +02:00 minus 15 minutes, that expectation is incorrect given the docstring. The factory is designed to accept only certain sign combinations; it does not perform cross-sign normalization.
+- If your callers sometimes pass minutes with the opposite sign (e.g., you build minutes as a signed delta and hours as a separate signed field), that mismatch will trigger the validation.
+
+How to fix it (concrete steps)
+Pick one of these three approaches depending on the intended behavior:
+
+1) If the factory should reject mixed signs (current docstring behavior) — fix callers
+   - Find every call site that passes hours_offset and minutes_offset.
+   - Ensure callers pass minutes_offset with the same sign as hours_offset except when hours_offset == 0 (zero hours can take either sign).
+   - Example: instead of call_factory(2, -15), change to call_factory(1, 45) or to call_factory(2, 15) depending on desired offset.
+
+2) If the factory should accept mixed signs and normalize to a single signed offset (change the factory to normalize)
+   - In the factory method (e.g., get_fixed_offset_zone or whatever your method name is), replace the mixed-sign validation with normalization code:
+     - Compute total_minutes = hours_offset * 60 + minutes_offset
+     - Validate total_minutes is between -1439 and +1439 (i.e., -23*60 -59 .. +23*60 +59)
+     - From total_minutes compute normalized_hours = total_minutes // 60 and normalized_minutes = abs(total_minutes % 60)
+     - Use normalized_hours and normalized_minutes to build the DateTimeZone (preserving the sign on hours and using absolute minutes).
+   - Example code sketch:
+     - total_minutes = hours_offset * 60 + minutes_offset
+     - if total_minutes < -1439 or total_minutes > 1439: raise ValueError(...)
+     - sign = 1 if total_minutes >= 0 else -1
+     - norm_hours = abs(total_minutes) // 60 * sign
+     - norm_minutes = abs(total_minutes) % 60
+     - (then construct the zone using norm_hours and norm_minutes)
+   - This allows mixed input like (2, -15) → total_minutes = 105 → +1 hour 45 minutes or more commonly (2,-15) → 2*60 -15 = 105 → +01:45. Decide if that normalization is what you want (note docstring indicates mixed-sign (+,-) is invalid, so this would be a behavior change).
+
+3) If the factory should accept minutes as an absolute offset to be independently signed (rare)
+   - Change the API to accept a single signed total offset (minutes or seconds) rather than separate hours and minutes to avoid ambiguous sign rules.
+   - Update callers to pass a single value computed once: total_minutes = hours_offset*60 + minutes_offset, and pass that single signed value.
+
+Exact validation bounds to use
+- If you allow normalization, ensure total offset in seconds or minutes is within +/- 23:59:59.000:
+  - In minutes: check total_minutes ∈ [-1439, +1439] (23*60 + 59 = 1439)
+  - If you track seconds, check total_seconds ∈ [-86399, +86399]
+- If you keep current sign rules, ensure you explicitly check:
+  - if hours_offset > 0 and minutes_offset < 0: raise ValueError("minutes must not be negative when hours is positive")
+  - if hours_offset < 0 and minutes_offset > 0: that is allowed per docstring (e.g., (-2,15) -> -02:15), but be sure your code handles it by applying the negative sign to both components when computing total offset.
+
+What to change in your code (concrete one-line fixes)
+- If the failing line is something like:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("negative minutes not allowed with positive hours")
+  and you intended normalization, replace it with:
+    total_minutes = hours_offset*60 + minutes_offset
+    if total_minutes < -1439 or total_minutes > 1439:
+        raise ValueError("offset out of range")
+  and compute hours/minutes from total_minutes as shown above.
+
+If you want I can:
+- Inspect the exact failing line if you paste the method body (I’ll point to the exact line number and give a one-line patch), or
+- Produce a ready-to-drop-in corrected implementation that either enforces the current docstring rules or performs normalization — tell me which behavior you want.

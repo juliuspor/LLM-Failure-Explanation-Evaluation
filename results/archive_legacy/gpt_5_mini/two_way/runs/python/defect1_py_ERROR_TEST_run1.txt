@@ -1,0 +1,72 @@
+What failed
+- The test error "ValueError: Minutes out of range: -15" occurs when the test calls:
+  DateTimeZone.for_offset_hours_minutes(0, -15)
+  So minutes == -15 is being rejected by the implementation in hit01_timezone.py.
+
+Where the bug is (what your code is doing)
+- Inside DateTimeZone.for_offset_hours_minutes (in hit01_timezone.py) there is a minutes validation that rejects negative minute values. Concretely it does something like:
+  if minutes < 0 or minutes > 59:
+      raise ValueError("Minutes out of range: %d" % minutes)
+  That causes minutes == -15 to raise immediately, so the method never computes the intended negative offset (-00:15).
+- This validation is too strict: tests (and Joda-Time semantics the tests expect) allow minutes in the range -59..+59. Negative minutes are valid when hours are zero or negative (and for negative hours minutes should further be treated as contributing to the negative offset).
+
+Why that behaviour is incorrect for the tests
+- The tests expect:
+  - (0, -15) -> offset -00:15
+  - (-2, 15) -> offset -02:15 (minutes should be treated as extending the negative magnitude when hours < 0)
+  - (-2, -15) -> offset -02:15
+  - (2, -15) -> ValueError (positive hours with negative minutes is invalid)
+- The current validation rejects any negative minutes outright, so valid cases like (0, -15), (-2, 15), (-2, -15) fail with "Minutes out of range".
+
+Where to change it (exact method and variables)
+- File: hit01_timezone.py
+- Method: DateTimeZone.for_offset_hours_minutes
+- Variables: hours, minutes, offset_millis (or however you name the computed millisecond offset)
+
+Exact behavioral fix (clear steps)
+1. Allow minutes in the range -59..+59 instead of requiring non-negative minutes.
+   Replace the old check:
+     if minutes < 0 or minutes > 59:
+         raise ValueError("Minutes out of range: %d" % minutes)
+   with:
+     if minutes < -59 or minutes > 59:
+         raise ValueError("Minutes out of range: %d" % minutes)
+
+2. Decide the sign of the minute component relative to hours:
+   - If hours > 0 and minutes < 0: raise ValueError (mixed signs not allowed for positive hours).
+   - If hours < 0:
+       make minutes negative (minutes = -abs(minutes)) so (-2, 15) and (-2, -15) both produce -02:15.
+   - If hours == 0:
+       keep minutes as provided (so (0, -15) -> negative offset, (0, 15) -> positive offset).
+
+3. Compute offset in milliseconds by adding hour and minute contributions:
+   offset_millis = hours * 3600000 + minutes * 60000
+   (Because after step 2 minutes already has the correct sign relative to hours.)
+
+Minimal corrected code sketch
+- Replace the validation and sign logic with something like:
+
+    # Validate bounds
+    if minutes < -59 or minutes > 59:
+        raise ValueError("Minutes out of range: %d" % minutes)
+
+    # Enforce sign rules
+    if hours > 0 and minutes < 0:
+        raise ValueError("Positive hours with negative minutes not allowed")
+    if hours < 0:
+        minutes = -abs(minutes)   # ensure minutes extend the negative magnitude
+    # hours == 0: keep minutes' sign as given
+
+    offset_millis = hours * 3600000 + minutes * 60000
+    # build id string from hours and minutes as needed
+
+Why this fixes the failing test
+- With the above change:
+  - (0, -15) passes the bounds check (-15 in -59..59), hours==0 keeps minutes negative, offset_millis becomes -900000 and no ValueError is raised.
+  - (-2, 15) converts minutes to -15 and computes -2h -15m = -8100000.
+  - (2, -15) still raises (mixed sign invalid).
+  - Out-of-range minute inputs like -60 or +60 still raise.
+
+Summary
+- Root cause: minutes validation rejected negative minutes outright.
+- Fix: accept minutes in -59..59, then apply sign rules that make minutes negative when hours < 0, preserve sign when hours == 0, and disallow negative minutes when hours > 0. Compute offset_millis as hours*3600000 + minutes*60000.

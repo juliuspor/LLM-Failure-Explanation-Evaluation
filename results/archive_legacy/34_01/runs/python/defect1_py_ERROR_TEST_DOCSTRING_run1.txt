@@ -1,0 +1,55 @@
+What happened
+- You called DateTimeZone.for_offset_hours_minutes(hours_offset=-2, minutes_offset=-15).
+- The method raised ValueError: "Minutes out of range: -15".
+- The error comes from the input validation for minutes_offset: the code is treating minutes_offset as only valid when 0..59, so a negative minutes value is rejected outright.
+
+Why this is wrong (root cause)
+- The docstring explicitly allows negative minutes when hours is negative (example: (-2, -15) -> -02:15).
+- The implementation used a validation like:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError("Minutes out of range: %d" % minutes_offset)
+  This rejects -15 before the method can normalize the sign and build an offset. That check either predates the docstring behavior or was copied from an older version that required non-negative minutes.
+- Because minutes are rejected early, the code never reaches the normalization step that would combine hours and minutes into a signed total offset seconds (or millis).
+
+Where it occurs
+- In DateTimeZone.for_offset_hours_minutes(hours_offset, minutes_offset): the validation for minutes_offset is too strict. The failing variable names are minutes_offset (value -15) and hours_offset (value -2). The ValueError is thrown from the minutes-range check inside that method.
+
+How to fix it (exact, actionable steps)
+1. Replace the bad validation with logic that:
+   - allows minutes_offset in the range -59 .. +59,
+   - enforces that minutes_offset has compatible sign with hours_offset when hours_offset is non-zero,
+   - normalizes the final offset using the combined sign.
+
+2. Example replacement code (apply inside DateTimeZone.for_offset_hours_minutes):
+
+   # validate ranges
+   if hours_offset < -23 or hours_offset > 23:
+       raise ValueError("Hours out of range: %d" % hours_offset)
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError("Minutes out of range: %d" % minutes_offset)
+
+   # enforce sign compatibility when hours is non-zero
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Minutes must be non-negative when hours is positive")
+   if hours_offset < 0 and minutes_offset > 0:
+       raise ValueError("Minutes must be non-positive when hours is negative")
+
+   # normalize total minutes to a signed value
+   total_minutes = abs(hours_offset) * 60 + abs(minutes_offset)
+   if hours_offset < 0 or (hours_offset == 0 and minutes_offset < 0):
+       total_minutes = -total_minutes
+
+   # convert to seconds/millis and check overall bounds if required
+   total_seconds = total_minutes * 60
+   if total_seconds < - (23 * 3600 + 59 * 60) or total_seconds > (23 * 3600 + 59 * 60):
+       raise ValueError("Resulting offset exceeds +/- 23:59:00")
+
+   # then construct zone from total_seconds (or millis)
+
+3. If you prefer minimal change: change the minutes validation from (minutes < 0) to (minutes < -59) so negative minutes are allowed, and add the sign-compatibility checks shown above.
+
+Why this fixes the failing test
+- With the corrected checks, hours_offset = -2 and minutes_offset = -15 pass validation.
+- The normalization computes total_minutes = -(2*60 + 15) = -135, which yields a zone id "-02:15" as expected.
+
+If you want, paste the current implementation of DateTimeZone.for_offset_hours_minutes and I will insert a patch with exact line numbers and test cases.

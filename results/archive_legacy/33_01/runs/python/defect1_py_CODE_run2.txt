@@ -1,0 +1,48 @@
+What fails
+- The code reuses the parameter variable minutes_offset to hold the combined total minutes. That makes the intent unclear and hides the real arithmetic bug.
+- The actual arithmetic when hours_offset is negative is wrong for the intended sign-handling. The code does:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+    else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  That assigns minutes_offset to something that is meant to be "total minutes", but it mixes the original parameter name with a different meaning. This both harms readability and caused the failure you're seeing.
+
+Concrete example (shows where it breaks)
+- Input: hours_offset = -1, minutes_offset = 30
+  - hours_in_minutes = -60
+  - branch taken: minutes_offset = hours_in_minutes - minutes_offset = -60 - 30 = -90
+  - offset = safe_multiply(-90, MILLIS_PER_MINUTE) -> -90 * 60000 = -5_400_000
+  That is a valid value, but because the code mutates the minutes_offset parameter and uses that variable for the total minutes, callers and later code can be confused or get the wrong value if code is changed or inspected. The failure you observed comes from this confusion combined with the incorrect handling of sign when you intended to treat the minute portion as always positive and apply the sign of hours_offset to it.
+
+Where it happens (lines from your snippet)
+- Line: hours_in_minutes = hours_offset * 60
+- Line: if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+- Line: else: minutes_offset = hours_in_minutes + minutes_offset
+- Line: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The root cause is ambiguous and unsafe reuse of the parameter minutes_offset as the combined total minutes. That leads to a sign-handling bug: the code should compute a separate total_minutes value where the minutes component is applied with the sign of the hours component. Mutating the parameter obscures the algorithm and is the direct source of the incorrect result/behavior you observed.
+
+How to fix (clear steps)
+1. Do not reuse the parameter minutes_offset. Introduce a new variable total_minutes.
+2. Compute total_minutes using the sign of hours_offset. For example:
+   - total_minutes = hours_offset * 60
+   - if total_minutes < 0:
+       total_minutes -= minutes_offset   # subtract the minute component
+     else:
+       total_minutes += minutes_offset   # add the minute component
+   (This explicitly separates the signed hours contribution and the always-positive minute contribution.)
+3. Then compute offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Pass offset to cls.for_offset_millis(offset)
+
+Minimal corrected code sketch (replace the failing block)
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes
+    if total_minutes < 0:
+        total_minutes -= minutes_offset
+    else:
+        total_minutes += minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+This fixes the ambiguity, keeps the sign logic explicit, and prevents accidental reuse of the minutes_offset parameter.

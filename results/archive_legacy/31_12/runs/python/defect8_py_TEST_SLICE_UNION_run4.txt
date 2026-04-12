@@ -1,0 +1,30 @@
+What happened (where): In LocaleUtils.to_locale, the code at and around lines 236–252 is assuming the input has a two-letter country code and uses fixed indices for country and variant. The failing test input 'fr__POSIX' reaches those lines and triggers a ValueError at line 244.
+
+Why it failed (root cause, exact lines):
+- At line 236 the code uses the wrong condition: `if length == 2:`. That condition is false for 'fr__POSIX' (length 9), so the intended parsing branches are mis-selected.
+- The parser then still proceeds to treat country/variant using fixed indices:
+  - Lines 242–244 read `ch3 = locale_str[3]` and `ch4 = locale_str[4]` and validate they are A–Z. For 'fr__POSIX', `locale_str[3]` is '_' (because the country is empty and the input has a double underscore), so the check `if ch3 < 'A' or ch3 > 'Z'` fails and raises `ValueError(f"Invalid locale format: {locale_str}")` at line 244.
+- Even the slicing for returning the variant uses wrong offsets (line 252 uses `locale_str[6:]`), which does not match where the variant actually starts when the country is empty. In short: the code assumes a present two-letter country at fixed indexes and does not handle the empty-country pattern `ll__variant`.
+
+Fix (concrete steps you can apply):
+1. Fix the incorrect condition at line 236. The code should enter the branch for country/variant when the string is long enough (e.g. `if length >= 5:`), not when length == 2.
+2. Add explicit handling for an empty country (double underscore) case:
+   - If `locale_str[2] == '_'` and `locale_str[3] == '_'`, treat country as empty and set variant = `locale_str[4:]`.
+   - Otherwise, parse country as `locale_str[3:5]` and validate the two letters (the existing checks at lines 242–244 apply only when those characters are country letters).
+3. Fix the variant start index depending on whether country was present:
+   - If country present and variant present, verify `locale_str[5] == '_'` and use `locale_str[6:]`.
+   - If country empty, use `locale_str[4:]` for the variant.
+
+Example of minimal corrected logic (replace the block at 236–252):
+- if length >= 5:
+    - if locale_str[2] != '_': raise error
+    - if locale_str[3] == '_' and length > 4:
+        - # empty country, variant starts at index 4
+        - return Locale(locale_str[0:2], '', locale_str[4:])
+    - else:
+        - ch3 = locale_str[3]; ch4 = locale_str[4]; validate A–Z
+        - if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+        - if locale_str[5] != '_': raise error
+        - return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fixes the test: With these changes 'fr__POSIX' is recognized as language='fr', country='', variant='POSIX' (variant taken from index 4 onward) instead of raising a ValueError when the parser reads an underscore as if it were a country letter.

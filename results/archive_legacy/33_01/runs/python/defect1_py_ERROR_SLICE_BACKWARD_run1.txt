@@ -1,0 +1,52 @@
+What happened (where it failed)
+- At line 396 the code tests the value of minutes_offset:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The exception ValueError: Minutes out of range: -15 means minutes_offset was -15 when that check ran (the check is at lines 396–397).
+
+Why it failed (root cause)
+- The function expects minutes_offset to be in the range 0..59, but the caller or earlier code produced a negative minute value (-15). Because the code rejects any negative minutes, it raises the error immediately.
+- Typical ways -15 can appear:
+  - You computed minutes_offset from a signed time difference (for example using an offset that can be negative: -0:15) and kept the sign only on the minutes value instead of distributing it to hours and minutes.
+  - You subtracted minutes incorrectly (e.g., computed minutes_offset = local_minute - utc_minute and got -15).
+  - You read a timezone offset that is negative (e.g., UTC-00:15) but did not normalize hours and minutes.
+
+Why that matters
+- A negative minutes value is a valid component of a signed offset only when paired with the sign on hours (e.g., -1 hour and +45 minutes is not the right representation). Your code’s invariant is minutes_offset must be non‑negative; that invariant is violated by -15, so the code fails.
+
+Concrete fixes (exact steps you can apply)
+
+1) Fix the code that computes minutes_offset so it always returns 0..59
+- If you compute offset as total minutes, split it into hours and minutes properly:
+  - total = <signed total minutes>  # could be negative
+  - hours = total // 60  # floor division keeps sign
+  - minutes = abs(total) % 60  # minutes is always non-negative 0..59
+- Replace whatever produces minutes_offset with the above so minutes_offset is in 0..59 and the sign is carried by hours.
+
+2) Or make the validation accept signed offsets and normalize before using them
+- Change the check at lines 396–397 to accept -59..59 and then normalize:
+  - if minutes_offset < -59 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - Then normalize to non-negative minutes and adjust hours:
+    - if minutes_offset < 0:
+    -     hours -= 1
+    -     minutes_offset = 60 + minutes_offset
+  - This ensures minutes_offset becomes 0..59 and hours is adjusted to keep the same total offset.
+
+3) Use a timedelta/total-seconds approach (recommended for robustness)
+- Compute a signed total seconds or minutes once and derive hours and minutes consistently:
+  - total_seconds = int(timedelta_object.total_seconds())  # can be negative
+  - total_minutes = total_seconds // 60
+  - hours = total_minutes // 60
+  - minutes = abs(total_minutes) % 60
+- This avoids sign bugs when offsets cross hour boundaries.
+
+Immediate short check to add (quick guard)
+- Before the current check at line 396, log or assert the source of minutes_offset:
+  - # debug: where did this value come from?
+  - assert isinstance(minutes_offset, int)
+  - # if you expect non-negative minutes, raise an informative error upstream
+- Add a unit test that constructs a negative total offset (e.g., -15 minutes or -75 minutes) and verifies your function produces the same total offset after normalization.
+
+Summary in one line
+- The code throws ValueError at lines 396–397 because minutes_offset is -15; fix the producer of minutes_offset so it yields a non-negative minute component (0..59) by splitting a signed total into hours and absolute minutes, or adjust the validation and normalize negative minutes into hours and positive minutes.

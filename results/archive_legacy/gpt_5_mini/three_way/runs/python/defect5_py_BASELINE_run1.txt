@@ -1,0 +1,60 @@
+What happened (root cause)
+- At line 335 you do: inferred_type = type(array) when array is not None. type(array) returns the list class (e.g. <class 'list'>), not the component/element type. That makes inferred_type meaningless for element-type inference.
+- When both array and element are None your code sets inferred_type = object (line 340). Then at line 346 you check:
+  if inferred_type == object and expected_type != object: raise TypeError(...)
+  The test calls ArrayUtils.add(None, None, expected_type=str). inferred_type is object, expected_type is str, so the code raises the TypeError in the test. But this is wrong: when both array and element are None you should not treat that as an error if the caller asked for expected_type=str. Instead you should honor expected_type and create a list whose element type is str (or at least not raise).
+
+Where the bug occurs (lines/variables)
+- Wrong inference: lines 335–337:
+    if array is not None:
+        inferred_type = type(array)        # WRONG: type(array) is list, not element type
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+- Wrong decision raising the exception: lines 346–351:
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+
+Why this produces the error in the failing test
+- Test calls ArrayUtils.add(None, None, expected_type=str).
+- array is None, element is None → inferred_type becomes object (line 340).
+- expected_type is str → condition at line 346 true → raises TypeError complaining about casting Object[] to str[], which matches the failure message.
+
+How to fix it (concrete steps)
+1. Infer the component/element type correctly when an existing array is provided:
+   - If array is not None and contains at least one non-None element, set inferred_type = type(that non-None element).
+   - If array is not None but all elements are None (or array is empty), prefer expected_type if provided, else fall back to object (or use element if non-None).
+2. When both array and element are None, do not raise simply because inferred_type == object; instead if expected_type is provided, use it to construct the result (or at least do not error).
+3. Remove the current simplistic cast-check that raises whenever inferred_type == object and expected_type != object; instead perform the check after you've chosen a final component type and only raise if a real mismatch exists between concrete types (e.g., element actual type incompatible with expected_type), not merely because you started with object.
+
+Minimal replacement code (drop-in for lines 335–351)
+Replace the inference block and the check with something like:
+
+    # infer component type (element type), not the list class
+    if array is not None:
+        # prefer any non-None element already in array
+        inferred_type = None
+        for v in array:
+            if v is not None:
+                inferred_type = type(v)
+                break
+        # if no concrete element type found, try expected_type
+        if inferred_type is None:
+            inferred_type = expected_type if expected_type is not None else object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        # both array and element are None: use expected_type if provided
+        inferred_type = expected_type if expected_type is not None else object
+
+    # do not raise simply because we ended up with object; only raise if there is
+    # an actual incompatibility between element (if non-None) and expected_type
+    if expected_type is not None and element is not None:
+        if not isinstance(element, expected_type):
+            raise TypeError(f"Element of type {type(element).__name__} incompatible with expected {expected_type.__name__}")
+
+Notes and rationale
+- The key is that type(array) was the wrong thing to examine; you must inspect array contents (or use expected_type) to infer the component type.
+- The test expects that when both array and element are None but expected_type=str, the function should return [None] without raising. The suggested changes make expected_type guide the result when nothing concrete exists to infer from.
+- The proposed change is specific to the variables/lines identified and provides an explicit replacement you can apply.

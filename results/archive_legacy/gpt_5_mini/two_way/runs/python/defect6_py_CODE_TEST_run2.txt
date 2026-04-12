@@ -1,0 +1,59 @@
+What happened (where it fails)
+- Failure occurs in add_number when x is -0.0. The test test_negative_zero expects the output "-0.0", but the code prints "0". The root cause is in this line (near the top of add_number):
+
+      if x == int(x) and not math.isinf(x) and not math.isnan(x):
+
+  For x == -0.0 that condition is True because -0.0 == 0 and int(-0.0) == 0. The code then executes
+
+      value = int(x)        # value becomes 0
+      ...
+      self.add(str(value))  # adds "0"
+
+  Converting to int and then formatting that int loses the negative sign of -0.0. That is exactly where the sign is dropped.
+
+Why this happens (why it’s the root cause)
+- In IEEE-754 floats, -0.0 compares equal to 0.0 (Python: -0.0 == 0.0 is True), so any branch that treats a float as an exact integer by equality loses the sign if you then turn it into an int. The code’s integer branch assumes equality with an int implies it’s a plain integer value with no sign subtleties — but negative zero is an exception: it is numerically equal to 0 but carries a negative sign bit that must be preserved in output.
+
+- A related subtlety: the earlier check that inserts a space when a negative number follows a minus operator uses:
+
+      if x < 0 and prev == '-':
+
+  For x == -0.0, x < 0 is False (because -0.0 == 0.0), so that test also fails to detect negative zero. That’s a separate symptom of the same underlying issue: treating -0.0 as if it were the same as +0.0.
+
+Where to change the code (concrete steps)
+1. Detect negative zero before you enter the integer branch. Add a utility is_negative_zero and call it early. The tests expect such a utility (they call CodeConsumer.is_negative_zero), so implement/use it.
+
+2. Use the negative-zero test when deciding whether to add a leading space after a minus and when deciding how to format the number.
+
+3. If x is negative zero, explicitly output "-0.0" (or otherwise preserve the sign) and return without converting to int.
+
+Minimal concrete fixes (what to change)
+- Implement is_negative_zero:
+
+    @staticmethod
+    def is_negative_zero(x: float) -> bool:
+        return x == 0.0 and math.copysign(1.0, x) < 0
+
+  (Alternatively: math.copysign(1.0, x) == -1.0; or inspect bits with struct.unpack if preferred.)
+
+- In add_number, check negative zero first and handle it:
+
+    if CodeConsumer.is_negative_zero(x):
+        # preserve sign of negative zero and format as -0.0
+        prev = self.get_last_char()
+        if prev == '-':
+            self.add(" ")
+        self.add("-0.0")
+        return
+
+- Update the earlier space-insertion check (the one that uses x < 0) to account for negative zero:
+
+    prev = self.get_last_char()
+    if (x < 0 or CodeConsumer.is_negative_zero(x)) and prev == '-':
+        self.add(" ")
+
+Why this fix works
+- It preserves the negative sign before any integer-equality logic turns -0.0 into 0 via int(x). The negative-zero check uses sign information (math.copysign) rather than numeric equality, so it distinguishes -0.0 from +0.0 and avoids the branch that strips the sign.
+
+Summary
+- The failure is caused by treating -0.0 as an integer-equal float and converting it to int( ) (value = int(x)), which removes the sign bit and yields "0". Detect negative zero before that branch (use math.copysign or an is_negative_zero helper), format it explicitly as "-0.0", and adjust the x < 0 check to include negative zero. This will make the test test_negative_zero pass.

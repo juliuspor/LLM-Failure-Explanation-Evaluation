@@ -1,0 +1,33 @@
+What happened (where it fails)
+- The method rejects negative minute values at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15). Because minutes_offset is -15 the method raises ValueError there and never reaches the later code that would combine the two parts. The failure happens exactly at that guard (line 396–397).
+
+Why it fails (root cause)
+- The code treats minutes_offset as if it must always be non‑negative (0..59), but the test (and the intended API) allows a negative minutes component to express offsets like -02:15. The later code (lines after the guard) attempts to combine a signed hours_offset and a minutes_offset, so the guard is inconsistent with that combination logic. In short: the input is rejected too early by the minutes range check.
+
+How to fix it (concrete steps)
+Pick one clear policy and implement it consistently. Two options, with exact changes you can make:
+
+Option A — require minutes to be non‑negative (API change):
+1. Document that minutes_offset must be 0..59 and the sign is taken from hours_offset.
+2. Change callers (e.g. the test) to pass positive minutes: DateTimeZone.for_offset_hours_minutes(-2, 15).
+This avoids changing the method body.
+
+Option B — accept a signed minutes component (fix the method) — recommended for backwards compatibility with your test:
+1. Change the validation to allow minutes_offset in [-59, 59] instead of [0, 59]:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Replace the existing sign-combining logic with an unambiguous total-minutes calculation. For example (replace lines where you compute minutes_offset and offset):
+   hours_in_minutes = hours_offset * 60
+   total_minutes = abs(hours_offset) * 60 + abs(minutes_offset)
+   sign = -1 if (hours_offset < 0 or minutes_offset < 0) else 1
+   offset = FieldUtils.safe_multiply(sign * total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Keep the existing try/except around safe_multiply.
+
+Why Option B fixes the root cause
+- It lets the method accept -15 for minutes, computes a consistent total of -135 minutes for (-2, -15), and then converts that to milliseconds. This matches the test expectation that the resulting zone id is "-02:15".
+
+Summary
+- The guard at lines 396–397 rejects negative minutes, which contradicts later code and your test. Either make callers pass positive minutes (Option A) or change the validation and combine signs explicitly (Option B). Option B is the minimal change to make your test pass.

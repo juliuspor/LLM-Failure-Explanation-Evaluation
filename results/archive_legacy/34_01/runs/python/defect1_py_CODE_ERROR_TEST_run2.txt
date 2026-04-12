@@ -1,0 +1,57 @@
+What happened (root cause)
+- At the top of the function you immediately reject any negative minute value:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  So when you call for_offset_hours_minutes(-2, -15) the code fails here with ValueError: Minutes out of range: -15. The code never gets to the later logic that tries to combine hours and minutes.
+
+Why that check is wrong for this API
+- The test expects to be able to express a negative offset like -02:15 by passing hours_offset = -2 and minutes_offset = -15. The current validation treats minutes_offset as always non-negative (0..59), but the caller uses negative minutes to indicate the same sign as the hours. Because of that mismatch, valid inputs for the intended API are rejected.
+
+Where in the code it occurs
+- The error occurs at the minutes validation line (the second if block after the hours-range check). Later code also has a problem: it overwrites minutes_offset when computing the combined minutes:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  Overwriting the input variable minutes_offset here makes the code harder to follow. But the immediate runtime failure is from the earlier validation that rejects negative minute values.
+
+How to fix it (concrete steps)
+1. Accept minutes that can be negative if the API intends that (or else document that minutes must be 0..59 and change tests). For the test shown, accept negative minutes.
+2. Normalize to a single total_minutes integer rather than mutating minutes_offset. Validate absolute minutes are within 0..59 and that the sign is consistent with hours (or handle hours==0 specially).
+3. Convert total minutes to millis safely and call for_offset_millis.
+
+A concrete corrected implementation (replace the body with this):
+
+    def for_offset_hours_minutes(cls, hours_offset: int, minutes_offset: int) -> 'DateTimeZone':
+        if hours_offset == 0 and minutes_offset == 0:
+            return cls.UTC
+        if hours_offset < -23 or hours_offset > 23:
+            raise ValueError(f"Hours out of range: {hours_offset}")
+        # Accept minutes passed with sign; require absolute value in 0..59
+        abs_minutes = abs(minutes_offset)
+        if abs_minutes < 0 or abs_minutes > 59:
+            raise ValueError(f"Minutes out of range: {minutes_offset}")
+        # Determine combined minutes with sign coming from hours_offset when minutes_offset has same sign
+        # If minutes_offset carries its own sign, prefer that; otherwise use sign of hours_offset.
+        if minutes_offset == 0:
+            total_minutes = hours_offset * 60
+        else:
+            # If hours and minutes have opposite signs, that is ambiguous; normalize by using sign of hours if hours != 0
+            if hours_offset == 0:
+                total_minutes = minutes_offset  # minutes may be negative
+            else:
+                sign = -1 if hours_offset < 0 else 1
+                total_minutes = hours_offset * 60 + sign * abs_minutes
+        try:
+            offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+        except ArithmeticError:
+            raise ValueError("Offset is too large")
+        return cls.for_offset_millis(offset)
+
+Notes:
+- This code enforces minutes magnitude <= 59 and handles the -2, -15 case: hours_offset * 60 = -120, + (-15) -> -135 minutes -> -02:15.
+- Alternatively, if your API should require minutes in 0..59 and infer the sign from hours, change tests instead and reject negative minutes in the validation (but your current test expects the opposite).
+
+Summary
+- The failure is caused by the early validation that rejects negative minutes (minutes_offset < 0), so for_offset_hours_minutes(-2, -15) raises ValueError before combining hours and minutes. Fix by validating abs(minutes_offset) and computing total_minutes without overwriting the input variable.

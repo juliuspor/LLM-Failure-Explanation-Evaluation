@@ -1,0 +1,56 @@
+What happened (root cause)
+- At lines 346–351 the code raises a TypeError whenever inferred_type == object and expected_type != object:
+  - Line 346 checks: if inferred_type == object and expected_type != object:
+  - Lines 347–351 raise a cast error.
+- That means if the code could only infer the element type as object (inferred_type == object) — for example because the source list was None or empty, or because the element being added is None — the code refuses to create a list whose component type is a more specific expected_type. It treats the generic object list as non-castable to List[expected_type] and throws a TypeError.
+
+Why this is wrong / where it fails
+- The check fires even when no real type information contradicts the requested expected_type.
+  - Case A: array is None and element is None. There is no evidence that the new list cannot safely be a List[expected_type]. The code should allow creating a List[expected_type], but it instead treats the inferred_type == object as an unfixable conflict and raises.
+  - Case B: array is empty (or all elements are None) so inferred_type == object, but the caller provided expected_type (e.g., int). The code still raises even though producing a List[int] is reasonable.
+- The problematic variable names/lines:
+  - inferred_type (checked on line 346)
+  - expected_type (checked on line 346 and used in the error message on lines 348–350)
+  - The raising happens at lines 347–351.
+
+Concrete symptom
+- When you call the function with array == None (or array with only None elements) and pass expected_type != object (for example expected_type=int), the function raises the TypeError from lines 347–351 instead of returning a new list of the expected type.
+
+Precise reason in plain terms
+- The code assumes that "object" as an inferred component type can never be converted into a more specific expected_type, and so blocks the operation. That assumption is wrong in the situations above because nothing in the actual data prevents the list from being of the expected_type.
+
+How to fix it (step-by-step, exact changes)
+1. Decide the intended behavior:
+   - If the caller supplies expected_type, prefer it when the array provides no stronger information (None/empty/all-None).
+   - Only raise TypeError when there is an actual incompatible concrete element in array (a non-None element whose type cannot be assigned to expected_type).
+
+2. Replace the strict check on line 346 with a check that inspects actual elements. Example patch (conceptual — adapt to your code style and utility functions):
+   - Current:
+     if inferred_type == object and expected_type != object:
+         raise TypeError(...)
+
+   - Replace with:
+     if inferred_type == object and expected_type != object:
+         # only raise if there is at least one concrete, incompatible element
+         if array is not None:
+             for el in array:
+                 if el is not None and not isinstance(el, expected_type):
+                     raise TypeError(...)
+         # if array is None or contains only None, accept expected_type (do not raise)
+
+   - Or, if you compute inferred_type from elements, set inferred_type = expected_type when array is None and element is None:
+     if array is None and element is None and expected_type is not None:
+         inferred_type = expected_type
+
+3. Ensure the error message still gives useful context (keep the same message lines 348–351) but only raise it where there is a real incompatibility.
+
+Short test cases to verify fix
+- array=None, element=None, expected_type=int -> should return [None] or a List[int] (depending on intended semantics) and not raise.
+- array=[], element=5, expected_type=int -> should return [5], not raise.
+- array=[1, "x"], element=2, expected_type=int -> should raise (non-int "x" incompatible).
+- array=[None, None], element=None, expected_type=str -> should not raise.
+
+Why this fix is safe
+- It only raises when there is concrete evidence (a non-None element of incompatible type) that the requested expected_type conflicts with existing elements. It does not reject the caller’s expected_type merely because the implementation could not infer a narrower type.
+
+If you want, tell me the surrounding code that sets inferred_type (how you compute it from array/element). I can give a precise patch adjusted to the actual variables and helper functions you have.

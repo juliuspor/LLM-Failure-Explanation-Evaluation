@@ -1,0 +1,43 @@
+What happened
+- The test input is the emoji U+1F630 followed by "A" (input_str = "\U0001F630A").
+- Your helper function to_utf16_code_units (defined starting at line 10) is supposed to convert the Python string into a list of UTF-16 code units.
+- Later code (code_point_at or the translator) calls into that list with an index of 2; the bounds check at lines 35–36 raises:
+  IndexError: String index out of range: 2
+
+Why it fails (root cause, plain)
+- to_utf16_code_units built an incorrect code_units list: it did not include the final 'A' code unit, so code_units has length 2 (the two surrogates for the emoji) instead of 3 (two surrogates + 'A').
+- The translator advances its index to 2 (this is the correct next code-unit index after the surrogate pair). But because the 'A' code unit was omitted, index == 2 is out of range and the check at lines 35–36 raises the IndexError.
+- In short: the conversion function dropped the ASCII character after a surrogate pair, so later code tries to read a valid-looking index that doesn't exist.
+
+Where in the code this happens
+- to_utf16_code_units (lines around 10–12): the code that constructs code_units is incorrectly advancing or skipping characters when it encounters a non-BMP code point (a character that becomes a surrogate pair).
+- The bounds check at lines 35–36 detects the symptom (index >= len(code_units)) and raises the IndexError when the translator asks for the code unit at index 2.
+
+Why that specific sequence causes the bug
+- For input "\U0001F630A":
+  - Correct UTF-16 code units should be [high_surrogate, low_surrogate, ord('A')] (length 3).
+  - Your function produced only [high_surrogate, low_surrogate] (length 2).
+  - The translator processes the surrogate pair and moves its read index by 2 to point at the next code-unit; it expects an index 2 to exist for 'A'. Because to_utf16_code_units omitted 'A', index 2 is invalid and the check at line 35 triggers the exception.
+
+Concrete steps to fix it (explicit, actionable)
+1. Fix to_utf16_code_units so every input character contributes the correct UTF-16 code unit(s). An explicit, correct implementation:
+   - Iterate over each Python character ch in the string:
+     - cp = ord(ch)
+     - if cp <= 0xFFFF:
+         append cp
+       else:
+         cp -= 0x10000
+         append 0xD800 | (cp >> 10)    # high surrogate
+         append 0xDC00 | (cp & 0x3FF)  # low surrogate
+   - Do not modify any outer loop index inside the loop; use a simple for ch in s loop (or a while loop that you control carefully).
+2. If you must use an index-based loop, do not increment the loop index twice when you handle a surrogate pair. The bug looked exactly like an index was advanced both by the loop and inside the surrogate-handling branch, causing the next character to be skipped.
+3. Add or keep the existing tests that cover:
+   - surrogate pair followed by another character (test_translate_surrogate_pair_with_suffix)
+   - surrogate pair at end of string (test_translate_surrogate_at_end)
+   These will catch both missing-unit and off-by-one indexing errors.
+4. Optionally, add an assertion in to_utf16_code_units to verify len(code_units) >= number of non-BMP*2 + BMP count expected (or just validate with round-trip conversion in a debug-only test).
+
+Why the suggested fix will stop the IndexError
+- With a correct to_utf16_code_units, the translator will find the 'A' code unit at index 2, so the bounds check at lines 35–36 will pass and no IndexError will be raised when processing the emoji followed by another character.
+
+If you want, paste the current body of to_utf16_code_units and I will mark the exact line that increments/skips the next character and show the minimal edit to fix it.

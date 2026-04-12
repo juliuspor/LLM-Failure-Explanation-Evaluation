@@ -1,0 +1,52 @@
+What happened (where it fails)
+- The test calls: result = ArrayUtils.add(None, None, expected_type=str)
+- Execution path:
+  1. array is None and element is None, so the code sets inferred_type = object (lines starting with "if array is not None: ... elif element is not None: ... else: inferred_type = object").
+  2. It then builds the new list (ArrayUtils._copy_list_grow1(...)) and stores the None element into it — that part succeeds.
+  3. Next the code checks the expected_type guard:
+     if expected_type is not None:
+         if inferred_type == object and expected_type != object:
+             raise TypeError(...)
+
+   Because inferred_type == object and expected_type == str, the guard raises a TypeError. That is exactly what makes the test fail.
+
+Why this is wrong (root cause)
+- The code treats "inferred_type == object" as an error when expected_type is more specific than object. But inferred_type became object only because element was None (and array was None). None has no concrete element type, so inferring object is intentional and valid per the docstring. The docstring says: "If the input list is None, a new one element list is returned whose component type is the same as the element, unless the element itself is None, in which case the return type is List[object]." Returning a List[object] containing None should not be considered a type mismatch against an expected_type argument; None is assignable to any reference type and the docstring anticipates object when element is None.
+- In short: the code conflates "I had to fall back to object because element was None" with "this is an incompatible runtime list type" and raises. The TypeError is raised in the expected_type-check block even though the situation (element == None) should be acceptable.
+
+Where to change it (specific lines and changes)
+Option A — simplest: do not raise when element is None:
+- Replace the raise-condition
+    if inferred_type == object and expected_type != object:
+with
+    if inferred_type == object and element is not None and expected_type != object:
+This change keeps the existing checking behavior when an actual element exists, but allows the None element fallback (object) to coexist with any expected_type.
+
+Option B — use expected_type as tiebreaker when element is None:
+- Compute inferred_type like:
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+This makes the new list use expected_type when no array and element is None. Use this only if you actually want the returned list to claim the more specific component type rather than object.
+
+Option C — explicitly allow None to be placed into an expected_type list:
+- Keep inferred_type == object but skip the TypeError raise when element is None (same effect as Option A), or change the error message/semantics accordingly.
+
+Concrete minimal patch (Option A) — replace the check with:
+    if expected_type is not None:
+        if inferred_type == object and element is not None and expected_type != object:
+            raise TypeError(...)
+
+Why this fix works
+- When element is None, the function legitimately falls back to object; it should not be considered a type mismatch just because an expected_type was supplied. The modified condition only raises when you actually inferred object while you also have a non-None element (meaning you mismatched a real element type against expected_type).
+
+One more note about another bug you might want to address
+- The code uses inferred_type = type(array) when array is not None. type(array) returns list (the container class), not the element component type. If ArrayUtils._copy_list_grow1 expects a component/element type, you likely intended to infer the element type from an element inside the array (e.g. type(array[0]) if array is non-empty) or to accept an explicit expected_type. If _copy_list_grow1 is expecting the container class, then this is fine; otherwise review that line too.
+
+Summary
+- The test fails because add() treats element==None (which sets inferred_type == object) as a mismatch with a supplied expected_type and raises TypeError. Change the TypeError condition to ignore expected_type when element is None (or adopt Option B if you want to use expected_type as the component type when element is None).

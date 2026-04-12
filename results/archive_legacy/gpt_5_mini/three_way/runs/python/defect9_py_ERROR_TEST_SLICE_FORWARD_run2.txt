@@ -1,0 +1,48 @@
+What happened
+- The test passes a None inside the search/replace arrays (e.g. replacement_list = ["c", None]).
+- Somewhere in the code the function calls len(...) on an array element that can be None. That raises TypeError: object of type 'NoneType' has no len().
+
+Where it occurs
+- The failing call to len(...) is happening against an element of search_list or replacement_list.
+- Two exact places in the slice are suspicious:
+  - Line 94: start = text_index + len(search_list[replace_index]) — this calls len(...) on search_list[replace_index] without proving it isn't None.
+  - Line 104: the expression uses len(search_list[i]) in the compound condition. If the guard that checks for search_list[i] is None does not run before len(...) (due to ordering or earlier scans that call len() too), len(None) can be executed.
+- There are also earlier points not shown in full where the code computes an "increase" using lengths (lines 83–85). If that pre-scan iterates search_list and uses len(...) without first skipping None entries, it will also raise the same error.
+
+Why this exact test triggers it
+- Tests intentionally include None values in the replacement/search arrays to check null-safety.
+- The code assumes array entries are strings and calls len(...) on them. When an entry is None the len(...) call fails.
+
+Root cause
+- The algorithm does not consistently guard every place that calls len(search_list[i]) or len(replacement_list[i]) against None values.
+- Relying on an OR chain to protect len(...) can fail if the checks are not guaranteed to run in safe order or if other parts of the function call len(...) earlier. In short: you call len(...) before confirming the value is not None.
+
+How to fix it (concrete steps)
+1. Consistently treat None array entries as "no-op" (leave the input unchanged) or as empty strings — match Java StringUtils behavior (it treats replacement entries that are null as no-replacement).
+2. Before any len(...) call on an array element, check for None. Examples:
+   - Replace
+       start = text_index + len(search_list[replace_index])
+     with
+       if search_list[replace_index] is None:
+           # skip or treat as zero-length (no match)
+           continue  # or handle according to desired behavior
+       start = text_index + len(search_list[replace_index])
+   - Replace the condition block around line 102–105 with an order that explicitly checks None first, or split it:
+       if no_more_matches_for_repl_index[i]:
+           continue
+       s = search_list[i]
+       r = replacement_list[i]
+       if s is None or len(s) == 0 or r is None:
+           no_more_matches_for_repl_index[i] = True
+           continue
+       temp_index = text.find(s, start)
+3. Also ensure any pre-scan (the "increase" calculation) skips None items:
+   - When computing max length differences, do:
+       if search_list[i] is None or replacement_list[i] is None:
+           continue
+       greater = max(0, len(replacement_list[i]) - len(search_list[i]))
+       ...
+4. Add unit tests covering those exact code paths (the two tests you already have plus a case where search_list contains None) to verify no len(None) calls.
+
+Short summary
+- The function calls len(...) on entries that may be None (at or before lines 94 and 104 and in the pre-scan at 83–85). Add explicit checks for None before any len(...) usage, or normalize None -> '' / skip those replacements, and the TypeError will be resolved.

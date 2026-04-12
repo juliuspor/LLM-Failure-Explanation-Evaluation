@@ -1,0 +1,66 @@
+What happened (root cause)
+- The failing tests show that TimePeriodValues._update_bounds sets the wrong index for the "max middle" (and symmetrically could set wrong min/max indices in other places).
+- In _update_bounds the code correctly computes each period's middle time (call that middle) but when it decides "this middle is the new maximum" it assigns the wrong variable into max_middle_index. Concretely:
+  - the comparison is done using the loop-local index variable (e.g. index, i or j) and max_middle_value, but the assignment that stores the index into max_middle_index uses a different variable (the previously used loop variable or a different name). That results in max_middle_index getting an unrelated integer (often the last loop counter) instead of the current item's index.
+- The tests show the symptom: the max middle value is at index 1 (middle 150) but get_max_middle_index() returns 3 (the wrong index). That matches a bug where the assignment uses the wrong index variable.
+
+Where it occurs
+- In method TimePeriodValues._update_bounds — specifically in the block that handles middle/midpoint comparisons (both in the SimpleTimePeriod branch and in the generic TimePeriod branch). Look for code that:
+  - iterates through periods with a loop variable (commonly named i, j or index),
+  - computes middle,
+  - compares middle > max_middle_value (or < min_middle_value),
+  - and then sets max_middle_index = <some variable>.
+- The bug is that the right-hand-side of that assignment is not the loop index for the current item but another variable (likely the loop counter from an outer scope or a different name). That wrong variable is what gets returned by get_max_middle_index().
+
+Why it happens (simple explanation)
+- Python code is executing exactly what is written. If you write max_middle_index = k instead of max_middle_index = i, you store k. If k is not the index of the current element, the stored index is wrong. This is a human/typo error — wrong variable used at assignment.
+
+How to confirm locally
+- Run the supplied unittest file: it will fail in test_max_middle_index_simple with a mismatch (expected 1, got 3).
+- Add a short print() inside _update_bounds to print the variables index, middle and the value used to set max_middle_index. You will see the wrong index being stored.
+
+Exact fix (concrete steps)
+1. Open hit04_timeperiod.py and find the TimePeriodValues._update_bounds method.
+2. Locate the code block that updates the max_middle (and min_middle) values. It will look like one of these patterns:
+
+   Example incorrect pattern (what you likely have)
+   max_middle_value = middle
+   max_middle_index = j     # WRONG: 'j' is not the loop index for this item
+
+   or
+   if middle > max_middle_value:
+       max_middle_value = middle
+       max_middle_index = k    # WRONG: 'k' is not this item's index
+
+3. Replace the right-hand side with the actual loop index variable used for the current item. If the loop variable is named i (or index), change the assignment to:
+
+   max_middle_value = middle
+   max_middle_index = i     # CORRECT: store the current item's index
+
+   and similarly for min_middle_index, min_start_index, max_start_index, min_end_index, max_end_index where appropriate.
+
+4. Check both branches in _update_bounds:
+   - the branch that handles SimpleTimePeriod specifics (sometimes optimized for computing mid as (start+end)/2),
+   - and the generic TimePeriod branch (the else branch) that calls get_start()/get_end().
+   Make sure both use the same correct loop index variable for their index assignments.
+
+5. Run the tests again. All provided tests should pass.
+
+Minimal example of corrected code fragment
+- If your loop looks like "for i in range(len(self.time_periods)):", then when you set indices use i, e.g.:
+
+   for i in range(len(self.time_periods)):
+       tp = self.time_periods[i]
+       middle = (tp.get_start().timestamp()*1000 + tp.get_end().timestamp()*1000) / 2
+       if middle > max_middle_value:
+           max_middle_value = middle
+           max_middle_index = i   # <-- use 'i', not some other variable
+
+Why this exact fix works
+- You store the actual index of the item whose middle you just compared. That ensures get_max_middle_index() returns an index that points to the same element whose value produced max_middle_value.
+
+Other notes
+- Review the method for any similar copy/paste mistakes: min_* and max_* index assignments are symmetric and can have the same bug.
+- If the code uses different variable names in the SimpleTimePeriod branch and the generic branch, ensure both assign the same index variable consistently.
+
+If you want, paste the full _update_bounds method here and I will show the exact line to change.

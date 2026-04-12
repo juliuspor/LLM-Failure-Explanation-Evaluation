@@ -1,0 +1,48 @@
+What happens
+- Failure occurs in the while loop when translate_codepoint(...) returns a positive value (the variable consumed).
+- In the following block you treat consumed as "number of codepoints" and advance pos by calling code_point_at and char_count repeatedly:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- If translate_codepoint actually returned a number of UTF-16 code units (e.g. 2 for a surrogate pair) this logic is wrong: the first iteration reads the surrogate pair and advances pos by 2, then the second iteration tries to call code_point_at(code_units, pos) where pos is already past the end (or at an index with no matching surrogate). That causes code_point_at to raise IndexError ("String index out of range") — this is exactly where the code fails.
+
+Why it fails (root cause, plain)
+- The code assumes a mismatch in the meaning of consumed:
+  - Your loop treats consumed as a count of codepoints and advances using char_count(code_point_at(...)).
+  - But translate_codepoint(...) returns a count of code units (UTF‑16 code units) OR vice versa.
+- Because those two counts are different for surrogate pairs (a single codepoint may be 2 code units), the loop can attempt to read past the end of code_units and trigger IndexError.
+
+Where it happens (lines/variables)
+- In the while pos < length: loop, when consumed > 0:
+  - The variables involved: consumed, pos, code_units
+  - The failing call is code_point_at(code_units, pos) inside the for pt in range(consumed) loop.
+- The error surfaces as an IndexError from code_point_at (see your slice showing to_utf16_code_units index checks).
+
+Concrete fixes (choose one, apply exactly)
+1) If translate_codepoint returns the number of code units consumed:
+   - Advance pos directly by that number. Replace the whole for loop with:
+     pos += consumed
+   - Rationale: consumed already counts UTF-16 code units, so adding it moves pos correctly.
+
+2) If translate_codepoint is supposed to return the number of codepoints consumed:
+   - Keep the loop but ensure translate_codepoint actually returns codepoint count (change its implementation and documentation). Example invariant: returned value = number of Unicode codepoints consumed, not code units.
+   - Also add a bounds check before calling code_point_at to avoid IndexError:
+     if pos >= length:
+         break  # or raise a clear error
+
+3) Defensive guard (recommended in addition to 1 or 2):
+   - Before calling code_point_at(index), check index < length and that a surrogate pair has a following code unit when needed. If invalid state is possible, raise a clear error message indicating translator returned wrong unit (e.g. "Translator returned code unit count but caller expected codepoint count").
+
+Minimal code correction example (if translate_codepoint returns code units):
+Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+with
+    pos += consumed
+
+Why this fix works
+- If consumed counts UTF‑16 code units, adding consumed to pos advances exactly the right number of indices into code_units.
+- It prevents re-reading a surrogate pair twice and avoids the IndexError.
+
+Summary
+- Root cause: mismatch between what translate_codepoint returns (code units vs codepoints) and how the caller advances pos.
+- Fix by making the semantics consistent: either have translate_codepoint return codepoint count and keep the loop, or (simpler) treat consumed as code units and do pos += consumed. Add bounds checks for robustness.

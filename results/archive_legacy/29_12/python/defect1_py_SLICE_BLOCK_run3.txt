@@ -1,0 +1,74 @@
+What failed
+- At lines 400–401 the code raises ValueError whenever minutes_offset is outside 0..59:
+  - line 400: if minutes_offset < 0 or minutes_offset > 59:
+  - line 401:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The failure you see is this ValueError being raised. That means the code reached this validation with a minutes_offset that the validator considers invalid.
+
+Root cause (exact and actionable)
+- The immediate root cause is that the value passed into this check is not an integer in the expected 0..59 range. That can happen for one of these explicit, correctable reasons:
+  1. minutes_offset is None because upstream calculation returned None.
+  2. minutes_offset is negative (e.g., -30) when you intended a signed offset to be represented by an hours sign and a non‑negative minute component.
+  3. minutes_offset is ≥ 60 (e.g., 60 or 90) because upstream code left an overflow in minutes instead of carrying it into hours.
+  4. minutes_offset is a non-integer type (string, float, Decimal) and either compares in a surprising way or you expected an int.
+  5. minutes_offset is a value from a different unit (seconds or total minutes) that was passed by mistake.
+
+Where it happened
+- The failure occurred at lines 400–401 in the file you showed (the exact method name isn’t in the snippet). To find the caller path, search the codebase for the function containing these lines and any callers that supply minutes_offset.
+
+Why each of these leads to the ValueError
+- None: None cannot be meaningfully validated and will hit the raise.
+- Negative minutes: If you treat sign on hours and expect minutes always non‑negative, a negative minutes (e.g., -30) will fail the check.
+- Overflowing minutes: If upstream forgot to convert 90 minutes into +1 hour and 30 minutes, minutes_offset = 90 will trigger the >59 branch.
+- Wrong type: Strings or other types are either comparable in unexpected ways or will raise TypeError earlier; float 30.0 will compare fine but may indicate you didn’t normalize types.
+- Wrong unit: If input is seconds (e.g., 3600) you’ll be well over 59.
+
+Concrete steps to diagnose (do these in order)
+1. Reproduce and log the value right before the failing check. Replace lines 399–401 temporarily with:
+   - print/log the repr of minutes_offset and its type and the stack trace (e.g., logging.exception or traceback.print_stack()) so you can see the caller.
+   - Example (add immediately before line 400):
+     - logging.debug("minutes_offset=%r (type=%s)", minutes_offset, type(minutes_offset).__name__)
+2. Run the failing case and inspect the logged value and the call stack to see what produced minutes_offset.
+3. Inspect the upstream calculation (the function/method that produced minutes_offset) and confirm the units and normalization strategy (signed hours + positive minutes vs signed minutes total).
+4. Add unit tests for:
+   - typical valid values (0..59),
+   - boundary values (-1, 0, 59, 60),
+   - values produced by edge cases in upstream code (negative total minutes, large minutes).
+5. Once you know which of the root causes applies, apply one of the fixes below.
+
+Concrete fixes (pick the one that matches your design and implement these exact steps)
+
+Fix A — Normalize minutes and carry to hours (if overflow allowed)
+- When you compute minutes_offset from a total number of minutes, normalize:
+  - hours = total_minutes // 60
+  - minutes = abs(total_minutes) % 60   (or minutes = total_minutes % 60 with careful handling of sign)
+- Ensure minutes stored here is in 0..59 and hours carries the sign/overflow.
+- Update callers to use the normalized hours and minutes.
+
+Fix B — Enforce and convert types before the check
+- At the call site or just before the check, validate type and convert:
+  - if minutes_offset is None: raise a clear error or compute a default
+  - if not isinstance(minutes_offset, int): try minutes_offset = int(minutes_offset)
+  - then run the existing range check
+- This ensures you’re validating the right data type.
+
+Fix C — Accept signed minutes if that was intended
+- If your design expects minutes_offset to be signed (e.g., -30 allowed), change the check and the representation:
+  - Decide on a canonical representation (prefer: sign on hours, minutes non‑negative).
+  - If signed minutes is allowed, change condition to something that matches that design and document it.
+
+Fix D — Improve error message and fail early in upstream function
+- Replace the generic message with one that includes the upstream source:
+  - raise ValueError(f"Minutes out of range: {minutes_offset!r} (computed in compute_offset_from_xyz)")
+- Or raise earlier where the incorrect minute value is produced.
+
+Minimal code examples you can apply immediately
+- Add logging (before line 400):
+  - logging.error("Invalid minutes_offset: %r (type=%s); caller=%s", minutes_offset, type(minutes_offset).__name__, traceback.format_stack()[-3])
+- Normalize minutes (where you compute minutes_offset):
+  - total = <your total minutes>
+  - hours = total // 60
+  - minutes = abs(total) % 60
+  - minutes_offset = minutes
+
+Summary
+- The ValueError at lines 400–401 is raised because minutes_offset is not a normalized integer in 0..59. Diagnose by logging minutes_offset and the caller stack to find where it was produced, then either normalize minutes into 0..59 (carry overflow to hours), enforce/convert the type, or change the representation/range check to match your intended format. Follow the concrete debug steps and one of the concrete fixes above.

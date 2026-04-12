@@ -1,0 +1,64 @@
+What happened (root cause)
+
+- The failing test calls ArrayUtils.add(None, None, expected_type=str). Both the input array and the element are null (None). The ArrayUtils.add implementation falls into the "both-null" branch and constructs a new array whose runtime component type is Object (Object[]). That means the method returns an Object[] containing one null.
+- The caller (test framework / Java bridge) expects a String[] (runtime component type String). Somewhere the returned Object[] is cast to String[] and the JVM throws:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+  This happens because an Object[] cannot be cast to String[] even when all elements are null.
+
+Where it occurs in your code
+
+- In ArrayUtils.add (the method under test), the branch that handles array is None and element is None creates and returns an array typed as Object[] instead of using the caller-expected component type (expected_type / String).
+- The failure happens at the point the method returns the newly created Object[] and the caller tries to treat it as a String[] (the cast/check happens outside the method when the runtime expects String[]).
+
+Why this is the correct diagnosis
+
+- Java arrays are covariant by reference type at compile time, but their runtime component type matters. Returning an Object[] when the caller expects a String[] always causes ClassCastException at runtime.
+- The implementation probably determines the new array’s component type from the non-null inputs only (array.getClass().getComponentType() or element.getClass()), and uses Object as a fallback when both are null. That fallback is too coarse when the caller supplies an expected_type hint.
+
+Concrete fixes (step-by-step)
+
+1. In ArrayUtils.add, determine the array component type in this order:
+   - If the incoming array is non-null: componentType = array.getClass().getComponentType()
+   - Else if the incoming element is non-null: componentType = element.getClass()
+   - Else if an expected_type parameter is provided: componentType = map expected_type to the corresponding Java class (e.g. java.lang.String.class for str)
+   - Else fall back to Object.class
+
+2. Create the new array with the computed component type:
+   - Use java.lang.reflect.Array.newInstance(componentType, newLength) so the returned array has the correct runtime component type.
+
+3. Copy elements and insert the new value as before (System.arraycopy or equivalent).
+
+4. Return the newly created array (which will now be an actual String[] when expected_type was String).
+
+If you are implementing this in Python wrapping Java classes (Jython, JPype, etc.):
+
+- Ensure expected_type is converted to the Java Class object (e.g. expected_type -> java.lang.String.class).
+- If you cannot obtain the Java class, change the API to return a Python list (which avoids Java array casting), or require callers to pass a non-null expected_type that maps to a Java class.
+
+Minimal code sketch (Java-like pseudocode for ArrayUtils.add):
+
+- At top of add(...):
+    Class<?> componentType;
+    if (array != null) {
+        componentType = array.getClass().getComponentType();
+    } else if (element != null) {
+        componentType = element.getClass();
+    } else if (expectedType != null) {
+        componentType = mapExpectedTypeToJavaClass(expectedType); // e.g. String.class
+    } else {
+        componentType = Object.class;
+    }
+    Object newArray = Array.newInstance(componentType, oldLength + 1);
+    // copy, insert, return newArray
+
+Why this fix solves the error
+
+- When both inputs are null and expected_type is supplied, using expected_type to create the array yields a runtime String[] (not Object[]). The caller will then not attempt to cast Object[] to String[], eliminating the ClassCastException.
+
+What to check after the fix
+
+- Test test_add_null_to_null_with_expected_type should return a runtime String[] containing one null.
+- Other tests where element or array are non-null should remain unaffected because component type will be inferred from the non-null input.
+- If you have other callers that rely on Object[] fallback, ensure behavior is acceptable or explicitly document the expected_type parameter.
+
+If you want, paste the current ArrayUtils.add implementation here (the relevant branch) and I’ll point to the exact lines to change.

@@ -1,0 +1,48 @@
+What happened (root cause)
+- The failing behavior comes from TimePeriodValues._update_bounds using the wrong variable in the comparison for the "max middle" check.
+- Instead of comparing the new middle value (a datetime/time value or float) to the stored maximum middle value, the code compares it to the stored index variable. In other words the code does something like:
+    if middle > self.max_middle_index:
+when it should do:
+    if middle > self.max_middle:
+- That causes the middle value (e.g. 150) to be compared against an index (e.g. 0, 1, 2, 3). Because middles are typically much larger than small index integers, almost every comparison succeeds and the index assigned to max_middle_index becomes the most recently added index that satisfied the condition (in your failing case index 3), not the index of the true maximum middle (index 1).
+- This bug is why your test expected get_max_middle_index() == 1 but got 3.
+
+Where it occurs
+- File: hit04_timeperiod.py
+- Method: TimePeriodValues._update_bounds
+- Faulty comparison: the max-middle update branch compares 'middle' to 'self.max_middle_index' instead of 'self.max_middle'.
+- Faulty variable names involved: middle, self.max_middle, self.max_middle_index
+
+Why that leads to the observed failure
+- Example from your test:
+    - middles by index: 0 -> 50, 1 -> 150, 2 -> 25, 3 -> 75
+    - When evaluating index 1, max_middle may be 50 and max_middle_index 0. If the code compares middle(150) > max_middle_index(0) that is true → sets max_middle_index = 1 (looks fine so far).
+    - When evaluating index 3, middle(75) > max_middle_index(1) is also true (because it's comparing 75 > 1) → sets max_middle_index = 3 (wrong; 75 is not the maximum middle).
+    - Result: max_middle_index ends up 3 instead of the correct 1.
+
+What to change (precise fix)
+- In TimePeriodValues._update_bounds, find the block that updates the max middle. Replace any comparison that uses self.max_middle_index on the right-hand side with self.max_middle.
+- Example wrong code (likely current code):
+    # inside _update_bounds
+    middle = ...
+    if self.max_middle_index is None or middle > self.max_middle_index:
+        self.max_middle = middle
+        self.max_middle_index = index
+- Correct code:
+    # inside _update_bounds
+    middle = ...
+    if self.max_middle is None or middle > self.max_middle:
+        self.max_middle = middle
+        self.max_middle_index = index
+- Also ensure symmetric checks for min_middle use self.min_middle (not min_middle_index).
+
+Additional safety and tests
+- Make sure max_middle and min_middle are initialized to None (or a comparable sentinel) and that the code consistently compares middles to middles and indices to indices.
+- Add unit tests (you already have these) that cover:
+    - multiple SimpleTimePeriod entries where a non-last entry has the maximum middle (your test_max_middle_index_simple)
+    - mixed TimePeriod subclass instances (your test_generic_time_period_support) to exercise the else branch
+- Run the suite after the fix to confirm get_max_middle_index() returns 1 for your first test.
+
+Summary
+- Root cause: wrong variable used in comparison inside TimePeriodValues._update_bounds — comparing the new middle value to max_middle_index (an integer) instead of to max_middle (the stored middle value).
+- Fix: change the comparison to use self.max_middle (and likewise for min_middle). This will stop indexes from being selected because middles are larger than index integers.

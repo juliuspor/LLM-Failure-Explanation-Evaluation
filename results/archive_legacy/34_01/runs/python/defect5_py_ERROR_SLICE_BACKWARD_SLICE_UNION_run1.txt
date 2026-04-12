@@ -1,0 +1,47 @@
+What happened (where it failed)
+- The exception was raised at line 347:
+  - Code: if inferred_type == object and expected_type != object: raise TypeError(...)
+  - inferred_type was set to object at line 340 because the code could not infer a concrete element type for the list.
+  - expected_type was some concrete element type (a string type / list[str] / java.lang.String), not object.
+- The reported runtime error is a Java ClassCastException: an Object[] was being treated as a String[] and the JVM refused the cast ([Ljava.lang.Object; cannot be cast to [Ljava.lang.String;). That is what the TypeError is wrapping.
+
+Why it happened (root cause)
+- The code looked at the list contents and set inferred_type = object (line 340). That means "I cannot prove all elements share a specific concrete type."
+- expected_type is not object (so the caller expects a list/array of strings).
+- On the Java side (or wherever a JVM array type is required), the code attempted to hand over or cast a Python/list-backed Object[] to a java.lang.String[].
+- In the JVM an Object[] is not the same type as String[] and cannot be cast even if every element happens to be a java.lang.String at runtime. The JVM requires the actual array object to be a String[] to treat it as such.
+- Because inferred_type stayed object, the code raised the TypeError at line 347 instead of performing a safe conversion. The underlying cast would also fail if attempted, which is why the code refuses to proceed.
+
+How to confirm quickly (debug steps)
+1. Print or inspect the list and types just before line 340:
+   - Print the list variable and types: [type(e) for e in elements]
+2. Check for:
+   - Any element that is None or a different type (int, bytes, etc.)
+   - Mixed types (some str, some not) or an array-like object that resolves to Object[] on the Java side
+
+Concrete fixes (choose one depending on intent)
+1. If you want a list of Java Strings and elements are convertible to str:
+   - Convert every element to Python str before passing:
+     - elements = [str(e) for e in elements]
+   - Then proceed so the array you create is actually a String[] on the Java side.
+   - If using a Java bridge such as JPype: use jarray.array([str(e) for e in elements], jpype.JClass('java.lang.String')).
+
+2. If you want to allow arbitrary element types (i.e. keep object):
+   - Change expected_type to object so the check at line 346/347 accepts inferred_type == object, and pass/construct an Object[] intentionally.
+
+3. If None values are the issue:
+   - Remove or replace None values before conversion, or explicitly handle None by mapping to an empty string or java.lang.String null as appropriate.
+
+4. If using numpy arrays:
+   - Ensure dtype is a string dtype, not object:
+     - arr = arr.astype('U') (or dtype='<U...' for unicode)
+   - Passing a numpy object-dtype array will become Object[] on the Java side and fail the cast.
+
+Minimal example fix (Python + JPype)
+- Before calling the code that enforces expected_type == String:
+  elements = [str(e) if e is not None else None for e in elements]
+  java_str_array = jarray.array([jpype.JString(e) if e is not None else None for e in elements],
+                               jpype.JClass('java.lang.String'))
+
+Summary
+- The code failed because inferred_type was object while expected_type required strings, and the JVM disallows casting an Object[] to a String[]. Fix by making the Python list actually contain only strings (so you produce a real String[]), or change expected_type to object and handle Object[] intentionally.

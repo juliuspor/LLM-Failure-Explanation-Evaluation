@@ -1,0 +1,39 @@
+What happened (what failed)
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15) and expects an ID of "-02:15".
+- Instead the code produces the wrong offset because the hour and minute signs are combined incorrectly. The code at the lines you showed computes the total minutes wrong when both hours and minutes are negative.
+
+Where it happens (exact places)
+- Inside DateTimeZone.for_offset_hours_minutes (the method that builds an offset zone).
+- The incorrect logic is at the lines you provided:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - then line 409 multiplies minutes_offset by MILLIS_PER_MINUTE
+  - line 411 is the branch that raises ValueError if the offset is too large
+
+Why it fails (root cause, clearly)
+- The code is trying to combine hours_in_minutes and minutes_offset, but it mixes subtraction and addition based on the inputs in a way that reverses the sign of the minutes when both parts are negative.
+- Example with your inputs:
+  - hours = -2 -> hours_in_minutes = -120
+  - minutes = -15 -> minutes_offset = -15
+  - The code chooses the branch at line 406 and does hours_in_minutes - minutes_offset => -120 - (-15) => -105 minutes -> -01:45, which is wrong. The correct result is -135 minutes -> -02:15.
+- In short: the code treats the minute value as if it were always positive in one branch (subtracting it), so a negative minute value cancels out part of the hour instead of contributing to a larger negative offset.
+
+Precisely where to change it (concrete fix)
+Replace the current sign-combining lines (around 406–409) with logic that:
+1. Takes absolute values of hours and minutes parts.
+2. Computes total_minutes = abs(hours)*60 + abs(minutes).
+3. Applies a single sign to total_minutes: negative if hours < 0 or (hours == 0 and minutes < 0), otherwise positive.
+4. Then multiply total_minutes by DateTimeConstants.MILLIS_PER_MINUTE and continue.
+
+Exact replacement (pseudo-code you can paste into that method)
+- Compute:
+  sign = -1 if (hours < 0) or (hours == 0 and minutes < 0) else 1
+  total_minutes = sign * (abs(hours) * 60 + abs(minutes))
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+- Then return cls.for_offset_millis(offset) as the method already does.
+
+Why this fixes it
+- This treats hours and minutes as magnitude components and applies one consistent sign, so (-2, -15) becomes -(2*60 + 15) = -135 minutes -> "-02:15", and (2, 15) becomes +135 minutes -> "+02:15". It also covers cases like (0, -30) correctly.
+
+No other guesses
+- The problem is not in the multiplication (line 409) or the ValueError (line 411) for your inputs — it is purely the incorrect sign handling when combining hours and minutes at lines 406/408.

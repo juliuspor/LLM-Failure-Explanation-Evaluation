@@ -1,0 +1,48 @@
+What happened (root cause)
+- The test calls LocaleUtils.to_locale("fr__POSIX") expecting a Locale with language "fr", empty country, variant "POSIX". The code that fails is the parser inside LocaleUtils.toLocale (the method the test calls).
+- LocaleUtils.toLocale splits the input on underscore and then validates/assigns language/country/variant. That code treats a missing country (the empty token between the two underscores) as invalid, so it does not produce a Locale("fr", "", "POSIX"). Instead it throws an error or returns a different Locale, so the assertion fails.
+
+Where it happens (exact method and code block)
+- The failure is in LocaleUtils.toLocale(...) (LocaleUtils.java). Specifically in the block that splits and processes the parts — the lines that:
+  1) call String.split or use a StringTokenizer on "_" to produce tokens, and
+  2) check token counts and contents to decide whether tokens represent (language), (language,country) or (language,country,variant).
+- In typical implementations you will find this logic in the parsing block around the method body that performs:
+  - parts = input.split("_") or tokenizer.nextToken()
+  - a conditional like: if (parts.length == 2) { /* treat as language+country */ } else if (parts.length == 3) { /* language+country+variant */ }
+- The bug is that when parts becomes ["fr", "", "POSIX"] (language, empty country, variant), the code either:
+  - treats the empty middle element as "no country" and fails the check that requires a non-empty country for a three-part form, or
+  - collapses empty tokens (some split calls without the limit parameter or some tokenizers drop empty tokens) so the middle empty token disappears and you get ["fr","POSIX"], which the parser then treats as language+country (wrong) or language only (wrong).
+
+Why that root cause produces the test failure
+- The input "fr__POSIX" has an empty country token by design. A correct parser must preserve empty tokens and map them to country = "" and variant = "POSIX". The current parser either removes empty tokens or enforces that a country must be non-empty when variant is present. Either behavior results in producing the wrong Locale or throwing an exception instead of Locale("fr", "", "POSIX").
+
+Concrete steps to reproduce and inspect
+1. Re-run the test and capture the exception or returned Locale value:
+   - Note whether an IllegalArgumentException or other error is thrown, or whether result is Locale("fr","POSIX", "") or similar.
+2. Open LocaleUtils.java and locate toLocale(String) — search for "toLocale(" or the parsing code that splits on "_" inside that method.
+3. Inspect the exact lines where the split/tokenize happens and where the code checks parts.length and parts[i].isEmpty().
+
+Exact fixes (step-by-step)
+Option A — preserve empty tokens and accept empty country
+1. In the parsing code replace split("_") with split("_", -1) (Java) so empty middle tokens are preserved. Example:
+   - parts = input.split("_", -1);
+2. Change the validation logic so that a three-part input is allowed when parts.length == 3 even if parts[1].isEmpty(), and create the Locale as:
+   - new Locale(parts[0], parts[1], parts[2])
+   This produces Locale("fr", "", "POSIX") for "fr__POSIX".
+
+Option B — explicitly handle the double-underscore case
+1. Before generic parsing, detect the pattern of language + "__" + variant:
+   - if (input.matches("[a-zA-Z]{2,}__.*")) { split into language = substring before "__", variant = substring after "__", country = ""; return new Locale(language, "", variant); }
+2. Otherwise fall back to the existing splitting logic.
+
+Option C — use library method that already supports this
+1. If available, switch to an API that defines this format (for example Locale.forLanguageTag for BCP47 tags) or a tested utility method that already accepts empty country tokens.
+
+What to change in tests (optional)
+- If the codebase intentionally forbids empty country values with a non-empty variant, update the test to reflect the intended behavior. But if your intent is to accept Java Locale's convention of empty country + variant, follow the fixes above instead.
+
+Why the fixes work
+- split("_", -1) preserves empty tokens, so the parser sees the empty country explicitly and can construct the Locale with country = "" and variant = "POSIX".
+- Handling the double-underscore pattern directly makes the intent explicit and avoids accidental token dropping by tokenizers or regex defaults.
+
+If you want, paste the current contents of LocaleUtils.toLocale (or the file and line range around the parser) and I will mark the exact lines to change and provide the precise patch.

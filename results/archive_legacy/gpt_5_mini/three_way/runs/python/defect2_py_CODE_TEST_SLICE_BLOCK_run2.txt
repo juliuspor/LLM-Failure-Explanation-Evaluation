@@ -1,0 +1,47 @@
+What happened (where: lines 68–75, specifically the g computation and the range check)
+- You clamp the incoming value into v:
+  - v = max(value, self._lower_bound)
+  - v = min(v, self._upper_bound)
+  That makes v the clamped value (correct).
+- But on the next line you compute g using the original value variable, not the clamped v:
+  - g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- If value is outside the bounds (e.g. -0.5), that expression yields a negative g, so the subsequent range check
+  (lines shown in the slice, if g < 0 or g > 255:) raises ValueError. The tests call get_paint(-0.5) expecting clamping to black, but because you used value instead of v you still get the out-of-range error.
+
+Why this is the root cause (clear, exact)
+- The clamping happens to v, but the interpolation uses value, so the clamp has no effect on the computed color.
+- The exception is raised at the range check (lines shown in the slice) because g computed from the un-clamped value is outside 0..255.
+
+How to fix it (concrete steps and exact code change)
+1. Use the clamped variable v when computing g.
+2. Add a guard against division by zero when upper and lower bounds are equal.
+
+Minimal corrected code (replace the g computation and add guard):
+
+    # after clamping v
+    span = self._upper_bound - self._lower_bound
+    if span == 0.0:
+        g = 0  # or 255, or some defined behavior; here choose black
+    else:
+        g = int((v - self._lower_bound) / span * 255.0)
+
+3. Keep the existing range check if you want defensive validation.
+
+Why this fix works
+- Using v ensures values below lower_bound become lower_bound and above upper_bound become upper_bound before interpolation, so -0.5 will map to 0 -> g = 0 and will not raise.
+- The span check prevents a ZeroDivisionError when lower and upper bounds are equal.
+
+Optional: example final snippet including range check
+
+    v = max(value, self._lower_bound)
+    v = min(v, self._upper_bound)
+    span = self._upper_bound - self._lower_bound
+    if span == 0.0:
+        g = 0
+    else:
+        g = int((v - self._lower_bound) / span * 255.0)
+    if g < 0 or g > 255:
+        raise ValueError("Color parameter outside of expected range: Red Green Blue")
+    return (g, g, g)
+
+This directly addresses the failing test cases (e.g. get_paint(-0.5) now returns (0,0,0)).

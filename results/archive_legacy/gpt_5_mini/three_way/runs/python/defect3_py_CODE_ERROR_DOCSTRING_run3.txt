@@ -1,0 +1,46 @@
+What happened (root cause)
+- The loop that advances pos after a translator consumed input is wrong. These lines are the problem:
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+- That code calls code_point_at(code_units, pos) while pos may point at a low-surrogate or the last code unit of the string. code_point_at will try to read the next code unit to form a supplementary codepoint and then throw IndexError when pos+1 is out of range. The IndexError you saw ("String index out of range: 2") is exactly this: pos==1, code_point_at tries to read index 2 and fails.
+
+Why it happens logically
+- The method translate_codepoint returns a number (consumed). The code treats consumed as a count of codepoints and attempts to advance pos one codepoint at a time by calling code_point_at and char_count.
+- But translate_codepoint already handled surrogate pairs; it either consumed two code units for one codepoint or otherwise advanced multiple code units. After translate_codepoint returns, the code calls code_point_at at the current pos — which may be the high or low surrogate or even the low surrogate alone if previous increments are incorrect — and that call can read out-of-bounds.
+- In short: the contract between translate_codepoint and the caller is inconsistent. The caller advances pos by repeatedly calling code_point_at, which itself reads forward and can go out of bounds when the consumed range contained surrogate pairs.
+
+Where it occurs (specific variables / lines)
+- The failure occurs in the while loop after translate_codepoint returned consumed > 0:
+  - variable: pos
+  - variables: code_units, consumed
+  - problematic lines: the for pt in range(consumed): ... block (the pos += char_count(code_point_at(...)) line).
+
+Concrete fixes (step-by-step)
+Choose one of the following fixes depending on the intended contract of translate_codepoint.
+
+Fix A — (recommended) Make consumed represent the number of code units consumed, and advance pos directly:
+1. Define/ensure translate_codepoint returns the number of UTF-16 code units it consumed (1 or 2 for a codepoint, or more if it replaced multiple code units).
+2. Replace the loop with:
+       pos += consumed
+   This avoids calling code_point_at while in the middle of a surrogate pair and is simple and safe.
+3. Add defensive checks:
+       if consumed < 0 or consumed > length - pos:
+           raise ValueError("translate_codepoint returned invalid consumed count")
+
+Fix B — If consumed must represent number of codepoints, advance safely by extracting codepoints without reading past the end:
+1. Keep translate_codepoint returning number of codepoints.
+2. Replace the for-loop with:
+       for _ in range(consumed):
+           cp = code_point_at_safe(code_units, pos)
+           pos += char_count(cp)
+   But you must implement code_point_at_safe so it never reads pos+1 when pos is at the last index (i.e. it should treat an unpaired low/high surrogate as a single code unit or raise a clear error).
+3. Add validation of consumed against remaining codepoints to avoid overruns.
+
+Extra safety
+- Always validate consumed relative to remaining code units at the call site (see the defensive check in Fix A).
+- Add unit tests that exercise strings ending with a high surrogate, low surrogate, and a supplementary codepoint to ensure no out-of-bounds reads.
+
+Short summary
+The code advances pos by calling code_point_at while pos may already be at or within a surrogate pair consumed by translate_codepoint. That causes code_point_at to attempt reading pos+1 past the string end and raises IndexError. The simplest and correct fix is to make translate_codepoint return the number of UTF-16 code units consumed and then do pos += consumed (plus a bounds check).

@@ -1,0 +1,46 @@
+What happened (root cause)
+- In the code that finds the next match you never reliably reset or guard the replace_index/text_index values, so later code uses an invalid replace_index and appends a wrong value (often None) into parts.
+- Concretely: the block that chooses the earliest match sets text_index and replace_index inside the loop at lines 108–113. If no candidate is found on that pass text_index remains -1 (or replace_index remains the previous value). The code later blindly does:
+  - parts.append(replacement_list[replace_index]) (line 92)
+  - start = text_index + len(search_list[replace_index]) (line 94)
+  These lines assume replace_index and text_index are valid for the current pass. If no match was found (text_index == -1 or replace_index is unset/left from a previous iteration) you end up:
+  - appending replacement_list[replace_index] when replace_index is invalid (can be -1 or point to an entry whose replacement is None),
+  - or computing start = -1 + len(...) producing a wrong start,
+  - or appending None into parts which later causes a TypeError when joining strings.
+- The failing tests exercise cases where a replacement in replacement_list is None (tests pass None to indicate “do not replace”). The search loop tries to skip such replacements (there is a condition that checks replacement_list[i] is None at lines 102–105), but because replace_index/text_index are not handled correctly when no match is found the appending code at lines 92 and 94 is still reached with invalid indices.
+
+Where it occurs (precise references)
+- The match-selection loop: temp_index = text.find(...) (line 108) and the assignment that updates the chosen match: lines 111–113.
+- The code that uses the chosen match without re-checking validity: parts.append(replacement_list[replace_index]) (line 92) and start = text_index + len(search_list[replace_index]) (line 94).
+- The guard that tried to ignore None replacements is at lines 102–105, but the later code still assumes a valid replace_index/text_index even when no match was found.
+
+Why the test fails (example)
+- Test test_null_safety_inside_arrays_single calls replace_each("aba", ["a"], [None]).
+- The algorithm ends up in a pass where it finds no valid match to replace, but replace_index is not reset/checked. It appends replacement_list[replace_index] which is None, and later string-building fails or returns wrong output (instead of returning "aba" unchanged).
+
+How to fix it (specific steps)
+1. Ensure replace_index and text_index are reinitialized before each pass that searches for the next match. For example, just before the for i in range(...) loop set:
+   - text_index = -1
+   - replace_index = -1
+   This guarantees you will detect when no match was found this pass.
+
+2. After the search loop, check whether a match was actually found before using replace_index/text_index:
+   - if text_index == -1:
+       parts.append(text[start:])   # append remaining text
+       break                        # no more matches; exit loop
+   This prevents using invalid indices and appending None.
+
+3. (Optional) When appending a replacement, make an extra defensive check:
+   - r = replacement_list[replace_index]
+   - if r is None:  # treat as “no replacement”
+         parts.append(search_list[replace_index])  # or append the matched substring unchanged
+     else:
+         parts.append(r)
+   But the prior two steps make this defensive check unnecessary if you consistently treat None in replacement_list as "skip this replacement" and mark that index as exhausted before searching.
+
+Why these changes fix it
+- Initializing replace_index/text_index avoids carrying stale values between iterations.
+- The explicit text_index == -1 check prevents the code from executing the append/start lines with an invalid index.
+- That ensures replacement_list entries that are None are never used as replacements and the original text is preserved when an entry should be treated as "no replacement", matching the tests' intent.
+
+If you want, paste the current function body and I’ll show the minimal exact diffs to apply.

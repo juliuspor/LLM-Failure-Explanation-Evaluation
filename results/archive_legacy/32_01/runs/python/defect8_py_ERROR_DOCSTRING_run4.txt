@@ -1,0 +1,44 @@
+What happened
+- The call to LocaleUtils.to_locale("fr__POSIX") fails because the method performs a strict format check and rejects that string, raising ValueError("Invalid locale format: fr__POSIX").
+- The failure occurs inside LocaleUtils.to_locale during the input validation (the block that checks tokens and lengths) — that's the code path that produces the ValueError you saw.
+
+Why it fails (root cause)
+- The input "fr__POSIX" is the usual Java-style representation for language = "fr", empty country = "", variant = "POSIX". That representation uses two underscores to show an empty country field: language + "_" + country + "_" + variant.
+- The to_locale implementation enforces these rules from the docstring: language lower-case, country upper-case, separator underscore, and exact lengths. In particular, it expects the country token (the part between the two underscores) to be of the expected length (normally 2) when a country separator is present.
+- Because the string has two underscores, the parser splits it into three tokens: ["fr", "", "POSIX"]. The code's validation code treats the empty middle token as an invalid country (it does not accept an empty country token when a second underscore is present) and therefore throws the ValueError.
+- In short: the method rejects a valid Java locale syntax for empty-country+variant ("fr__POSIX") because its strict validation requires a non-empty country token when a variant is present.
+
+Where it occurs in the code
+- The exception is thrown inside LocaleUtils.to_locale at the point where the method validates language/country/variant tokens and raises ValueError for anything that doesn't match the expected token lengths/patterns. Look for the raise ValueError("Invalid locale format: %s" % locale_str) inside to_locale — that is the exact statement that produces the error for "fr__POSIX".
+
+How to fix it (concrete steps)
+1. Locate the validation block in LocaleUtils.to_locale that splits the input and checks token lengths. It will look like:
+   - split on '_' into parts
+   - assert language length and case
+   - assert country length and case
+   - assert variant length/characters
+   - raise ValueError(...) when a check fails
+
+2. Change the country validation to allow an empty country token when a variant is present. Concretely:
+   - When parts length is 3 (language, country, variant), treat country == "" as valid and only enforce country format when country is non-empty.
+   - Keep enforcing language lower-case and variant rules as before.
+
+3. Example of the minimal change (pseudo-code):
+   - current check (pseudo):
+       if len(parts) == 3:
+           if not (len(parts[1]) == 2 and parts[1].isupper()):
+               raise ValueError(...)
+   - change to:
+       if len(parts) == 3:
+           # allow empty country token, otherwise require 2 uppercase letters
+           if parts[1] != "" and not (len(parts[1]) == 2 and parts[1].isupper()):
+               raise ValueError(...)
+
+4. Add a unit test for the empty-country case:
+   - assert LocaleUtils.to_locale("fr__POSIX") returns Locale("fr", "", "POSIX")
+   - also add tests for rejecting malformed tokens (e.g. "FR", "en_gb", "en__") to ensure other rules still hold.
+
+Why this fix is correct
+- It preserves the method’s strictness for language and non-empty country tokens while accepting the Java convention for an empty country plus a variant (two underscores). That matches the usual Locale string semantics and resolves the ValueError for "fr__POSIX" without weakening other validations.
+
+If you want, paste the to_locale implementation here and I’ll show the exact line to change and provide a one-line patch you can apply.

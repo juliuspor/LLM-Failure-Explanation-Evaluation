@@ -1,0 +1,37 @@
+What happened (root cause)
+- A merge/patch error left two conflicting assignments for minutes_offset in the same code path. Lines 406 and 408 (shown in your slice) both appear in the file, so the code executes one assignment and then immediately overwrites it with the other.
+  - Line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Those two lines are mutually exclusive logically (one is for negative-hour handling, the other for positive-hour handling). Running both in sequence produces a wrong minutes_offset value that is far larger than intended, which then causes the later checks or arithmetic to fail (eventually triggering the "Offset is too large" path or an overflow in FieldUtils.safe_multiply).
+
+Where it occurs
+- The problem is in the method that computes an offset in milliseconds and returns cls.for_offset_millis(offset). The offending lines are at/around:
+  - Line 406 (minutes_offset = hours_in_minutes - minutes_offset)
+  - Line 408 (minutes_offset = hours_in_minutes + minutes_offset)
+- The incorrect double-assignment happens before offset = FieldUtils.safe_multiply(...), so the bad minutes_offset propagates into offset calculation.
+
+Why it breaks the logic
+- The code intends to combine hours and minutes into a single minutes value depending on sign. Because both adjustments are applied, the resulting minutes_offset no longer represents the intended signed minute count (it becomes much larger than  0–59 or the expected signed range).
+- That bad value either fails the minutes-range validation or produces an offset too large for safe_multiply, causing an exception or incorrect return.
+
+How to fix it (concrete steps)
+1. Open the method and inspect the block around lines 400–412.
+2. Remove the incorrect/duplicated assignment so only the correct formula runs depending on whether the total offset should be positive or negative. Concretely:
+   - Decide the intended sign-handling behavior (e.g., if hours are negative you want minutes_offset = -(hours_in_minutes + minutes) or similar).
+   - Replace the two conflicting lines with a single, explicit branch. Example (pseudocode you should adapt to actual variable names):
+     - if sign_is_negative:
+         minutes_total = -(abs(hours_in_minutes) + minutes_offset)
+       else:
+         minutes_total = hours_in_minutes + minutes_offset
+3. Ensure the minutes validation (lines like "if minutes_offset < 0 or minutes_offset > 59") uses the raw minutes argument, not the already combined minutes_total.
+4. Run unit tests (or add tests) for these cases:
+   - positive hours + positive minutes (e.g., +2:30)
+   - negative hours + positive minutes (e.g., -2:30)
+   - minutes zero and boundary values (0, 59)
+   - large/suspicious inputs that should raise "Offset is too large"
+5. Remove any leftover merge markers or duplicated code blocks so only the single intended code path remains.
+
+Why this explanation is definitive
+- The file shows both arithmetic variants present (lines 406 and 408). Those two lines cannot both be correct; one must be removed or made conditional. The failure arises exactly because both are present and the second overwrites the first before the final offset is computed.
+
+If you want, paste the surrounding 20 lines of code and I’ll propose the exact corrected snippet for your method.

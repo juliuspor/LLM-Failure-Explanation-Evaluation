@@ -1,0 +1,46 @@
+What happened (where it failed)
+- The failure happens at lines 396–397:
+  ```
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+  ```
+  The test raised ValueError: "Minutes out of range: -15". That means the caller passed minutes_offset == -15 and the code rejected it before any further processing.
+
+Why it failed (root cause)
+- The function assumes minutes_offset must be in 0..59 and checks that immediately. That check runs before the function combines the hour and minute parts and before any sign logic:
+  - At line 403 you compute hours_in_minutes = hours_offset * 60.
+  - At lines 404–408 you try to apply the hours' sign to the minutes value (you subtract or add minutes_offset depending on hours_in_minutes sign).
+- But the caller used a negative minutes_offset to indicate a negative total offset (for example hours_offset = -1 and minutes_offset = -15 to mean -1:15). Because the validation runs first, the negative minutes value (-15) is considered invalid and the function raises ValueError immediately.
+- In short: the validation at lines 396–397 rejects minute values that are valid when combined with a negative hour. The code both validates minutes too early and mutates/reuses minutes_offset later, which causes the logic to be error-prone.
+
+What to change (clear, actionable fixes)
+1. Validate the magnitude of minutes (0..59) but allow the minutes sign to be determined by the hour sign. For example:
+   - Require abs(minutes_offset) in 0..59, not minutes_offset itself.
+   - Or require minutes_offset ∈ [0..59] and document that callers must pass a non-negative minutes value and use hours_offset negative to indicate negative whole offset.
+
+2. Compute total minutes in a separate variable (don’t reuse minutes_offset) and apply sign logic explicitly:
+   - Example logic:
+     ```
+     if abs(minutes_offset) > 59:
+         raise ValueError(...)
+     hours_in_minutes = hours_offset * 60
+     if hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - abs(minutes_offset)
+     else:
+         total_minutes = hours_in_minutes + abs(minutes_offset)
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+     ```
+   - Or simpler:
+     ```
+     total_minutes = hours_offset * 60 + ( -minutes_offset if hours_offset < 0 else minutes_offset )
+     ```
+     if you decide to require minutes_offset >= 0 from callers.
+
+3. Rename variables (e.g., total_minutes) so you do not overwrite the input minutes_offset — that avoids confusion and makes the code clearer.
+
+Why these fixes work
+- They ensure negative minute components intended to indicate a negative offset are not rejected prematurely.
+- They keep validation and sign-application logic separate and explicit, removing the current ordering bug.
+
+Summary
+- The minute-range check runs before sign adjustment and rejects negative minute values like -15 that are valid when combined with a negative hours_offset. Fix by validating the absolute minute magnitude (or require non-negative minutes) and compute total_minutes in a separate variable with clear sign handling.

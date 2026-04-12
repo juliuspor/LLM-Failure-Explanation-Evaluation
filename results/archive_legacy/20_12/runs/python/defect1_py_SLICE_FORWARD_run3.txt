@@ -1,0 +1,42 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method checks the minutes argument early (line ~392–396): it rejects any minutes_offset < 0 or > 59 and raises ValueError("Minutes out of range: {minutes_offset}").
+- Because you passed minutes_offset = -15, the method raises ValueError: Minutes out of range: -15 (the error you saw).
+
+Why this is happening (root cause)
+- The method's API (docstring and checks) intends to accept negative minutes only in specific combinations: negative minutes are allowed when hours is zero or negative in certain semantics described in the docstring, e.g. (-2, -15) should be interpreted as -02:15.
+- However the implementation does a strict range check immediately:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This check (around line 392–396) forbids negative minutes in all cases, so (-2, -15) is rejected before the later logic that combines hours and minutes (lines ~406–409) can make sense of a negative minutes argument.
+
+Where it occurs
+- The failure happens inside DateTimeZone.for_offset_hours_minutes (you can see the check and the subsequent combination logic in the slice you gave).
+- Specifically the immediate check at the start of for_offset_hours_minutes raises the ValueError (the test trace shows "Minutes out of range: -15").
+
+How to fix it (concrete steps)
+Option A — Allow negative minutes and validate after combination (recommended)
+1. Remove or relax the early minutes check that disallows negative values.
+2. After you compute the combined minutes (hours_in_minutes +/− minutes_offset) — i.e. after the block at lines ~402–409 where you compute minutes_offset = hours_in_minutes ± minutes_offset — validate the final minutes total is within the allowed range (−(23*60+59) .. +(23*60+59)) or that hours and minutes signs are consistent per the docstring.
+3. Keep the overflow guard (FieldUtils.safe_multiply) to catch extremes.
+
+Example change sketch:
+- Replace:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(...)
+  with no check there, and afterwards, after computing the combined minutes_offset, validate its range and raise if outside allowed bounds.
+
+Option B — Normalize input before checking
+1. If you prefer to keep a per-argument minutes validation, interpret negative minutes only when hours is zero or negative as allowed by the docstring. So change the check to:
+    if minutes_offset < 0 and hours_offset > 0:
+        raise ValueError("Minutes must be positive when hours is positive")
+    if abs(minutes_offset) > 59:
+        raise ValueError(...)
+  This keeps the explicit per-argument validation but allows (-2, -15).
+
+Which to choose
+- Option A follows the method's own semantics described in the docstring (minutes can be negative if hours are negative), so it's the most consistent and simpler: validate after combination.
+
+Summary
+- The code fails because for_offset_hours_minutes rejects negative minute arguments up front (minutes < 0) even though the method's docstring and later logic expect combinations like (-2, -15) to be valid.
+- Fix by deferring minutes validation until after combining with hours (or by conditionally allowing negative minutes when hours are non-positive).

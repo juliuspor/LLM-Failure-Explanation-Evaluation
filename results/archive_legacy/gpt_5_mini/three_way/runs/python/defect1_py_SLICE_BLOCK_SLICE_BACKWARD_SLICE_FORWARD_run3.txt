@@ -1,0 +1,35 @@
+What happened (where it failed)
+- The code throws ValueError at line 397: raise ValueError(f"Minutes out of range: {minutes_offset}") because minutes_offset was 60 (or otherwise outside 0–59) when that check ran.
+- The check is located at 396–397:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later code (lines 402 and 404) modifies minutes_offset:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  That shows the code expects to do further normalization/adjustment of minutes_offset after combining it with hours, but the strict range check occurred before those adjustments.
+
+Why it failed (root cause)
+- The minutes field was allowed to contain a value (for example 60) that is only valid after you adjust it together with the hours component. But the code validates minutes_offset too early — before the later normalization/combination with hours_in_minutes.
+- In other words, the order of operations is wrong: you reject minute values outside 0–59 at line 396 even though the parsing/normalization that would make them valid (or detect a different error) happens later at lines 402/404. That causes valid inputs (or inputs that should be normalized) to be rejected incorrectly, producing the "Minutes out of range" error.
+
+Concrete example to illustrate
+- Suppose the parsed raw parts are hours = 1 and minutes = 60 (minutes_offset == 60).
+- The intent of the later code is to combine/normalize hours and minutes (e.g. rolling 60 minutes into +1 hour), which would make the overall offset valid.
+- But because the code checks minutes_offset at line 396 before doing that combination, it raises "Minutes out of range: 60" instead of normalizing to hours=2 and minutes=0 (or handling the overflow as intended).
+
+Exact fixes (clear steps)
+1. Move the minutes range check so it runs after the normalization/combination with hours:
+   - Remove or postpone lines 396–397.
+   - After lines 402/404 (after you compute the combined minutes_offset or offset), validate that the resulting minutes value is within the permitted range and that the overall offset is within allowed bounds.
+2. Or normalize the raw minutes immediately after parsing: if minutes == 60, add 1 to hours and set minutes = 0 (and similarly handle >60 or negative by carrying into hours), then run the existing range checks. Concretely:
+   - After parsing raw_hours and raw_minutes:
+     - carry = raw_minutes // 60
+     - minutes = raw_minutes % 60
+     - hours += carry
+     - then run the existing minutes and hours range checks
+3. After normalization ensure you re-check hours bounds and that offset does not exceed application limits (this is what the later "Offset is too large" check at line 407 expects).
+
+Why these steps fix it
+- They ensure you only validate minute-range after you have a final, normalized minutes value (0–59) or after you have already handled minute overflow into hours. That prevents rejecting values that can be legitimately normalized, and keeps validation consistent with the later offset calculations at lines 402–407.
+
+If you want, paste the surrounding parsing code (the few lines before 396 and the block around 400–408) and I will give a small patch showing exactly where to move the check or how to normalize minutes.

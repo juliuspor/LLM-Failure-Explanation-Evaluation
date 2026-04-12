@@ -1,0 +1,35 @@
+What fails
+- The method crashes with an uncaught exception at the multiplication step (line 409: offset = FieldUtils.safe_multiply(...)). The code intends to catch overflow from safe_multiply in the except block (lines 410–411) but that handler never runs, so the exception propagates out of for_offset_hours_minutes.
+
+Why it happens (root cause)
+- The code is mixing language/exception types: safe_multiply (the call on line 409) throws a different exception type than the except clause catches.
+  - In the shown code the except clause catches ArithmeticError (line 410), but FieldUtils.safe_multiply (a Joda-Time/Java utility) throws java.lang.ArithmeticException on overflow. ArithmeticException is not the same as the caught ArithmeticError here, so the except block is not triggered and the error is not handled.
+  - Because the exception type doesn't match, the intended "raise ValueError('Offset is too large')" path never runs and the caller sees the raw arithmetic exception instead.
+
+Where it occurs
+- The failure occurs at line 409:
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  and the incorrect exception handling is at lines 410–411:
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+What to do (concrete fix steps)
+1. Use the correct exception type for the environment:
+   - If this is Java code, change the catch to catch ArithmeticException (not ArithmeticError) and rethrow the intended exception:
+       try {
+           offset = FieldUtils.safeMultiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE);
+       } catch (ArithmeticException ex) {
+           throw new IllegalArgumentException("Offset is too large", ex);
+       }
+   - If this is Python code wrapping a library that raises OverflowError (or another Python exception), catch that exact exception:
+       except OverflowError:
+           raise ValueError("Offset is too large")
+
+2. (Optional but recommended) Use a separate variable for the computed total minutes so the parameter minutes_offset is not reused and the code is clearer:
+   - compute total_minutes = hours_offset * 60 +/- minutes_component
+   - then call safe_multiply(total_minutes, ...)
+
+3. Add a unit test for boundary cases that cause the multiplication to overflow (or produce the maximum allowed offset) so the handler is exercised.
+
+Summary
+- The code fails because it catches the wrong exception type. The multiplication throws an ArithmeticException (Java) / OverflowError (Python), but the except/catch uses ArithmeticError, so the intended ValueError path is never taken. Fix by catching the correct exception and (optionally) use a separate total_minutes variable for clarity.

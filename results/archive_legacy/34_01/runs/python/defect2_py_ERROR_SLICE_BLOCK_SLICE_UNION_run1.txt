@@ -1,0 +1,49 @@
+What happened (where it failed)
+- The exception is raised in get_paint at lines 71 and 74–75:
+  - Line 71 computes g:
+    g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - Line 74 checks g and raises the ValueError when g < 0 or g > 255.
+- So the ValueError is triggered because the computed g is outside the allowed 0–255 range.
+
+Why it happened (root cause, with variables and lines)
+- The formula maps value into a 0–255 green channel by scaling (value - _lower_bound) / (_upper_bound - _lower_bound).
+- If value < self._lower_bound then (value - self._lower_bound) is negative, so g < 0, which hits the check on line 74 and raises the ValueError on line 75.
+- If value > self._upper_bound then (value - self._lower_bound) / (...) > 1, so g > 255, which also triggers the same check.
+- If self._upper_bound == self._lower_bound you would get a ZeroDivisionError at line 71 (different failure) — that is a related potential bug to guard against.
+
+Consequence
+- The immediate cause is that get_paint received a value outside the expected [self._lower_bound, self._upper_bound] interval (or a tiny floating-point overshoot), so the computed g lies outside 0–255 and your explicit check raises the exception.
+
+Concrete fixes (step-by-step, with exact places to change)
+
+1) Decide desired behavior: either reject out-of-range values with a clearer error, or clamp them into range. Pick one.
+
+2A) If you want to reject but with a clearer message, change the check to validate the original value and report bounds (replace lines 71–75):
+- Before computing g, validate denominator and value:
+  - if self._upper_bound == self._lower_bound:
+      raise ValueError(f"Invalid bounds: upper_bound == lower_bound ({self._upper_bound}) in get_paint")
+  - if value < self._lower_bound or value > self._upper_bound:
+      raise ValueError(f"value {value} outside expected range [{self._lower_bound}, {self._upper_bound}] in get_paint")
+- Then compute g (won't trigger your 0–255 check).
+
+2B) If you want to clamp values into [0,255] instead of raising, replace the check at lines 74–75 with clamping after the int conversion:
+- After line 71:
+  - g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - g = max(0, min(255, g))
+  - (remove the ValueError raise)
+- Also add the zero-range guard:
+  - if self._upper_bound == self._lower_bound:
+      g = 0  # or 255 or some chosen default
+
+3) Add an explicit unit test or caller-side validation where get_paint is called so you know whether out-of-range values are expected. If calls are passing wrong units (e.g., degrees instead of normalized), fix the caller.
+
+Example minimal patch (to clamp and avoid ZeroDivisionError)
+- Replace lines 71–75 with:
+  if self._upper_bound == self._lower_bound:
+      g = 0
+  else:
+      g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+      g = max(0, min(255, g))
+
+Summary
+- The function raised ValueError because g was outside 0–255, caused by value being outside [self._lower_bound, self._upper_bound] (or floating-point overshoot). Fix by validating bounds, validating or clamping input value, and handling the zero-length range.

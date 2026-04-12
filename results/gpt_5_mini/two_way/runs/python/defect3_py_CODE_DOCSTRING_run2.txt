@@ -1,0 +1,22 @@
+The code fails because of an infinite loop and incorrect surrogate handling in the while loop’s pos advancement. Specifically:
+
+1) In translate(), when translate_codepoint(...) returns a non-zero consumed value, the code enters the for pt in range(consumed) loop and does: pos += char_count(code_point_at(code_units, pos)). But code_point_at(code_units, pos) expects to read a codepoint starting at pos; char_count(...) returns 1 for BMP codepoints or 2 for surrogate-pair codepoints (i.e., number of UTF-16 code units that form that codepoint). If a translator consumed N codepoints, the loop should advance pos by the number of UTF-16 code units spanned by those consumed codepoints. However, this implementation repeatedly calls code_point_at at the same pos each iteration because pos is incremented by char_count of the same starting codepoint only after computing it; for consumed>1 the first iteration may advance by 1 or 2, but if char_count returns 2 and the consumed claim reflects that the translator already consumed the surrogate pair, the next iteration will call code_point_at on the second code unit (a low surrogate) which is invalid, causing code_point_at to raise or return an unexpected value. Worse, if char_count returns 0 or the translator returns consumed value inconsistent with the actual code units, pos may not advance, causing an infinite loop.
+
+2) The loop’s logic assumes translate_codepoint and code_point_at/char_count semantics align: translate_codepoint consumes code points, but pos is measured in code units. The code incorrectly mixes those units when advancing pos. The inner loop should iterate over consumed codepoints and for each advance pos by the number of UTF-16 code units that that specific codepoint occupies, but it currently calls code_point_at(code_units, pos) without assuring pos is at the start of the next codepoint, leading to reading a low surrogate as a separate codepoint.
+
+Where it occurs (line references in the snippet): inside the while pos < length: block, specifically the for pt in range(consumed): pos += char_count(code_point_at(code_units, pos)) line.
+
+What happened: when a translator returns consumed>0 for a surrogate-pair codepoint, the code may call code_point_at on the low surrogate on the next iteration or miscount units, so pos can become incorrect or unchanged, causing exceptions or an infinite loop. 
+
+How to fix (concrete steps):
+1. Treat consumed as number of code points consumed; advance pos by summing the UTF-16 code unit lengths of exactly those consumed codepoints. Concretely, replace the for-loop with:
+   for _ in range(consumed):
+       cp = code_point_at(code_units, pos)
+       pos += char_count(cp)
+This ensures code_point_at is always called at the current pos and pos moves forward each iteration.
+
+2. Alternatively, change translate_codepoint to return the number of UTF-16 code units consumed (not codepoints), and then simply do pos += consumed. If you choose this, update all translators accordingly.
+
+3. Add validation: if char_count(...) returns <=0 or if pos does not advance during an iteration, raise an exception to avoid infinite loops.
+
+These changes ensure pos advances correctly over surrogate pairs and prevents infinite loops or invalid reads.

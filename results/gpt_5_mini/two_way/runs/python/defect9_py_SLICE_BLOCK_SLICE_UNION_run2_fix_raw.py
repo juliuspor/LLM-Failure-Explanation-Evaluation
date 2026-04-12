@@ -1,0 +1,77 @@
+@staticmethod
+def replace_each(
+    text: Optional[str],
+    search_list: Optional[List[Optional[str]]],
+    replacement_list: Optional[List[Optional[str]]],
+) -> Optional[str]:
+    if text is None:
+        return None
+    if text == "":
+        return ""
+    if search_list is None or replacement_list is None:
+        return text
+    # Validate equal lengths as required by the diagnosis
+    if len(search_list) != len(replacement_list):
+        raise ValueError(
+            f"Search and Replace array lengths don't match in replace_each: {len(search_list)} vs {len(replacement_list)}"
+        )
+
+    # Build cleaned parallel lists: only keep entries where search is non-empty string and replacement is not None
+    cleaned_search: List[str] = []
+    cleaned_replacement: List[str] = []
+    for i, s in enumerate(search_list):
+        rep = replacement_list[i] if i < len(replacement_list) else None
+        if s is None:
+            continue
+        if len(s) == 0:
+            continue
+        if rep is None:
+            continue
+        cleaned_search.append(s)
+        cleaned_replacement.append(rep)
+
+    if len(cleaned_search) == 0:
+        return text
+
+    search_length = len(cleaned_search)
+    no_more_matches_for_repl_index = [False] * search_length
+
+    text_index = -1
+    replace_index = -1
+
+    # Find the first match among cleaned lists
+    for i in range(search_length):
+        temp_index = text.find(cleaned_search[i])
+        if temp_index == -1:
+            no_more_matches_for_repl_index[i] = True
+        elif text_index == -1 or temp_index < text_index:
+            text_index = temp_index
+            replace_index = i
+
+    if text_index == -1:
+        return text
+
+    start = 0
+    parts: List[str] = []
+
+    while text_index != -1:
+        parts.append(text[start:text_index])
+        parts.append(cleaned_replacement[replace_index])
+
+        start = text_index + len(cleaned_search[replace_index])
+
+        text_index = -1
+        replace_index = -1
+
+        for i in range(search_length):
+            if no_more_matches_for_repl_index[i]:
+                continue
+            temp_index = text.find(cleaned_search[i], start)
+            if temp_index == -1:
+                no_more_matches_for_repl_index[i] = True
+            elif text_index == -1 or temp_index < text_index:
+                text_index = temp_index
+                replace_index = i
+
+    parts.append(text[start:])
+    return "".join(parts)

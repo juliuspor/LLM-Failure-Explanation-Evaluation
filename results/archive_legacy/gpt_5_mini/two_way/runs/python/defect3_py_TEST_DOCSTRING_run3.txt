@@ -1,0 +1,57 @@
+What happened
+- The failure happens when CsvEscaper.translate_string processes a UTF-16 surrogate pair that is followed by another character (the test input "\U0001F630A"). The test that fails is test_translate_surrogate_pair_with_suffix when escaper.translate_string(input_str) is called.
+- The translator loop uses an index variable (commonly named i) that advances through input_seq. After reading a supplementary character (a code point represented by a UTF-16 surrogate pair), the code only increments i by 1. Because a surrogate pair occupies two UTF-16 code units, the index becomes out of sync and a subsequent access to input_seq[i] goes past the string end or lands on the second half of the pair incorrectly. That leads to an IndexError or wrong behavior when the next iteration tries to read or advance again.
+
+Why this occurs (root cause)
+- The translator is working at the UTF-16 code-unit level (helpers referenced in your code: to_utf16_code_units and code_point_at). code_point_at likely returns a full Unicode code point even when the input is stored as two UTF-16 code units (a high surrogate followed by a low surrogate).
+- However, the loop that iterates the input_seq still advances i as if each iteration consumed exactly one code unit. When code_point_at consumes two UTF-16 code units (a surrogate pair), the code fails to advance i by 2. Concretely:
+  - Suppose i points at the high surrogate (input_seq[i] is high surrogate).
+  - code_point_at(input_seq, i) reads both input_seq[i] and input_seq[i+1] and returns the supplementary code point.
+  - The code then does i += 1 (or implicitly assumes the next loop iteration will move to the next character).
+  - The next loop iteration starts at the low surrogate (input_seq[i] points to the low surrogate) or beyond the end, causing incorrect processing or IndexError.
+- The test that demonstrates the bug uses "\U0001F630A" (emoji then 'A'). The translator should consume the emoji as one code point and then process 'A'. Because i was only advanced by 1, it either sees the low surrogate as a separate code unit or tries to read past the end when input ends with a surrogate pair, which triggers the failure.
+
+Where it occurs in the code
+- The failure is triggered from CsvEscaper.translate_string(input_str) called in TestCharSequenceTranslator.test_translate_surrogate_pair_with_suffix.
+- Inside CharSequenceTranslator.translate (the method described in the docstring block you included), the problem is in the main loop where i is advanced. Look for code similar to:
+    while i < len(input_seq):
+        codepoint = code_point_at(input_seq, i)
+        ... handle codepoint ...
+        i += 1   # <-- this is wrong when codepoint was a surrogate pair
+  That i += 1 (or equivalent single-step advancement) is the specific line to fix.
+
+Concrete fixes (step-by-step)
+1. Determine how many UTF-16 code units the code_point_at call consumed.
+   - If code_point_at returns a code point value (an int), check whether that value is > 0xFFFF (i.e. a supplementary code point). If > 0xFFFF, the UTF-16 representation uses two code units (a surrogate pair).
+   - Alternatively, detect surrogates directly: if input_seq[i] is a high surrogate and input_seq[i+1] exists and is a low surrogate, then the sequence consumed two code units.
+
+2. Advance i by the correct count:
+   - Replace i += 1 with:
+       if codepoint > 0xFFFF:
+           i += 2
+       else:
+           i += 1
+   - Or, with surrogate checks:
+       if is_high_surrogate(input_seq[i]) and i+1 < len(input_seq) and is_low_surrogate(input_seq[i+1]):
+           i += 2
+       else:
+           i += 1
+
+3. Ensure bounds checks:
+   - Before checking input_seq[i+1], ensure i+1 < len(input_seq). If a high surrogate appears at the last code unit (unpaired), handle it as an error or treat it safely per your translator’s intended behavior.
+
+4. Unit-test:
+   - Run the existing tests (including test_translate_surrogate_pair_with_suffix). Add tests for:
+       - surrogate pair at end of string (already present: test_translate_surrogate_at_end)
+       - surrogate pair followed by another char (the failing test)
+       - single surrogate pair alone and mixed content (already present)
+
+Alternative (simpler) approaches
+- Iterate by Python code points instead of trying to track UTF-16 code units: for ch in input_seq: ...
+  - If your translator is intentionally designed to work at UTF-16 code unit level (e.g., to match a Java implementation), then use the explicit two-unit handling above. If not, Python’s native iteration treats each Unicode code point correctly and avoids surrogate bookkeeping.
+
+Why the suggested change fixes it
+- If a supplementary code point is represented by two UTF-16 code units, advancing i by 2 keeps i aligned with the next logical character in the input. That prevents re-reading the low surrogate as if it were a separate character, and prevents stepping past the string end. The tests you have (emoji + 'A', emoji alone, multiple emoji, mixed text) will then behave correctly.
+
+Summary (short)
+- The bug is an incorrect index advancement after reading a supplementary Unicode code point (surrogate pair). The loop advances i by 1 even though code_point_at consumed two UTF-16 code units. Fix by advancing i by 2 when the code point > 0xFFFF (or when a high+low surrogate pair is detected).

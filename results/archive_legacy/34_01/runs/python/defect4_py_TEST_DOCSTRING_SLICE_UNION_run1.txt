@@ -1,0 +1,61 @@
+What happened (symptom)
+- The assertion failed because s.get_max_middle_index() returned the old value of _max_middle_index instead of 1 after the four add() calls.
+- get_max_middle_index() simply returns self._max_middle_index (lines 449–451), so the real bug is that _max_middle_index was never updated to reflect the newly added periods.
+
+Where it occurs in the code
+- The getter is at lines 449–451:
+  - def get_max_middle_index(self) -> int:
+  -     return self._max_middle_index
+- The failure originates in the code path that runs when you call s.add(...). The add method updates the stored time periods and updates other bound/index variables (for example _max_index, _min_index, _max_start/_max_end or similar), but it does not update _max_middle_index in all cases.
+
+Why it fails (root cause)
+- The test sequence builds these time periods in this order:
+  1. add(0..100) with index 0
+  2. add(100..200) with index 1
+  3. add(0..50) with index 2
+  4. add(50..100) with index 3
+- After step 2 the code had a _max_middle_index pointing at index 1 (the middle of 100..200 or whichever period was recorded).
+- Steps 3 and 4 create two periods that split the earlier 0..100 interval, and they change the set of periods that should be considered when computing the "maximum middle" bound.
+- The add() implementation correctly adjusts some bound/index fields (e.g. the variables that track min/max start/end or _max_index/_min_index), but it fails to update _max_middle_index when a later add() either:
+  - extends or shrinks the range used to compute the "middle" or
+  - inserts periods that change which period has the greatest middle value.
+- Because add() does not update _max_middle_index in these cases, get_max_middle_index() returns the stale index from earlier calls rather than 1.
+
+Concrete variables and places to check
+- _max_middle_index — returned by get_max_middle_index() and left stale.
+- add(...) — the method that must update _max_middle_index but currently does not in the relevant branches.
+- Other bound variables that add() already updates (likely _max_start/_max_end/_max_index/_min_index) — compare how those are updated vs. how _max_middle_index is handled (or not handled).
+
+How to fix it (explicit steps)
+1. In add(...), after the logic that updates the other max/min bounds (the same place where you set _max_index, _max_start, _max_end, _min_index, etc.), add explicit code to update _max_middle_index. Two safe options:
+
+   Option A — update incrementally (recommended if you want to avoid full scans)
+   - Compute the "middle" value for the new period (for example middle = (period.start + period.end)/2).
+   - Compare that middle to the current recorded max middle (you will need to store the current max middle value or compute it from the period at _max_middle_index).
+   - If the new period's middle is greater than the stored max middle, set self._max_middle_index = index.
+   - Also handle the case where inserting the period shifts indices (if add() inserts into a list and changes indices of previously stored periods) — when insertion changes indices, you must adjust any stored index fields (including _max_middle_index) that point to items right of the insertion point (increment/decrement them accordingly).
+
+   Option B — recompute on each add (simpler, robust)
+   - After every successful add that mutates the collection, recompute the index with the maximum middle by scanning all stored periods:
+     pseudo-code:
+       best_index = -1
+       best_middle = -inf
+       for i, p in enumerate(self._periods):
+           m = (p.start + p.end)/2
+           if m > best_middle:
+               best_middle = m
+               best_index = i
+       self._max_middle_index = best_index
+   - This avoids subtle bugs from index shifts and is simpler to get correct.
+
+2. If your code maintains other index fields that assume stable indices (e.g. _max_index), make sure you update them consistently whenever you insert or remove periods. If you choose option A, implement index-shift adjustments for all stored index fields.
+
+3. Add unit tests that cover:
+   - Adding periods that split an existing period (like the provided test),
+   - Inserting a period at start/middle/end to verify all stored indices update,
+   - Removing periods (if supported) to ensure indices and bounds remain correct.
+
+Why these fixes work
+- The failure happened because _max_middle_index was left stale; either recomputing it after any mutation or updating it correctly when you mutate will ensure get_max_middle_index() returns the correct index (1 in your test) every time.
+
+If you want, paste the add(...) method here and I will show exactly where to insert the update code (incremental or full-scan) and give the exact lines to change.

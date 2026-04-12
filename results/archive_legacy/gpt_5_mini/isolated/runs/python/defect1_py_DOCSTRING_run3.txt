@@ -1,0 +1,86 @@
+What happened (concise)
+- Root cause: the code adds minutes_offset to hours_offset*60 without applying the correct sign to minutes when hours_offset is negative. That produces the wrong total offset for cases like (-2, 15) and therefore returns the wrong zone (or fails a bounds check).
+- Where it occurs: in the lines that compute the combined offset (the lines that look like
+  total_minutes = hours_offset * 60 + minutes_offset
+  or
+  total_seconds = hours_offset * 3600 + minutes_offset * 60).
+- Concrete failing example:
+  - Input: hours_offset = -2, minutes_offset = 15 (intended result -02:15).
+  - Current computation: total_minutes = -2 * 60 + 15 = -120 + 15 = -105 → -01:45 (wrong).
+  - The code therefore constructs the wrong DateTimeZone or rejects the result with the wrong message.
+
+Why this is wrong (step‑by‑step)
+1. The policy in the docstring treats the sign of hours and minutes specially:
+   - If hours is negative and minutes positive (e.g. -2,15) the result should be negative overall: -02:15.
+   - If hours is positive and minutes negative that combination is invalid.
+   - If hours is zero, the sign is determined by minutes.
+2. The current code just algebraically adds hours_offset*60 and minutes_offset (or the equivalent in seconds). That assumes minutes_offset carries the correct sign relative to hours, but for (-2, 15) minutes_offset is positive; adding it reduces the magnitude of the negative hour rather than increasing it. In short: minutes must be applied with the same sign as the final offset, not simply added.
+
+Where to change it (exact lines to replace)
+- Find the lines that compute the combined offset, e.g.:
+  total_minutes = hours_offset * 60 + minutes_offset
+  (or the seconds variant total_seconds = hours_offset * 3600 + minutes_offset * 60)
+- Replace that calculation with logic that applies minutes with the correct sign determined by hours and minutes as the docstring specifies.
+
+Exact fixes (copy/paste ready)
+
+Preferred, clear version (preserves docstring rules):
+
+Replace the bad computation with:
+
+    # determine the sign for the combined offset
+    if hours_offset > 0:
+        # hours positive → minutes must be non-negative (docstring: positive minutes with positive hours allowed,
+        # negative minutes with positive hours is invalid)
+        if minutes_offset < 0:
+            raise ValueError("minutes must be non-negative when hours is positive")
+        sign = 1
+    elif hours_offset < 0:
+        # hours negative → minutes must be treated as adding magnitude to the negative offset
+        if minutes_offset < 0:
+            # (-2, -15) is equivalent to (-2, 15)
+            minutes_offset = abs(minutes_offset)
+        sign = -1
+    else:  # hours_offset == 0
+        # zero hours: sign comes from minutes
+        if minutes_offset < 0:
+            sign = -1
+            minutes_offset = abs(minutes_offset)
+        else:
+            sign = 1
+
+    total_minutes = sign * (abs(hours_offset) * 60 + abs(minutes_offset))
+
+    # optional: bounds check using total_minutes
+    if abs(total_minutes) > (23 * 60 + 59):
+        raise ValueError("resulting offset exceeds +/- 23:59")
+
+    # construct zone using minutes (or convert to seconds if your factory expects seconds)
+    return DateTimeZone.for_offset_minutes(total_minutes)
+
+Simpler arithmetic alternative (equivalent, less branching):
+
+    # If hours non-zero, apply its sign to minutes. If hours is zero, minutes keep their own sign.
+    if hours_offset != 0:
+        minutes_signed = (1 if hours_offset > 0 else -1) * abs(minutes_offset)
+    else:
+        minutes_signed = minutes_offset
+
+    total_minutes = hours_offset * 60 + minutes_signed
+
+    if abs(total_minutes) > (23 * 60 + 59):
+        raise ValueError("resulting offset exceeds +/- 23:59")
+
+    return DateTimeZone.for_offset_minutes(total_minutes)
+
+Why this fix works
+- It enforces the docstring rule that minutes take the sign implied by hours when hours ≠ 0, and when hours == 0 the minutes sign stands alone.
+- It avoids the incorrect reduction of magnitude for negative hours with positive minutes (the exact failing case).
+- It preserves existing bounds checks.
+
+Extra checks you should keep or add
+- Reject minutes outside [-59, 59] and hours outside [-23, 23] as the docstring requires.
+- When hours > 0 and minutes < 0, raise ValueError (docstring explicitly marks that invalid).
+- Normalize (-2, -15) to (-2, 15) as the docstring treats both as -02:15.
+
+If you paste the exact lines from your code that compute the total offset, I can give the minimal one-line replacement and the exact line numbers to change.

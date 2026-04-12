@@ -1,0 +1,43 @@
+What happens
+- At get_paint() line 71 you compute g directly from the input value:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after (lines 74–75) the code raises ValueError if g < 0 or g > 255:
+  if g < 0 or g > 255:
+      raise ValueError(...)
+
+Why the tests fail (root cause)
+- The tests intentionally pass values outside the configured bounds (e.g. value = -0.5, value = 1.5). For those inputs the computed g is negative (for -0.5) or >255 (for 1.5).
+- Instead of clamping out-of-range inputs to the nearest bound (black or white), the code raises a ValueError at lines 74–75. That triggers the exception seen in the failing test.
+- This occurs in get_paint(), specifically around lines 71–75 in your slice.
+
+What exactly went wrong
+- The method promises to return a grayscale RGB tuple for any numeric value and the docstring/test expect out-of-range inputs to be clamped to 0..255 (and to lower/upper bounds).
+- Instead it treats out-of-range intermediate g values as an error and raises a ValueError with an unhelpful message ("Color parameter outside of expected range: Red Green Blue"), so negative or >1.0 inputs fail rather than being clamped to black/white.
+
+Concrete fixes (step-by-step)
+1. Clamp the input value to the configured bounds before converting to an RGB component, e.g.:
+   value_clamped = max(self._lower_bound, min(self._upper_bound, value))
+2. Compute the normalized fraction using value_clamped:
+   frac = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+3. Compute g and ensure it is inside 0..255 (use clamp to be safe):
+   g = int(frac * 255.0)
+   g = max(0, min(255, g))
+4. Remove (or change) the ValueError raise that treats out-of-range g as an error. If you still want to validate, raise only for invalid inputs like non-numeric values or a zero-length range (lower_bound == upper_bound), with clear message and at the place that fails (constructor or start of get_paint).
+5. Optionally improve the error message to be specific, e.g.:
+   raise ValueError("lower_bound must be < upper_bound") for zero range
+
+Minimal corrective code example for get_paint:
+  def get_paint(self, value: float) -> Tuple[int,int,int]:
+      # clamp input to bounds
+      v = max(self._lower_bound, min(self._upper_bound, value))
+      denom = (self._upper_bound - self._lower_bound)
+      if denom == 0.0:
+          raise ValueError("lower_bound and upper_bound must differ")
+      frac = (v - self._lower_bound) / denom
+      g = int(frac * 255.0)
+      g = max(0, min(255, g))
+      return (g, g, g)
+
+Why this fix resolves the failure
+- Clamping the input value guarantees g will be in 0..255 for values outside the range, so tests expecting black for -0.5 and white for 1.5 will pass.
+- It avoids raising ValueError for valid-but-outside-range inputs while still protecting against invalid configuration (zero range).

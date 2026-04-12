@@ -1,0 +1,45 @@
+What happened (where it fails)
+- The failure happens in LocaleUtils.to_locale when it parses strings like "fr__POSIX". The problematic code is around the lines you showed:
+  - line 222: length = len(locale_str)
+  - line 231: (later) if length == 2: ...
+  - line 237: ch3 = locale_str[3]
+  - line 238: ch4 = locale_str[4]
+  - line 239–240: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+
+- For the input "fr__POSIX":
+  - Indices: 0='f', 1='r', 2='_', 3='_', 4='P', ...
+  - The code reads ch3 = locale_str[3] which is '_' and then checks whether ch3 is between 'A' and 'Z'. Because '_' is not an uppercase letter the test fails and a ValueError is raised with "Invalid locale format", even though "fr__POSIX" is a valid language__variant form (language + empty country + variant).
+
+Why it fails (root cause)
+- The parser assumes that when it sees an underscore at position 2 it will always find a two-letter uppercase country code starting at positions 3 and 4. It therefore unconditionally reads locale_str[3] and locale_str[4] and requires them to be uppercase letters.
+- It does not handle the "empty country" case where there are two underscores in a row (locale_str[2] == '_' and locale_str[3] == '_'). In that case the country is the empty string and the variant starts at index 4 (i.e., locale_str[4:]). The code treats the second underscore as if it should be an uppercase letter and so rejects valid inputs like "fr__POSIX".
+- As a result, a valid language__variant input is misclassified and a ValueError is raised at the ch3/ch4 check (lines 237–240).
+
+What to change (concrete steps)
+1. Detect the double-underscore (empty country) case before you validate ch3 and ch4. Specifically:
+   - If locale_str[2] == '_' and locale_str[3] == '_':
+     - set country = ""
+     - set variant = locale_str[4:]
+     - validate that variant is non-empty (otherwise error)
+     - return Locale(language, "", variant)
+2. Only run the ch3/ch4 uppercase-country checks when you are in the path that expects a two-letter country (i.e., single underscore followed by two chars).
+3. Ensure you do not index locale_str[3] or locale_str[4] before checking that length is sufficient (guard against IndexError). In practice, check length first or order your branches so you only access those indices when length >= 5.
+
+Example of the exact condition to add (pseudo-Python showing where to insert)
+- Before the lines that read ch3/ch4, add:
+
+    # handle language__variant (empty country) e.g. "fr__POSIX"
+    if length >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+        if length == 4:
+            raise ValueError(f"Invalid locale format: {locale_str}")  # no variant
+        language = locale_str[:2]
+        country = ""
+        variant = locale_str[4:]
+        return Locale(language, country, variant)
+
+- Then the existing code that expects a country can proceed safely (and only then read locale_str[3] and locale_str[4]).
+
+Why this fix works
+- It explicitly recognizes the valid "language__variant" format and avoids treating the second underscore as an invalid character. It also prevents out-of-range indexing by checking length before accessing locale_str[3]/[4].
+
+If you want, I can produce a small patched version of the to_locale function showing the exact lines to change.

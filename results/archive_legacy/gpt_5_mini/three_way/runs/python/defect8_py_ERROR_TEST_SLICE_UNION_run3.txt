@@ -1,0 +1,44 @@
+What happened (where it failed)
+- The test calls LocaleUtils.to_locale("fr__POSIX").
+- In to_locale, at lines 237–239 the code does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - then it checks that ch3 and ch4 are uppercase letters and raises ValueError if not.
+- For "fr__POSIX", locale_str[3] is '_' (an underscore), so the uppercase-check fails and the function raises
+  ValueError("Invalid locale format: fr__POSIX").
+
+Why it failed (root cause)
+- The method assumes that when a locale has an underscore after the language, a two-letter country code always occupies positions 3–4. It therefore unconditionally reads locale_str[3] and locale_str[4] and requires them to be A–Z.
+- That assumption is incorrect for the Java-style variant-only form language__variant (two underscores in a row), where the country is empty. Example: "fr__POSIX" has:
+  - locale_str[0:2] = "fr" (language)
+  - locale_str[2] = '_' (separator)
+  - locale_str[3] = '_' (second separator indicating empty country)
+  - locale_str[4:] = "POSIX" (variant)
+- Because the code never checks for the double-underscore case before accessing ch3/ch4 and enforcing uppercase, it treats '_' as an invalid country letter and raises the ValueError. This is exactly what your failing test documents.
+
+Exactly where to change (line references & variables)
+- Before lines 237–239 (before reading ch3 = locale_str[3]), detect the double-underscore pattern using locale_str[2] and locale_str[3].
+- If locale_str[2] == '_' and locale_str[3] == '_' then:
+  - set language = locale_str[0:2]
+  - set country = "" (empty string)
+  - set variant = locale_str[4:] (ensure bounds/length checks)
+  - return Locale(language, country, variant)
+- Only if the double-underscore pattern is not present should the code proceed to read ch3/ch4 and validate a two-letter uppercase country.
+
+Concrete fix outline (steps)
+1. At the start of the branch handling underscores (before ch3 = locale_str[3]), add:
+   - if len(locale_str) > 3 and locale_str[2] == '_' and locale_str[3] == '_':
+       - variant = locale_str[4:]  # may be empty or non-empty; validate if needed
+       - return Locale(locale_str[0:2], "", variant)
+2. Then keep the existing logic for the normal language_country and language_country_variant cases, which validate ch3/ch4 as uppercase letters and build country and variant.
+3. Also ensure you check string length before indexing (the new check uses len(locale_str) > 3 to be safe).
+
+Why this fix works
+- It explicitly recognizes and handles the language__variant form (empty country) before the code tries to parse a two-letter country code.
+- It prevents reading locale_str[3] and locale_str[4] when the character at index 3 is actually an underscore, avoiding the incorrect uppercase-letter validation and the resulting ValueError.
+
+Optional small additional checks
+- If you want to enforce that the variant is non-empty for the double-underscore case, add a length check on locale_str[4:]; otherwise allow empty variants if desired.
+- Keep existing invalid-length and case checks for other forms as they already cover language-only and language_country formats.
+
+This is the root cause and a minimal, deterministic fix: detect the double underscore at indices 2 and 3 and return Locale(language, "", variant) before validating country letters at indices 3–4.

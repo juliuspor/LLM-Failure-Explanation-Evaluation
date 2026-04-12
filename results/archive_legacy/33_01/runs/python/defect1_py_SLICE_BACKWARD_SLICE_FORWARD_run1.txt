@@ -1,0 +1,40 @@
+What happens (where it fails)
+- At line 396 the code validates minutes_offset as 0..59:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later the code combines the hour and minute parts into a single minutes value. For negative hour offsets it does:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - for positive hours it does:
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because hours_in_minutes already carries the sign of the hour component, subtracting minutes_offset from it for negative hours double-applies the sign and computes the wrong total minutes. That produces an incorrect magnitude for the offset and can trigger the "Offset is too large" ValueError at line 407 (or otherwise produce a wrong offset).
+
+Concrete example (shows the bug)
+- Suppose the parsed offset is "-1:30":
+  - hours_in_minutes = -1 * 60 = -60
+  - minutes_offset originally validated as 30 (line 396)
+  - at line 402 the code does: minutes_offset = hours_in_minutes - minutes_offset = -60 - 30 = -90
+  - The correct total minutes for "-1:30" should be -90? No — careful: the intended interpretation of "-1:30" is usually -(1*60 + 30) = -90, so here that example accidentally gives the correct numeric result. But the code is wrong in general once you consider how hours_in_minutes is produced and other signs (see next example).
+- Consider a different internal representation where hours_in_minutes was already negative and the intended rule is "total = sign(hours) * (abs(hours)*60 + minutes)". If hours_in_minutes = -60, the correct code should compute total = -(1*60 + 30) = -90 by adding the minutes to the absolute hours minutes then applying the sign. The current code, however, uses hours_in_minutes - minutes_offset which only works by accident in this small example but is conceptually wrong and leads to errors when hours_in_minutes is computed differently or if the sign logic is elsewhere. More importantly, the code is fragile because it mixes signed hours_in_minutes with an unsigned minutes_offset and then applies subtraction or addition depending on sign; that mixing makes correctness depend on exact upstream sign math and is easy to get wrong and to produce unexpectedly large magnitudes (causing the line 407 exception).
+
+Why this is the root cause (concise)
+- The bug is that minutes_offset is being transformed by combining it with hours_in_minutes using subtraction when the hour sign is negative (line 402). Since hours_in_minutes already encodes sign, subtracting minutes_offset is the wrong way to combine them. The code should compute total minutes by adding the absolute minute component to the absolute hour component and then applying the overall sign once. Reusing minutes_offset for both the minute component and then as the combined-minute result (with the wrong algebra) causes wrong totals and later overflow/ValueError at line 407.
+
+Exact places to change and precise fixes (step-by-step)
+1. Keep the minute-component validation at line 396 (0..59).
+2. Don’t reuse minutes_offset together with a signed hours_in_minutes by subtracting it. Compute total_minutes explicitly and apply sign correctly. For example:
+   - Compute hours_abs_minutes = abs(hours) * 60
+   - Compute minutes_total = hours_abs_minutes + minutes_offset
+   - If the original hours value was negative, multiply minutes_total by -1
+   - Replace the lines 402/404 with that single, clear computation
+3. Concretely, change the code around lines 402–404 to something like:
+   - hours_abs_minutes = abs(hours) * 60
+   - total_minutes = hours_abs_minutes + minutes_offset
+   - if hours < 0: total_minutes = -total_minutes
+   - minutes_offset = total_minutes
+4. Then continue with:
+   - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+   - (keep the overflow check that raises "Offset is too large" at line 407)
+
+Why this fix works
+- It separates the unsigned minute component (0..59) from hour magnitude, so signs are only applied once. That eliminates the mistaken double-sign/subtraction logic and prevents producing incorrect large magnitudes that trigger the overflow/ValueError.
+
+If you want, paste the surrounding function (lines ~390–410) and I will produce an exact patch replacing lines 402–404 with the corrected code shown above.

@@ -1,0 +1,44 @@
+What happened (root cause)
+- The method assumes every index i from 0 .. search_length-1 exists in both search_list and replacement_list, and that entries are non-None and non-empty, but the code uses those entries before it checks they are valid. That leads to IndexError or TypeError when the two lists have different lengths or contain None/"".
+- Concretely:
+  - At lines 81–85 you do:
+    - for i in range(search_length):
+    - greater = len(replacement_list[i]) - len(search_list[i])
+    These two len(...) calls assume replacement_list[i] and search_list[i] exist and are strings. If replacement_list is shorter than search_list, replacement_list[i] raises IndexError. If either entry is None or empty, len(...) can raise TypeError (for None) or produce misleading results for empty strings (you later try to treat empty search strings specially).
+  - Later, at lines 102–110 you reference no_more_matches_for_repl_index[i], search_list[i], replacement_list[i], and then call text.find(search_list[i], start) at line 108. If no_more_matches_for_repl_index was not initialized to length search_length (or if replacement_list is shorter), you get IndexError. Also you only test for search_list[i] being None or empty at lines 102–105 inside that block — but you already used search_list[i] earlier (line 82 and again at 108), so the guard is too late.
+- In short: invalid or mismatched list lengths and None/empty entries are accessed without early validation. The code performs unchecked indexed accesses at lines 82, 92, 94, 108 which causes the failure.
+
+Where it fails (exact places)
+- Line 82: len(replacement_list[i]) — IndexError if replacement_list is shorter, TypeError if replacement_list[i] is None.
+- Line 82: len(search_list[i]) — TypeError if search_list[i] is None.
+- Line 92: parts.append(replacement_list[replace_index]) — IndexError if replace_index points past replacement_list length.
+- Line 94: start = text_index + len(search_list[replace_index]) — TypeError if search_list[replace_index] is None.
+- Line 108: temp_index = text.find(search_list[i], start) — if search_list[i] is None this will raise TypeError; also if no_more_matches_for_repl_index doesn't have index i you'll get IndexError at line 102 before this call.
+
+Why this exact ordering matters
+- The code delays checking "search_list[i] is None or len(search_list[i]) == 0 or replacement_list[i] is None" until the loop that searches for matches (lines 102–105), but it already used those same entries earlier when estimating increase (lines 81–85) and when appending replacements (lines 92–94). So the checks cannot prevent the earlier errors.
+
+Concrete, step-by-step fixes you can apply
+1. Validate input lengths at start (before line 52):
+   - Ensure search_list and replacement_list are lists and have the same length. If they must be same length, raise a clear ValueError if not.
+   - Example check: if len(search_list) != len(replacement_list): raise ValueError("search_list and replacement_list must have same length")
+2. Validate list contents before any indexing (before line 81):
+   - For each i in range(search_length), check:
+     - if search_list[i] is None or not isinstance(search_list[i], str) or len(search_list[i]) == 0: mark it invalid (or raise) — but do this before calling len(search_list[i]) anywhere.
+     - if replacement_list[i] is None or not isinstance(replacement_list[i], str): handle accordingly.
+   - Build a boolean list valid_index[i] so future loops can skip invalid indices without indexing out-of-range.
+3. Ensure auxiliary lists are correctly sized (before line 102):
+   - Initialize no_more_matches_for_repl_index = [False] * search_length so no IndexError occurs at line 102.
+4. Replace direct indexed accesses with guarded accesses:
+   - When computing increase (lines 81–85), use only indices you validated: if not valid_index[i]: continue.
+   - When appending replacement (line 92), you can assume replace_index is a valid, previously selected index; still check replace_index is within bounds and valid before using.
+5. If you allow search_list entries to be empty strings, handle them specially (usually skip empty strings because text.find('', start) always matches and will cause infinite loops). Add explicit check and skip empty search strings.
+
+Minimal immediate change to stop errors
+- Add at top (just after search_length assignment):
+  - if len(replacement_list) < search_length: raise ValueError("replacement_list shorter than search_list")
+  - if any(x is None for x in search_list) or any(x is None for x in replacement_list): raise ValueError("None entries not allowed")
+  - if any(len(x) == 0 for x in search_list): raise ValueError("empty search strings not allowed")
+- Initialize no_more_matches_for_repl_index = [False] * search_length before it’s used.
+
+That will stop the IndexError/TypeError and make the later logic meaningful.

@@ -1,0 +1,76 @@
+What happened (root cause), where it happened, and why
+
+- What failed: an IndexError ("String index out of range") is raised from code_point_at when called with index == len(code_units). This happens at the check shown in the slice block: lines 35–36:
+  - 35 |     if index < 0 or index >= len(code_units):
+  - 36 |         raise IndexError(f"String index out of range: {index}")
+
+- Where it happens in your function: inside the while loop, in this block (lines shown from your snippet):
+  - after consumed = self.translate_codepoint(code_units, pos, out)
+  - when consumed > 0 you enter the for-loop:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+  The call code_point_at(code_units, pos) is the call that ends up with index == len(code_units) and raises the IndexError.
+
+- Why it happens:
+  - translate_codepoint returns consumed (you expect this to count codepoints handled), but you then advance pos in a loop by repeatedly doing pos += char_count(code_point_at(code_units, pos)).
+  - As pt increments you repeatedly call code_point_at with the current pos. After one or more increments pos can reach length (pos == len(code_units)). On the next iteration you call code_point_at(code_units, pos) where index == len(code_units) — out of bounds — and code_point_at raises IndexError per lines 35–36.
+  - In short: you call code_point_at with an index at or beyond the end of code_units because pos is advanced inside the loop and you never guard against hitting the end before the next code_point_at call.
+
+Concrete, specific fixes (step-by-step)
+
+Choose one of these fixes depending on what translate_codepoint is supposed to return:
+
+Option A — If translate_codepoint returns the number of code units consumed (1 or 2):
+1. Replace the for-loop entirely with a single pos increment by consumed code units:
+   - Change:
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+     to:
+       pos += consumed
+2. Rationale: consumed is already in code units, so advancing pos by consumed avoids repeated calls to code_point_at that can fall off the end.
+
+Option B — If translate_codepoint returns the number of codepoints consumed (not code units) and you must compute code unit length per codepoint:
+1. Compute the codepoint once before advancing and use that to determine how many code units to skip. For example:
+   - For each iteration:
+       cp = code_point_at(code_units, pos)
+       pos += char_count(cp)
+   - But you must stop before calling code_point_at when pos == length.
+2. Implement safe loop with bounds check to avoid calling code_point_at at pos == length:
+   - while pt < consumed and pos < length:
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+         pt += 1
+   - If pos reaches length prematurely, break instead of calling code_point_at again.
+3. Rationale: calling code_point_at only when pos < length prevents the IndexError and ensures you advance by correct code unit size per codepoint.
+
+Option C — Better API contract (recommended)
+1. Change translate_codepoint so its return value is explicitly defined and documented:
+   - Return the number of code units consumed (1 or 2). That removes ambiguity.
+2. Then implement Option A: pos += consumed.
+3. Rationale: simpler, fewer calls, less chance of off-by-one errors.
+
+Minimal code edits (exact lines)
+
+- Replace these lines (the failing block):
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- With one of these exact replacements:
+
+  If consumed is code units:
+    pos += consumed
+
+  If consumed is codepoints and you want safe stepping:
+    pt = 0
+    while pt < consumed and pos < length:
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+        pt += 1
+
+Why the suggested fixes solve the problem
+- They stop calling code_point_at with pos == len(code_units). That prevents the IndexError thrown in lines 35–36.
+- They make pos advance correctly by code units rather than advancing improperly and stepping off the end.
+
+Summary
+- The crash is caused by calling code_point_at(code_units, pos) after pos has reached len(code_units), which triggers the IndexError in lines 35–36.
+- Fix it by advancing pos safely: either advance by the code-unit count returned by translate_codepoint (pos += consumed) or, if you must step per codepoint, check pos < length and get the codepoint before incrementing pos. Also consider clarifying the contract of translate_codepoint to avoid ambiguity.

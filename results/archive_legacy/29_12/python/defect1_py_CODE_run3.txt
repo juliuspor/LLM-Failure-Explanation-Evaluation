@@ -1,0 +1,46 @@
+What happens (root cause)
+- The bug is in for_offset_hours_minutes (lines 1–18). It loses the sign when someone wants a negative offset that has zero hours and non‑zero minutes (for example, −00:30). That case is common for half‑hour or minute offsets.
+- Specifically, the method decides the sign of the minutes solely from hours_offset (line 11). If hours_offset == 0 there is no way to indicate a negative minute offset because -0 == 0. The early check on line 2 only special‑cases (0, 0) and does not cover (0, 30) which could mean +00:30 or −00:30 depending on intended sign — the method always treats hours_offset == 0 as non‑negative, so (0, 30) becomes +00:30.
+- Concretely: for hours_offset == 0 and minutes_offset == 30 the code goes to the else branch (line 13) and computes minutes_offset = hours_in_minutes + minutes_offset = 0 + 30 → +30 minutes. There is no way to produce −30 minutes because the sign is based on hours_in_minutes (line 11) and zero has no sign.
+
+Where it occurs (lines)
+- Input validation: line 6 enforces minutes_offset >= 0 which prevents passing a negative minute sign.
+- Sign application: lines 10–14 compute the signed total minutes using only hours_in_minutes to determine sign.
+- Early return: line 2 returns UTC only when both are zero, not handling the sign when hours_offset == 0.
+
+Why that causes a failure
+- If the caller needs an offset of −00:30 they cannot express it with the current parameter rules. The method returns +00:30 instead of −00:30 (a wrong timezone offset).
+- This is not an integer overflow or arithmetic bug; it is a logical/sign bug: the sign for the minute component is lost when hours_offset is zero.
+
+Exact fixes (concrete steps you can apply)
+Option A — allow minutes_offset to be signed (recommended)
+1. Change the minutes validation (line 6) to accept negative minutes: allow minutes_offset in range -59..59 instead of 0..59.
+2. Compute total minutes simply as total_minutes = hours_offset * 60 + minutes_offset (remove the conditional sign logic on lines 11–14).
+3. Keep the UTC special case only for total_minutes == 0 (replace line 2 check accordingly).
+
+Applied replacement code (replace lines 2–15):
+- validate:
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError(f"Hours out of range: {hours_offset}")
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- compute:
+    total_minutes = hours_offset * 60 + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- adjust special case:
+    if total_minutes == 0:
+        return cls.UTC
+
+Option B — keep minutes_offset non‑negative but add an explicit sign parameter
+1. Keep minutes_offset in 0..59.
+2. Add a boolean negative flag e.g. is_negative: bool.
+3. Compute total_minutes = hours_offset * 60 + (is_negative ? -minutes_offset : minutes_offset).
+4. Handle the hours_offset==0 case by using is_negative to represent −00:30.
+
+Why Option A is better
+- Simpler API and logic: combines sign and magnitude into one int for minutes.
+- Fixes the current surprising behavior where passing (0, 30) can't represent −00:30.
+
+Summary
+- Root cause: method uses hours_offset sign to determine the sign of minutes, so minute‑only negative offsets (hours_offset == 0) cannot be represented (lines 11–14). The fix is to let minutes_offset carry its own sign (or add an explicit sign flag) and compute total_minutes = hours_offset*60 + minutes_offset, then handle UTC when total_minutes == 0.

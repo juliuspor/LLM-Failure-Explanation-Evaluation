@@ -1,0 +1,53 @@
+What happened (what failed)
+- Running the tests that pass None in the replacement array raises an exception before any replacement logic runs.
+- The exception is raised at these lines when the code calls len(...) on items that can be None:
+  - line 82: greater = len(replacement_list[i]) - len(search_list[i])
+  - (the loop starts at line 81)
+- The tests that fail are test_null_safety_inside_arrays_single and test_null_safety_inside_arrays_mixed because replacement_list contains None (or search_list could contain None).
+
+Why it fails (root cause)
+- The code tries to compute the length difference between replacement_list[i] and search_list[i] (lines 81–84) to estimate buffer growth.
+- However, the function only checks for None (and empty search strings) later, inside the match-search loop (lines 102–105). That check is too late: len(...) has already been called on possibly-None values.
+- Calling len(None) raises TypeError (or "object of type 'NoneType' has no len()"), so the function errors out before it can treat None as “no replacement” as intended.
+
+Exactly where it happens
+- Precomputation loop: lines 81–84:
+  - 81: for i in range(search_length):
+  - 82:     greater = len(replacement_list[i]) - len(search_list[i])
+  - 83:     if greater > 0:
+  - 84:         increase += 3 * greater
+- The safety checks that would skip None entries happen later (so they never get a chance to run before the len(...) calls):
+  - 102–105:
+    - 102: no_more_matches_for_repl_index[i]
+    - 103: or search_list[i] is None
+    - 104: or len(search_list[i]) == 0
+    - 105: or replacement_list[i] is None
+
+Consequence observed
+- Running the tests triggers a TypeError at the precomputation loop when replacement_list[i] or search_list[i] is None, so tests expecting None to be treated as “no replacement” fail.
+
+Concrete fixes (what to change and how)
+1) Skip None/empty entries before calling len():
+   Replace the precomputation loop (lines 81–85) with a check that ensures search_list[i] and replacement_list[i] are not None and search_list[i] is not empty before calling len:
+
+   Example replacement code for that loop:
+   - for i in range(search_length):
+   -     if search_list[i] is None or replacement_list[i] is None:
+   -         continue
+   -     if len(search_list[i]) == 0:
+   -         continue
+   -     greater = len(replacement_list[i]) - len(search_list[i])
+   -     if greater > 0:
+   -         increase += 3 * greater
+
+2) Alternative: treat None as empty/no-op early:
+   - Normalize search_list and replacement_list at the function start: map None replacement entries to "" or remove pairs where search is None or empty. For the Java-equivalent behavior in the tests, None in replacement_list should be treated as "do not replace", so removing that pair or leaving it with replacement None and ensuring the code skips it would be correct.
+
+3) Keep the later safety checks (lines 102–105) but ensure they run before any operation that assumes non-None values.
+
+Recommendation (minimal change to pass tests)
+- Before the "increase" loop (starting line 81), add the same conditions used later (lines 102–105) so len(...) is never called on None. This is the smallest, least intrusive change and directly fixes the TypeError causing the failing tests.
+
+Summary
+- Root cause: len(...) is called on None in the early size-estimation loop (lines 81–84).
+- Fix: check for None (and empty search strings) before calling len(), or normalize inputs up front. After this change, the function will treat None as “no replacement” and the provided tests will pass.

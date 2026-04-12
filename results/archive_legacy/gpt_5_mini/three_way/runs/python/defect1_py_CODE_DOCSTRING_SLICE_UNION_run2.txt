@@ -1,0 +1,58 @@
+What happens
+- At line 396 your code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- The docstring explicitly allows negative minutes in some cases (for example (0, -15) should produce -00:15 and (-2, -15) should produce -02:15). Because of the check at line 396, calls such as for_offset_hours_minutes(0, -15) and for_offset_hours_minutes(-2, -15) will raise "Minutes out of range" even though the doc says they are valid.
+
+Why that check is wrong
+- The minutes validation is too strict: it forbids negative minute values unconditionally, but the allowed sign for minutes depends on the sign of hours (and the doc allows negative minutes when hours <= 0).
+- Because you reject negative minutes early, the method fails for valid inputs in the doc (where minutes < 0 and hours <= 0).
+- There is a second subtle logic issue after that (lines 402–404): you combine hours_in_minutes and minutes_offset with
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  If minutes_offset were negative, you must use the absolute minutes when combining (subtracting a negative would do the wrong thing). But that problem is masked by the earlier incorrect rejection of negative minutes.
+
+Where it occurs (exact places)
+- Rejection: line 396 (minutes range check).
+- Combination: lines 402–404 (computing total minutes using minutes_offset).
+- Final scaling to milliseconds: line 405 (FieldUtils.safe_multiply(...)) is fine once the total minutes are correct.
+
+How to fix it (clear steps)
+1. Change the minutes validation so it accepts negative minutes in the ranges documented:
+   - minutes must be between -59 and +59 inclusive (not 0..59).
+   - Additionally enforce the sign rules:
+     - If hours_offset > 0 then minutes_offset must be >= 0 (positive minutes with positive hours only).
+     - If hours_offset < 0 then minutes_offset must be <= 0 (negative minutes with negative hours only).
+     - If hours_offset == 0 either sign for minutes is allowed.
+
+   Concretely replace the current check at line 396 with something like:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes not allowed")
+     if hours_offset < 0 and minutes_offset > 0:
+         raise ValueError("Negative hours with positive minutes not allowed")
+
+2. When computing the total minutes (lines 402–404), use the absolute value of minutes when combining with hours_in_minutes:
+   - Compute minutes_abs = abs(minutes_offset)
+   - If hours_in_minutes < 0: total_minutes = hours_in_minutes - minutes_abs
+     else: total_minutes = hours_in_minutes + minutes_abs
+   This prevents sign-sign errors when minutes_offset is negative.
+
+3. Keep the try/except and safe_multiply as-is so overflow is handled.
+
+Example corrected fragment (lines referenced):
+- Replace line 396..397 with the new validations above.
+- Replace lines 402..404 with:
+    minutes_abs = abs(minutes_offset)
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_abs
+    else:
+        total_minutes = hours_in_minutes + minutes_abs
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary
+The code fails because it rejects negative minute offsets unconditionally (line 396), contradicting the docstring, and also combines hours and minutes incorrectly if minutes are negative. Fix the minutes range/sign checks and combine using abs(minutes_offset).

@@ -1,0 +1,59 @@
+What happened (what failed)
+- The code throws an IndexError from code_point_at(...) (see the bounds check in code_point_at: "if index < 0 or index >= len(code_units): raise IndexError(...)"). That happens inside the loop that runs when consumed > 0:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it failed (root cause)
+- The variable consumed and the way pos is advanced disagree about what "consumed" counts.
+- translate_codepoint(...) returns a number (consumed) but the translate(...) code assumes a different unit than translate_codepoint actually uses.
+  - If translate_codepoint returns "UTF‑16 code units" (1 or 2 for BMP or a surrogate pair), you should advance pos by that many code units.
+  - If translate_codepoint returns "code points" (logical Unicode characters), you should advance pos by the number of code units that those code points occupy (1 or 2 each) — i.e. call code_point_at at the current pos for each consumed code point and add char_count(...) for each.
+- The current code uses a loop that calls code_point_at(code_units, pos) repeatedly but in the wrong situation. That call can be made when pos == length (or otherwise out of range) because pos wasn't advanced correctly before the next iteration, so code_point_at raises IndexError at its boundary check (the check you can see at line "if index < 0 or index >= len(code_units): raise IndexError(...)").
+
+Where it occurs in your snippet
+- In translate(...):
+  - The call consumed = self.translate_codepoint(code_units, pos, out)
+  - Then when consumed > 0 the code does:
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+  - The IndexError is raised inside code_point_at(...) (the shown bounds check), because pos is out of range when code_point_at is called.
+
+How to fix it (concrete steps)
+1) Decide what translate_codepoint(...) is supposed to return:
+   - Option A: translate_codepoint returns number of UTF‑16 code units consumed (1 or 2). Then change the code that advances pos to simply add consumed code units:
+      # replace the for loop with:
+      pos += consumed
+   - Option B: translate_codepoint returns number of Unicode code points consumed. Then you must compute how many UTF‑16 code units those code points take. Implement the loop correctly and guard the calls:
+      for _ in range(consumed):
+          if pos >= length:
+              raise IndexError(f"pos {pos} out of range while advancing code points")
+          cp = code_point_at(code_units, pos)
+          pos += char_count(cp)
+
+2) Add defensive checks (optional but recommended):
+   - Before calling code_point_at(code_units, pos) ensure pos < length.
+   - If translate_codepoint can ever return an invalid consumed (<= 0 or too large), validate it and raise a clear error.
+
+3) Apply the concrete edit
+   - If you choose Option A (recommended if translate_codepoint works on UTF‑16 units):
+     Replace these lines:
+         for pt in range(consumed):
+             pos += char_count(code_point_at(code_units, pos))
+     With this single line:
+         pos += consumed
+
+   - If you choose Option B:
+     Replace those lines with:
+         for _ in range(consumed):
+             if pos >= length:
+                 raise IndexError(f"String index out of range: {pos}")
+             cp = code_point_at(code_units, pos)
+             pos += char_count(cp)
+
+Why these fixes work
+- Option A matches the simplest contract: if translate_codepoint tells you how many UTF‑16 units it consumed, you advance pos by that many units and never call code_point_at on an out‑of‑range index.
+- Option B preserves the original intent of advancing by code points but ensures you only call code_point_at when pos is valid and that you add the real number of code units each code point uses.
+
+Summary
+- Root cause: mismatch between what consumed represents and how pos is advanced, which leads to calling code_point_at with pos >= len(code_units), triggering IndexError.
+- Fix: choose the correct contract for translate_codepoint and advance pos accordingly (either pos += consumed or validate and advance by char_count(code_point_at(...)) per consumed code point). Add a bounds check for safety.

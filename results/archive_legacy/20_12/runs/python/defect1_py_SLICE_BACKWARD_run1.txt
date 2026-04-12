@@ -1,0 +1,61 @@
+What happened (where):
+- The failure occurs in DateTimeZone.for_offset_hours_minutes when it validates the minutes parameter. See lines ~394–401 in your code:
+  - It checks if minutes_offset < 0 or minutes_offset > 59 and raises ValueError("Minutes out of range: {minutes_offset}") (lines 400–401).
+- Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15). That passes minutes_offset = -15, so the guard trips and raises ValueError("Minutes out of range: -15") — exactly the observed exception.
+
+Why it happened (root cause):
+- The method is intended to accept combinations where the hour is negative and the minutes are also negative (e.g. (-2, -15) should mean -02:15). The Java Joda-Time logic in forOffsetHoursMinutes allows negative minutes when hours is negative by combining them into a total minutes value before range checking.
+- In your Python translation you perform the range check for minutes_offset before you combine hours and minutes into a single signed minutes value. That check rejects -15 as an invalid minute value even though it should be permitted when the hours value is negative.
+
+Where in code to change:
+- Method: DateTimeZone.for_offset_hours_minutes (around lines 370–410).
+- Current sequence:
+  1. if hours_offset == 0 and minutes_offset == 0: ...
+  2. range-check hours_offset
+  3. range-check minutes_offset (this is the problematic check)
+  4. combine hours and minutes into minutes_offset and compute millis
+- The range check for minutes_offset must either:
+  a) allow negative minutes when hours_offset is negative (i.e. only enforce 0..59 when hours_offset >= 0), or
+  b) be postponed until after you compute the combined signed minutes value and then validate the final magnitude (and that minutes component magnitude is <= 59).
+
+Concrete fixes (step-by-step):
+1. Replace the existing minutes range-check with logic that considers hours sign. For example:
+   - If hours_offset < 0:
+       require -59 <= minutes_offset <= 59 (or allow minutes_offset <= 59 and >= -59), then later combine with hours sign.
+     But more correct and simpler:
+2. Move the minutes validation until after combining hours and minutes into total minutes. Change the method to:
+   - Compute hours_in_minutes = hours_offset * 60.
+   - If hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - minutes_offset
+     else:
+         total_minutes = hours_in_minutes + minutes_offset
+   - Then validate that each input is within their allowed ranges:
+       - hours_offset between -23 and 23 (keep existing check).
+       - minutes component absolute value between 0 and 59 (i.e. abs(minutes_offset) <= 59).
+         (Alternatively, check that total_minutes produces a final millis within allowed range.)
+   - Use FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE) as you already do.
+3. Ensure you preserve the original behavior described in the docstring:
+   - reject combinations where hours positive and minutes negative (e.g. (2, -15)).
+
+Minimal patch example (conceptual):
+- Replace
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  with something like:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be positive when hours is positive")
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  and keep the later combination logic.
+
+Why this fixes it:
+- That change lets a negative minutes_offset be accepted when hours_offset is negative (so (-2, -15) will be combined to -135 minutes and then converted to -02:15), while still rejecting invalid inputs like (2, -15) or minutes with absolute value > 59.
+
+Where to test after change:
+- Your failing test: zone = DateTimeZone.for_offset_hours_minutes(-2, -15); assert zone.id == '-02:15'
+- Also test positive-hour negative-minute invalid case: DateTimeZone.for_offset_hours_minutes(2, -15) should raise ValueError.
+- Test edge values like (-23, 59), (23, 59), (0, -15) which should produce -00:15.
+
+References:
+- Method: DateTimeZone.for_offset_hours_minutes
+- Lines: minutes validation at ~400–401 and the combination logic immediately after (around lines 410–430).

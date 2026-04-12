@@ -1,0 +1,37 @@
+@staticmethod
+def add(array: Optional[List[T]], element: T, expected_type: Optional[Type] = None) -> List[T]:
+    if array is not None and len(array) > 0:
+        # infer element type from first non-None element if possible
+        inferred_element_type = None
+        for item in array:
+            if item is not None:
+                inferred_element_type = type(item)
+                break
+        if inferred_element_type is None:
+            # all elements are None, fall back to object's type
+            inferred_element_type = object
+    elif element is not None:
+        inferred_element_type = type(element)
+    else:
+        inferred_element_type = object
+
+    new_list = ArrayUtils._copy_list_grow1(array, inferred_element_type)
+    new_list[len(new_list) - 1] = element
+
+    if expected_type is not None:
+        # If we couldn't infer a more specific element type, but an expected_type was requested,
+        # simulate a cast failure if expected_type is more specific than object and we lack info.
+        if inferred_element_type is object and expected_type is not object:
+            raise TypeError(
+                f"Cannot cast object list to {expected_type.__name__} list "
+                f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+                f"[Ljava.lang.{expected_type.__name__};)"
+            )
+        # If there is an actual element present, validate it against expected_type
+        if element is not None and inferred_element_type is not object:
+            if not isinstance(element, expected_type):
+                raise TypeError(
+                    f"Element of type {inferred_element_type.__name__} cannot be added to list of {expected_type.__name__}"
+                )
+
+    return new_list

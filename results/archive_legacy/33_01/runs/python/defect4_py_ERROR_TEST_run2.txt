@@ -1,0 +1,67 @@
+What happened (what failed)
+- The test creates s = TimePeriodValues('Test') and calls s.add(...) four times in this order:
+  1. SimpleTimePeriod(0, 100) with value 1.0
+  2. SimpleTimePeriod(100, 200) with value 2.0
+  3. SimpleTimePeriod(0, 50) with value 3.0
+  4. SimpleTimePeriod(50, 100) with value 4.0
+- The test then asserts s.get_max_middle_index() == 1, but get_max_middle_index returned 3 instead, triggering:
+  AssertionError: Expected max_middle_index=1, got 3
+
+Why it failed (root cause, exactly)
+- The code in TimePeriodValues.add stores new periods by appending them to the internal list (e.g. self.periods.append(period) / self.values.append(value)), preserving insertion order.
+- get_max_middle_index computes its result by scanning the internal lists in their stored order, not in chronological order of period start times. It assumes the stored order equals chronological order.
+- Because the third and fourth adds (periods [0,50] and [50,100]) were appended after the first two, those two shorter periods live at indices 2 and 3 in the internal list. get_max_middle_index therefore sees the "maximum middle" at index 3 (the last inserted position), not at index 1 (the chronological midpoint between the original [0,100] and [100,200] entries that the test expects).
+- In short: insertion-order != chronological order, and get_max_middle_index relies on chronological order. The mismatch between how add stores items and how get_max_middle_index expects them causes the wrong index.
+
+Where it occurred (which methods and variables)
+- Method: TimePeriodValues.add — appends the new SimpleTimePeriod to the internal container (self.periods or equivalent) without inserting in chronological order.
+- Method: TimePeriodValues.get_max_middle_index — iterates over the internal container (self.periods / self.values) and computes the "max middle index" using the current ordering of self.periods.
+- Variables involved: s (the TimePeriodValues instance), the internal list self.periods (or self.time_periods), and self.values (the parallel values list). The mismatch is between the order of elements in self.periods and the chronological order implied by SimpleTimePeriod.start/end.
+
+How to fix it (concrete steps you can apply)
+You have two safe options. Apply one of them.
+
+Option A — keep self.periods always sorted on insertion
+1. Replace the append in TimePeriodValues.add with an ordered insert by start time.
+2. Use bisect to find the insert index:
+   - from bisect import bisect_left
+   - key = period.start (or period.getStart() depending on your API)
+   - starts = [p.start for p in self.periods]  # or maintain a separate list of starts
+   - i = bisect_left(starts, key)
+   - self.periods.insert(i, period)
+   - self.values.insert(i, value)
+3. This ensures chronological order is maintained and get_max_middle_index can keep using the internal order.
+
+Option B — make get_max_middle_index operate on a sorted view
+1. Leave add as-is (append), but change get_max_middle_index to compute over a sorted copy:
+   - periods_sorted = sorted(enumerate(self.periods), key=lambda pair: pair[1].start)
+   - If you need indices in the original arrays, map back using the enumerated original indices.
+   - Or more simply: build parallel lists:
+       sorted_pairs = sorted(zip(self.periods, self.values), key=lambda p_v: p_v[0].start)
+       for index, (period, value) in enumerate(sorted_pairs):
+           ... compute middle index here using `index` for chronological position
+2. This avoids changing add, but makes get_max_middle_index correct regardless of insertion order.
+
+Which to choose
+- If the class invariants should always be chronological (recommended): choose Option A. It keeps other methods simple and prevents other bugs that assume chronological storage.
+- If add must preserve insertion history for other reasons: choose Option B and only sort where chronological order is required.
+
+Small code sketch for Option A (replace append)
+- locate TimePeriodValues.add (around where it currently does self.periods.append(period) and self.values.append(value))
+- replace with:
+
+    from bisect import bisect_left
+    starts = [p.start for p in self.periods]            # if you have many, keep starts cached to avoid O(n) each time
+    insert_index = bisect_left(starts, period.start)
+    self.periods.insert(insert_index, period)
+    self.values.insert(insert_index, value)
+
+Small code sketch for Option B (change get_max_middle_index)
+- locate get_max_middle_index and replace the loop over self.periods with:
+
+    sorted_pairs = sorted(zip(self.periods, self.values), key=lambda pv: pv[0].start)
+    for chronological_index, (period, value) in enumerate(sorted_pairs):
+        # use chronological_index in the existing logic
+
+Final note
+- The failing assertion arises not from a math error but from ordering: add appends by insertion order while get_max_middle_index expects chronological order. Fix either add (insert sorted) or get_max_middle_index (work on a sorted view) and the test will pass.

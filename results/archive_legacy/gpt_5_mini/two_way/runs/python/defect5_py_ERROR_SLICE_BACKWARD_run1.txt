@@ -1,0 +1,41 @@
+What happened (root cause)
+- At line 335 your code sets inferred_type = type(array). That gives the Python/Java runtime the container's runtime class (an Object[]), not the element component type you intend (String).
+- Later (lines 346–347) you check:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  That check detects a mismatch and raises the Python TypeError you saw, because the code realized the array’s runtime type is object while you expected a more specific element type (str).
+- The underlying Java exception in the message — ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.str; — is the real low-level failure: a Java Object[] cannot be cast to a String[]. The code created or received an Object[] but later tried to treat it as a String[].
+
+Where it occurred (exact variables / lines)
+- array (line 335): you inspect the container with type(array).
+- element (line 337): used as a fallback if array is None.
+- inferred_type (lines 335–346): ends up being object (i.e., the container is an Object[] / generic object list).
+- expected_type (line 346): is str in your failing case.
+- The error is raised at line 347 because inferred_type == object while expected_type != object, so the code refuses to proceed and raises the TypeError shown.
+
+Why the cast fails (plain language)
+- Java arrays are covariant by reference type but not cast-safe: an Object[] at runtime cannot be treated as a String[] because the JVM requires the array's actual component type to match the target component type. When the code tries to use the Object[] as a String[], the JVM throws ClassCastException, which your Python wrapper surfaces as the TypeError you saw.
+
+Concrete fixes (step-by-step)
+1. Decide the intended element type up front (expected_type). If expected_type is known (str), prefer that over inferring from the container.
+2. Replace inferred_type = type(array) (line 335) with a check that computes the component type rather than the container type. Example approach:
+   - If array is a Java array object, get its component type (array.getClass().getComponentType()) instead of type(array).
+   - If array is a Python list, iterate elements to find the most specific common type (or require explicit expected_type).
+3. If inferred_type is object but expected_type is specific:
+   - Do not attempt to cast the existing Object[] to a String[]. Instead allocate a new array of the expected component type and copy elements into it, converting elements as needed.
+   - In Java terms: String[] newArr = (String[]) Array.newInstance(expected_type, length); then copy/convert element-by-element.
+4. Handle None/null explicitly: decide whether null elements are allowed in the resulting typed array and convert or reject accordingly.
+5. Add a clearer error message where you currently raise TypeError (line 347) that includes the actual runtime component type and the expected component type so callers know exactly what was present and what was required.
+
+Example minimal change ideas
+- If you can require expected_type to be passed in, set:
+    inferred_type = expected_type
+  instead of using type(array) when you know you must produce a String[].
+- Or, when inferred_type == object and expected_type == str, create a new str[] and populate it element-by-element rather than casting the Object[].
+
+Why these steps fix it
+- They avoid attempting an illegal cast from Object[] to String[].
+- They ensure the returned array has the correct runtime component type (so no ClassCastException at the JVM level).
+- They make the mismatch explicit and fix conversions or reject inputs early.
+
+If you share the code around where the Java array is created or returned (the lines that construct or return the array), I can give the exact replacement code to allocate a typed array and copy elements.

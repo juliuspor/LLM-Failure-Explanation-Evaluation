@@ -1,0 +1,20 @@
+The code fails in the loop after `consumed = self.translate_codepoint(code_units, pos, out)` when `consumed > 0`. It enters this block:
+
+```python
+for pt in range(consumed):
+    pos += char_count(code_point_at(code_units, pos))
+```
+
+The problem is that `code_point_at(code_units, pos)` (lines 35-44 in SLICE_UNION) returns the full Unicode codepoint for surrogate pairs (e.g., positions 38-43 detect high/low surrogates and return a value >= 0x10000). Then `char_count(codepoint)` returns 2 for these. However, `pos` indexes UTF-16 *code units*, not codepoints. Each surrogate pair occupies exactly 2 code units, but the loop calls `code_point_at(code_units, pos)` repeatedly from the *same* `pos` value on the first iteration.
+
+Example: pos=0, consumed=1 (one surrogate pair). First iteration:
+- `code_point_at(code_units, 0)` returns codepoint for units[0:2]
+- `pos += 2` → pos=2
+
+But `range(1)` runs only once, so it correctly skips 2 units. If `consumed=2` (two pairs), first iteration skips units[0:2] (pos=2), second calls `code_point_at(code_units, 2)` and skips units[2:4] (pos=4). This works coincidentally.
+
+The failure occurs because the comment states 'they just took care of a surrogate pair', implying `consumed` counts *codepoints* (1 per pair), but the loop adds `char_count(...)` units per codepoint. If `translate_codepoint` returns `consumed` as the *number of code units* consumed (e.g., 2 for one pair), then for `consumed=2`:
+- First iteration: `code_point_at(0)` → pos +=2 → pos=2
+- Second iteration: `code_point_at(2)` → pos +=2 → pos=4
+
+This skips 4 units correctly. But the loop logic assumes `consumed` matches the number of codepoints processed, creating inconsistency if `translate_codepoint` counts units instead of codepoints. The root cause is `pos` is never updated correctly if `consumed` doesn't match the expected codepoint count, causing infinite loop or wrong position in `code_units`.

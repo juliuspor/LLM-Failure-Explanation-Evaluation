@@ -1,0 +1,80 @@
+What happened (root cause)
+- The code passes the string "fr__POSIX" to a locale parser/validator, and that parser rejects it with ValueError: Invalid locale format: fr__POSIX.
+- The parser is enforcing the standard locale syntax: language[_COUNTRY][.ENCODING][@MODIFIER]. "fr__POSIX" violates that syntax because it contains two underscores in a row: language followed by an empty COUNTRY then an underscore and then "POSIX". That empty COUNTRY makes the overall token invalid.
+- In short: the string has an empty component (the empty country) and uses the wrong separator for a modifier. The modifier should be written with "@", not as a second "_" after an empty country. The parser therefore raises ValueError.
+
+Where this occurs in your code
+- The exception originates at the call where you pass the locale string into the locale/locale-parsing function. Typical function names that raise this error are:
+  - babel.core.Locale.parse(locale_string) from Babel, or
+  - some wrapper that validates locale format before calling locale.setlocale or similar.
+- To find the exact place: search your codebase for calls that accept locale strings (examples to look for: Locale.parse(…), locale.setlocale(…), babel.Locale.parse(…), or any variable named locale, locale_str, locale_code). The ValueError stack trace will point to the file and line number of the call — open that file/line and you will see the variable containing "fr__POSIX".
+
+Why "fr__POSIX" is invalid (concrete)
+- Expected forms (examples): "fr", "fr_FR", "fr_FR.UTF-8", "fr@euro" (modifier), "fr_FR.UTF-8@modifier".
+- "fr__POSIX" breaks the grammar: it's parsed as "language = 'fr'", "country = ''" (empty), then another "_" followed by "POSIX". Parsers do not accept an empty country field. Also, modifiers should be introduced by "@", so "fr@POSIX" (or if you intended a country then modifier: "fr_FR@POSIX").
+
+How to reproduce quickly
+- Minimal repro (Python + Babel): calling babel.core.Locale.parse("fr__POSIX") raises ValueError with the same message.
+- Use the stack trace from the failing test to confirm the exact call site and variable value.
+
+Concrete fixes (step-by-step)
+1. Locate the failing call
+   - Open the test failure stack trace. Note file/line where ValueError is raised. Example: tests/test_locales.py:42 -> your_module.utils: locale = Locale.parse(locale_code)
+   - Inspect the variable at that call — likely named locale_code, locale_str, or locale_value — and see it equals "fr__POSIX".
+
+2. Decide the intended interpretation
+   - If you meant "French with POSIX modifier": use "fr@POSIX".
+   - If you meant "French for a specific country" but the country is missing (a bug upstream): supply a valid country code, e.g. "fr_FR".
+   - If you got this value from external input (user, DB, environment), treat it as untrusted and normalize/validate.
+
+3. Fix the source of the bad string
+   - If the bad value is constructed in your code, change the construction. Example (before):
+       locale_code = language + "_" + country + "_" + modifier
+     If country can be empty, this produces double underscores. Change to:
+       parts = [language]
+       if country:
+           parts.append(country)
+       if modifier:
+           parts.append("@" + modifier)   # modifier must be prefixed with '@'
+       locale_code = "_".join(parts[:2]) + (parts[2] if len(parts) > 2 else "")
+     Or build with explicit conditionals so you never produce "__".
+
+4. Sanitize/normalize inputs where they are read
+   - Add a short normalization function before parsing:
+       def normalize_locale(locale_code):
+           if "__" in locale_code:
+               # convert "fr__POSIX" -> "fr@POSIX" (only if this is the intended meaning)
+               # OR drop empty segments: "fr__POSIX" -> "fr_POSIX" then convert to "fr@POSIX"
+               locale_code = locale_code.replace("__", "@")
+           # optionally validate using regex or try/except with the parser
+           return locale_code
+     Use normalize_locale(locale_code) before calling Locale.parse or setlocale.
+
+5. Add a unit test for this case
+   - Add a test asserting that invalid inputs are rejected or normalized:
+       assert normalize_locale("fr__POSIX") == "fr@POSIX"
+       assert raises(ValueError, lambda: Locale.parse("fr__POSIX"))  # if you decide to reject
+     This prevents regressions.
+
+6. If the value comes from an external source (env var, DB, user):
+   - Add logging that records the raw value, and either reject early with a clear error message or normalize per rule #4.
+
+Exact small code example (what to change)
+- Problematic code (example line that fails):
+    # line 123 in mymodule/i18n.py
+    locale_obj = Locale.parse(locale_code)   # locale_code == "fr__POSIX"
+- Fix 1: normalize before parsing:
+    # line 123 in mymodule/i18n.py
+    def _normalize_locale_code(code):
+        # remove empty segments and convert double underscore modifiers to @modifier
+        if "__" in code:
+            code = code.replace("__", "@")
+        return code
+    locale_code = _normalize_locale_code(locale_code)
+    locale_obj = Locale.parse(locale_code)   # now "fr@POSIX" -> accepted
+
+Or, Fix 2: build locale_code safely where it's constructed instead of correcting later (preferred).
+
+Summary
+- The ValueError happens because "fr__POSIX" is not a valid locale string: it has an empty country segment and uses "_" where "@" is required for modifiers. The failure occurs when that string is fed into your locale parsing function (e.g. Locale.parse or setlocale).
+- Find where locale_code is created or passed (use the stack trace), then either build the string correctly, normalize incoming values (replace "__" with "@"), or validate and reject bad input. Add a unit test to prevent recurrence.

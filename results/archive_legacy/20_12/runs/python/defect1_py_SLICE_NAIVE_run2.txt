@@ -1,0 +1,55 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method enforces minutes_offset must be between 0 and 59 at line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset})
+- Because minutes_offset is -15 the check fails and raises ValueError("Minutes out of range: -15"), which is the observed exception.
+
+Why it fails (root cause)
+- The method documentation and intended behavior allow negative minutes when the hours are negative (see comment lines 381–391 and the table). For example (-2, -15) should produce -02:15.
+- The code implements a blanket validation rejecting any negative minutes (lines 398–401) before it applies the combination logic that handles negative hours (lines 404–408). That premature validation prevents valid negative-minute combinations like (-2, -15) from ever being processed.
+
+Where in the code
+- The failing check is in DateTimeZone.for_offset_hours_minutes at:
+  - Line ~398–401: hours and minutes range checks
+  - Specifically line 400 raises the ValueError for negative minutes
+- The combination logic that would accept negative minutes for negative hours is later at lines ~404–408:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+What to change (concrete fixes)
+Option A — Allow negative minutes but enforce per-table rules:
+1. Remove or relax the early minutes check that forbids negative values.
+2. Instead validate after combining hours and minutes:
+   - Compute hours_in_minutes = hours_offset * 60
+   - Compute combined_minutes per the existing logic (use subtraction for negative hours)
+   - Then check combined_minutes is between -1439 and +1439 (i.e. within +/- 23:59)
+   - Reject combinations that are invalid per the documentation (for example, positive hours with negative minutes).
+3. Keep catching overflow via FieldUtils.safe_multiply as currently done.
+
+Example of the check to add after combining (pseudo):
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("Minutes must be positive when hours are positive")
+  combined_minutes = hours_in_minutes + sign_adjusted_minutes  # as current logic
+  if combined_minutes < -1439 or combined_minutes > 1439:
+      raise ValueError("Offset is too large")
+
+Option B — Minimal change to accept negative minutes when hours negative:
+1. Change the minutes validation at line 400 to only reject minutes outside [-59, 59]:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Then keep the existing combination logic which will handle negative hours correctly.
+3. Still add a final validation that the combined offset does not exceed +/- 23:59:59.999 (as in for_offset_millis).
+
+Why these fixes work
+- The premature rejection (line 400) is the only reason (-2, -15) is rejected. Allowing negative minutes within the valid per-component range and validating combinations after applying the sign rules matches the method's documented behavior and will permit (-2, -15) to produce the expected -02:15 id.
+
+Relevant lines to edit
+- DateTimeZone.for_offset_hours_minutes:
+  - Remove/modify the check at lines ~398–401 that currently enforces minutes_offset >= 0
+  - Validate after the combination logic at lines ~404–409 and before calling FieldUtils.safe_multiply or after it, ensuring final offset bounds.
+
+That will make the test zone = DateTimeZone.for_offset_hours_minutes(-2, -15); assert zone.id == '-02:15' pass.

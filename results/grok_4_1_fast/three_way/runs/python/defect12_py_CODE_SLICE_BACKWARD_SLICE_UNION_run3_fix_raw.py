@@ -1,0 +1,45 @@
+@staticmethod
+def abbreviate(
+    text: Optional[str], lower: int, upper: int, append_to_end: Optional[str]
+) -> Optional[str]:
+    """
+    Abbreviate `text`, preferably at a word boundary.
+
+    The function looks for a space character at or after `lower`. If a space
+    is found before `upper`, the result ends at that space; otherwise the
+    result is cut at `upper`. When an abbreviation occurs, `append_to_end`
+    (for example `"..."`) is appended.
+
+    Args:
+        text: Input string. If None, returns None.
+        lower: Minimum index at which to consider abbreviating at a space.
+        upper: Maximum end index for the abbreviated string. Use `-1` for no limit.
+        append_to_end: Suffix to append when the text is abbreviated.
+
+    Returns:
+        The abbreviated string (or None if `text` is None).
+    """
+    if text is None:
+        return None
+    if len(text) == 0:
+        return StringUtils.EMPTY
+
+    text_len = len(text)
+    if upper == -1 or upper > text_len:
+        upper = text_len
+    if upper < lower:
+        upper = lower
+
+    index = StringUtils.index_of(text, " ", lower)
+    if index == -1:
+        safe_upper = min(upper, text_len)
+        result = substring_java(text, 0, safe_upper)
+        if upper != text_len:
+            result += StringUtils.default_string(append_to_end)
+        return result
+
+    if index > upper:
+        safe_upper = min(upper, text_len)
+        return substring_java(text, 0, safe_upper) + StringUtils.default_string(append_to_end)
+
+    return substring_java(text, 0, index) + StringUtils.default_string(append_to_end)

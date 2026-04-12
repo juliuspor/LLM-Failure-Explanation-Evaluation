@@ -1,0 +1,48 @@
+What happened (where it fails)
+- The failure happens inside the block shown at lines 406–412. After computing an hours component named hours_in_minutes and a minutes component minutes_offset, the code assigns to minutes_offset twice:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- That second assignment (line 408) overwrites the first, so the minutes value is wrong when it reaches line 409:
+  - line 409 multiplies minutes_offset by MILLIS_PER_MINUTE to get offset in milliseconds,
+  - line 411 raises ValueError("Offset is too large") when the computed millisecond offset is invalid.
+- In short: the intended computation for the combined offset never occurs because the variable minutes_offset is clobbered. That produces an incorrect (usually much larger) minutes_offset, which triggers the "Offset is too large" error at line 411 and the failure returned by cls.for_offset_millis(offset) on line 412 never gets a valid value.
+
+Why it happens (root cause)
+- The logic clearly aims to combine an hours part and a minutes part into one total minutes count, but the two assignments use the same variable minutes_offset in incompatible ways.
+- Likely intent: if the sign is negative, total_minutes = hours_in_minutes - minutes_part; else total_minutes = hours_in_minutes + minutes_part.
+- Current code performs both assignments unguarded (or with wrong conditional), so the final value is wrong. That wrong final value then causes either an overflow or a value-check failure when converting to milliseconds.
+
+Concrete steps to fix (exact changes to make)
+1. Identify the sign/conditional used to decide add vs subtract. If you have a boolean or variable sign (e.g., is_negative, sign), use it to pick one expression.
+2. Replace the two conflicting lines with a single guarded assignment. Example fixes:
+
+a) If there is a boolean variable is_negative:
+- Replace lines 406–408 with:
+  if is_negative:
+      minutes_offset = hours_in_minutes - minutes_part
+  else:
+      minutes_offset = hours_in_minutes + minutes_part
+
+b) If sign is stored as +1 or -1 (e.g., sign):
+- Replace with:
+  minutes_offset = hours_in_minutes + sign * minutes_part
+
+c) If minutes_offset originally held the minute component and hours_in_minutes holds hours*60, use a temporary variable to avoid overwriting:
+- Replace with:
+  minutes_part = minutes_offset  # preserve original minute component
+  minutes_offset = hours_in_minutes + minutes_part  # or subtract based on sign
+
+3. After fixing the arithmetic, keep the existing check that multiplies by MILLIS_PER_MINUTE (line 409) and the bounds check that raises ValueError (line 411). Run unit tests to confirm the error no longer occurs.
+
+What to test after the change
+- Offsets with positive hours and minutes (e.g., +02:30).
+- Offsets with negative hours and minutes (e.g., -05:45).
+- Zero offset (00:00).
+- Boundary offsets that previously triggered "Offset is too large."
+
+Where to look if the problem persists
+- Verify the variable names used (minutes_offset vs minutes_part) — ensure you are not accidentally using the minute component variable where you intend the total minutes.
+- Check any sign parsing code that sets is_negative or sign; an incorrect sign will still give wrong results even after the assignment fix.
+
+Summary
+The code fails because line 408 overwrites the earlier correct computation at line 406, producing a wrong minutes_offset that, when multiplied into milliseconds, triggers the "Offset is too large" error. Fix by computing total minutes in a single, sign-aware assignment (examples above) and then keep the existing millisecond conversion and bounds check.

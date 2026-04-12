@@ -1,0 +1,40 @@
+What happened (where it fails)
+- The failing behavior comes from the code in the slice block at lines 176–194.
+- At line 176 you test whether x is an integer with: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- For x == -0.0 this condition evaluates True because -0.0 == 0.0 and int(-0.0) == 0. So the code enters the integer branch even though the value is negative zero.
+- At line 177 you do value = int(x) which produces value == 0 and loses the sign bit.
+- Later at line 192 you output self.add(str(value)) which produces "0".
+- The test expects the negative zero sign to be preserved (the test asserts "-0.0"), so printing "0" fails.
+
+Why that happens (root cause)
+- Floating-point equality x == int(x) and converting to int(x) discard the sign bit for -0.0. IEEE 754 negative zero compares equal to +0.0, and int(-0.0) becomes 0 with no sign information.
+- There is no early check for "negative zero" before the integer branch, so the code treats -0.0 exactly like +0.0 and prints "0" instead of preserving "-0.0".
+
+Exactly where to change it (concrete steps)
+1. Before the integer branch at line 176, check for negative zero and handle it explicitly.
+   - Use the existing utility CodeConsumer.is_negative_zero(x) (the test mentions such a utility) or use math.copysign / bit inspection to detect negative zero.
+2. If x is negative zero, append the correct representation and return / skip the integer branch. The test expects "-0.0", so output that string.
+3. Otherwise continue with the current integer-handling logic.
+
+Exact minimal patch (illustrative)
+- Add immediately before line 176:
+
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+(or if inside the same class, use self.is_negative_zero(x))
+
+Why this fix works
+- It preserves the sign bit for -0.0 by handling it before any int(x) conversion or equality checks that collapse sign.
+- Other cases (positive zero, normal integers, floats, scientific notation, NaN, inf) are unaffected because they will be handled by the existing branches.
+
+Notes and alternatives
+- Alternative detection: math.copysign(1.0, x) < 0 or using struct.unpack to check the sign bit. But since you already have CodeConsumer.is_negative_zero(x) used in tests, calling that is simplest and least invasive.
+- Do not rely on x == int(x) to detect integers when sign preservation matters — always detect negative zero first.
+
+Summary (what happened, why, where)
+- What happened: -0.0 was printed as "0".
+- Why: the integer branch (lines 176–192) converted x to int, losing the negative-zero sign because -0.0 == 0 and int(-0.0) == 0.
+- Where: immediately before and at lines 176–177 and line 192 (the condition, the int conversion, and the final str(value) output).
+- Fix: check for negative zero with CodeConsumer.is_negative_zero(x) before that integer branch and output "-0.0".

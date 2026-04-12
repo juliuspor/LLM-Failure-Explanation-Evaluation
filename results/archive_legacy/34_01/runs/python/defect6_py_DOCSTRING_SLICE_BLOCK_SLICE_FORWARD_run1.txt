@@ -1,0 +1,50 @@
+What fails
+- At line 133 the code calls self.is_word_char(self.get_last_char()) without guaranteeing get_last_char() returned a valid character.
+- If the buffer is empty (get_last_char() returns None or ''), passing that value into is_word_char(...) raises an error (TypeError or whatever is raised inside is_word_char when given None/empty).
+
+Where it happens
+- The call site is line 133:
+  if (self.is_word_char(c) or c == '\\') and self.is_word_char(self.get_last_char()):
+- get_last_char() can be empty after maybe_end_statement() (line 127) or when the object has no prior content. That makes the right-hand is_word_char(...) call invalid.
+
+Why this is the root cause
+- Python evaluates the full boolean expression left-to-right but it does not short-circuit the second operand if the first operand is False only inside a single subexpression; in this code the second operand is in the same if condition and is evaluated whenever the left expression (the whole left side of the and) is True. Even if the left portion would be safe, the right side is not guaranteed to be safe because it depends on external state (the buffer).
+- The method is_word_char(...) expects a single character (not None or empty string). Passing None/'' produces the exception.
+
+How to reproduce
+1. Ensure the buffer is empty (e.g. a fresh instance or after maybe_end_statement() removed content).
+2. Call add("a") (newcode starting with a letter).
+3. The code will execute line 127, then line 132 sets c = 'a', then line 133 calls is_word_char(self.get_last_char()) where get_last_char() is None/'' → error.
+
+Concrete fixes (choose one)
+
+A. Check last char exists before testing it (recommended)
+Replace lines 132–137 with:
+    c = newcode[0]
+    last = self.get_last_char()
+    if last is not None and last != '' and (self.is_word_char(c) or c == '\\') and self.is_word_char(last):
+        self.append(" ")
+
+Explanation: we fetch last once, avoid calling is_word_char(None), and only add a separating space if last is a word character.
+
+B. Safer reorder with explicit existence check
+    c = newcode[0]
+    last = self.get_last_char()
+    if (self.is_word_char(c) or c == '\\') and last and self.is_word_char(last):
+        self.append(" ")
+
+C. Make is_word_char robust to None/empty
+Change is_word_char so it returns False when input is None or '':
+    def is_word_char(self, ch):
+        if not ch: return False
+        ...existing checks...
+
+Any of the above prevents passing None/'' into is_word_char and fixes the runtime error.
+
+Minimal patch I recommend (drop-in):
+    c = newcode[0]
+    last = self.get_last_char()
+    if last and (self.is_word_char(c) or c == '\\') and self.is_word_char(last):
+        self.append(" ")
+
+This addresses the exact failure: avoids calling is_word_char on a missing last character (lines 132–136).

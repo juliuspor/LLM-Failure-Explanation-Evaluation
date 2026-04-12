@@ -1,0 +1,60 @@
+What happened
+- The test calls cc.add_number(-0.0) and expects get_code() to return the string '-0.0'.
+- The test fails because MockCodeConsumer produced '0.0' (or some representation that lost the negative sign) instead of '-0.0'.
+- That loss of sign happens when add_number converts the numeric value into text; the implementation in add_number treats -0.0 the same as +0.0 and overwrites or formats the value in a way that drops the sign bit.
+
+Where it occurs (exact methods/variables)
+- In MockCodeConsumer.add_number(self, value): the code that turns the float value into a string is the culprit.
+- get_code() only returns whatever string add_number stored, so get_code is not the root cause — add_number is.
+- The failing test stores the returned string in result (result = cc.get_code()) and compares it to '-0.0'.
+
+Why it happens (root cause)
+- In IEEE-754 floating point there are distinct values +0.0 and -0.0 even though value == 0.0 is True for both. A comparison value == 0.0 cannot detect the negative-zero sign.
+- Typical buggy code paths that remove the sign are:
+  - Explicitly normalizing zeros, e.g. "if value == 0.0: value = 0.0" or "value = abs(value)".
+  - Using a formatting route that canonicalizes zero sign (some custom formatting code, integer coercion, or code that treats any zero as a plain "0.0").
+- Because add_number uses one of those routes, it loses the negative sign on -0.0 and stores '0.0' instead of '-0.0'.
+
+How to confirm quickly
+- Add this small check in or next to add_number for debugging:
+  import math
+  print(value, value == 0.0, math.copysign(1.0, value))
+  For -0.0 you'll see value == 0.0 is True but math.copysign(1.0, value) == -1.0. That demonstrates the sign-bit is present but being ignored by the formatting code.
+
+Concrete fixes (step-by-step, exact changes)
+1) Detect negative zero using math.copysign when formatting floats. Replace the stringification block in add_number with logic that preserves the sign for zeros.
+
+Example replacement for the body that turns value into a string:
+
+import math
+
+def add_number(self, value):
+    # Preserve negative zero explicitly
+    if value == 0.0 and math.copysign(1.0, value) < 0:
+        s = "-0.0"
+    else:
+        # use repr or your preferred formatting for other numbers
+        s = repr(value)
+    self._parts.append(s)
+
+Notes on the replacement:
+- This checks value == 0.0 to find zero-magnitude numbers, then math.copysign(1.0, value) < 0 determines whether the sign bit is negative.
+- Using repr(value) or an appropriate format string for non-zero values preserves usual formatting; adapt to whatever format your codebase requires.
+
+2) If your code previously did something like value = abs(value) or value = 0.0 for zeros, remove that normalization. Replace it with the conditional above so only the textual representation is adjusted, rather than changing the number itself.
+
+3) Add a unit test to lock behavior in place:
+def test_preserve_negative_zero():
+    cc = MockCodeConsumer()
+    cc.add_number(-0.0)
+    assert cc.get_code() == '-0.0'
+    cc = MockCodeConsumer()
+    cc.add_number(+0.0)
+    assert cc.get_code() == '0.0'
+
+Why this fix is minimal and correct
+- It does not change numeric semantics (you keep the float value as-is).
+- It only changes the string output for the special case of negative zero.
+- It uses math.copysign which directly reads the sign bit, so it is reliable across platforms.
+
+If you want, paste the current body of MockCodeConsumer.add_number and I will show the exact small diff with line numbers/comments for where to change.

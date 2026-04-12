@@ -1,0 +1,43 @@
+What happens
+- The code raises an IndexError from code_point_at(...). The check that throws is at to_utf16_code_units(...):line 36 ("String index out of range"). That happens inside the loop where you advance pos after translate_codepoint returned a nonzero consumed value.
+
+Why it fails (root cause)
+- translate_codepoint(...) returns consumed (the number of codepoints it consumed).
+- After that, the code runs:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  This calls code_point_at(code_units, pos) repeatedly while mutating pos.
+- If consuming N codepoints moves pos to the end (pos == length) after some iterations, the next iteration still tries to call code_point_at(code_units, pos). That call uses index==length which is out of range, so code_point_at (via the index check at to_utf16_code_units lines 35–36) raises IndexError.
+- In short: the loop calls code_point_at one time too many (or calls it when pos==length) because it iterates a fixed number of times (range(consumed)) while pos is advanced inside the body without protecting against reaching length.
+
+Where it occurs
+- The failure occurs in the while loop in translate (the code you pasted), specifically in the branch after consumed != 0, in these lines:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The exception is raised inside code_point_at (which enforces bounds at to_utf16_code_units lines 35–36).
+
+Concrete fixes (pick one)
+1) If consumed is already the number of UTF-16 code units consumed, just advance pos by consumed:
+    pos += consumed
+   Replace the whole for-loop with that single statement.
+
+2) If consumed is the number of codepoints consumed, but you must compute code units per codepoint, stop calling code_point_at when pos >= length:
+    for _ in range(consumed):
+        if pos >= length:
+            break
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+   This prevents calling code_point_at with pos==length.
+
+3) Alternatively, compute each codepoint safely by reading code_point_at only after checking bounds and/or compute how many code units each codepoint has without calling code_point_at at a position that might be past the end.
+
+Why those fixes work
+- Fix (1) removes the repeated unsafe call to code_point_at and uses the correct unit count directly.
+- Fix (2) makes the loop robust by checking pos before calling code_point_at, preventing the out-of-range call at to_utf16_code_units lines 35–36.
+
+Which to choose
+- If the contract of translate_codepoint is that it returns the number of UTF-16 code units consumed, use fix (1).
+- If the contract is number of codepoints consumed, use fix (2) and consider changing the contract to return units instead (simpler and less error-prone).
+
+Summary
+The immediate cause is calling code_point_at(code_units, pos) when pos equals length (out-of-range). Replace the for-loop that advances pos with either a single pos += consumed, or add a guard (pos < length) before each code_point_at call so you never index past the end.

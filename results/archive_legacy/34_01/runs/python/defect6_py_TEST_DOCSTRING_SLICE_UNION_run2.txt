@@ -1,0 +1,40 @@
+What happened
+- The test calls cc.add_number(-0.0).
+- add_number routes the value into MockCodeConsumer.add (line 126).
+- MockCodeConsumer.add (at line 138) does self.append(newcode).
+- That call appends the raw value to the wrong place/structure, so get_code() later produces a different representation (the negative zero sign is lost) and the assertion fails.
+
+Why that leads to the wrong output
+- The add method is supposed to put the new code fragment into the consumer's internal buffer (for example an attribute named self.parts or self._code). Instead it calls self.append(...).
+- self.append(...) is not appending into that internal buffer. Depending on the class layout, self.append either:
+  - calls a different method (if append is implemented elsewhere) that stores a canonicalized number (losing the -0.0 sign), or
+  - falls back to list.append (if the class inherits list) or some other container, again storing the raw float instead of the intended formatted string.
+- Later get_code() reads whatever was stored and converts/joins it in a way that prints 0.0 (or some other representation) instead of the original '-0.0'. So the test expecting '-0.0' fails.
+
+Where it occurs
+- add is defined at line 126 (def add(self, newcode):).
+- The problematic call is at line 138 (self.append(newcode)).
+
+How to fix it (concrete steps)
+1. Identify the internal buffer attribute that get_code() expects. Common names: self._parts, self.parts, self._code, self.code. Open the class and find where get_code() reads from.
+2. Replace the wrong append call on line 138 with an append to that internal buffer. For example, if the buffer is self._parts:
+   - Change line 138 from:
+     self.append(newcode)
+     to:
+     self._parts.append(newcode)
+3. Decide whether you should store the raw value or its exact string form. Since you need to preserve '-0.0':
+   - Either append the formatted string up-front:
+     self._parts.append(str(newcode))
+     (this preserves the sign for -0.0 since str(-0.0) == '-0.0')
+   - Or append the raw value but ensure get_code() formats numbers using a routine that preserves the sign of negative zero (e.g., use repr() or formatting that keeps the sign).
+4. Add a small unit check to guard future regressions:
+   - After your change, run the given test:
+     cc = MockCodeConsumer(); cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0'
+   - Also add a test for 0.0 to ensure you still produce '0.0' for positive zero.
+
+Why these steps are safe and targeted
+- They change only where newcode is stored (line 138), so behavior elsewhere is unchanged.
+- They explicitly put the data into the buffer that get_code() expects, removing ambiguity about which "append" was called.
+- Converting to string at the point of append guarantees the exact textual form (including the minus sign for -0.0) is preserved.
+
+If you share the surrounding class code (the buffer name and get_code implementation), I can give the exact single-line replacement for line 138 and a minimal test to add.

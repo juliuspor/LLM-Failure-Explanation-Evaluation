@@ -1,0 +1,58 @@
+What happened (where, exactly)
+- At lines 396–397 the code checks:
+  ```
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  ```
+- That check runs before the code at lines 402–405 that adjusts minute sign:
+  ```
+  minutes_offset = hours_in_minutes - minutes_offset
+  ...
+  minutes_offset = hours_in_minutes + minutes_offset
+  ```
+- Because the parser produced a negative minutes_offset for a negative timezone (for example parsing "-00:15" or "-0:15" yields minutes_offset == -15), the check at line 396 triggers immediately and raises ValueError("Minutes out of range: -15").
+
+Why it fails (root cause)
+- The validation is done too early. The code expects minutes_offset to be non‑negative, but for negative timezones minutes_offset is negative until the sign-aware adjustment runs later. The lines that fix the sign (402–405) never get a chance to run because the function already raised the error. In short: minutes sign handling is applied after validation instead of before it.
+
+How to fix it (concrete steps)
+Pick one of these precise code changes; each keeps the rest of the logic intact.
+
+Option A — validate absolute value (minimal change)
+- Replace lines 396–397 with:
+  ```
+  if abs(minutes_offset) > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  ```
+- Rationale: allows negative minute values up to -59 so later sign adjustment can complete.
+
+Option B — validate after sign adjustment (reorder)
+- Move the minutes validation (lines 396–397) to execute after the sign handling block (after line 405), so the code becomes:
+  1. parse minutes into minutes_offset (may be negative)
+  2. apply sign logic (lines 402–405)
+  3. then:
+     ```
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     ```
+- Rationale: only validate the final, sign-corrected minutes value.
+
+Option C — compute minutes as unsigned and keep sign separately (more explicit)
+- When parsing, store minutes_abs (0..59) and a sign variable (-1 or +1). Compute minutes_offset = sign * minutes_abs only after verifying minutes_abs is in [0,59]. Example change:
+  ```
+  minutes_abs = parsed_minutes  # 0..59 expected
+  if minutes_abs < 0 or minutes_abs > 59:
+      raise ValueError(f"Minutes out of range: {minutes_abs}")
+  minutes_offset = sign * minutes_abs
+  ```
+- Rationale: separates parsing/validation from sign logic, avoiding ambiguous negative intermediate values.
+
+Which to choose
+- Option A is smallest change and safe if later code expects negative minute values temporarily.
+- Option B is safest if the later adjustment produces the final canonical value to validate.
+- Option C is clearest and preferable if you want unambiguous parsing/validation semantics.
+
+Test case to verify the fix
+- Input that failed: "-00:15" (or any negative offset with nonzero minutes). After the fix the code should not raise and should compute the expected offset (e.g., -15 minutes -> offset in millis = -15 * MILLIS_PER_MINUTE).
+
+If you prefer, tell me which option you want and I will give the exact patch diff for the file (with line numbers).

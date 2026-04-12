@@ -1,0 +1,37 @@
+What happened (what failed)
+- When add_number receives -0.0 it goes down the integer-branch at line 176 because the code tests x == int(x). For x == -0.0 that comparison is True (because -0.0 == 0).
+- The code then does value = int(x) at line 177. int(-0.0) is 0 (no sign), so value becomes 0.
+- Later (lines 191–192) the code prints str(value), which is "0". The negative sign on -0.0 is lost, so the output becomes "0" instead of "-0.0". That is why the test expecting "-0.0" fails.
+
+Why this happens (root cause)
+- Converting the float to int (line 177) throws away the sign bit used by IEEE-754 to represent negative zero. The code makes decisions and prints based on value (an int) afterward, so the original sign of x is no longer available.
+- The integer branch assumes that zero can be treated the same whether it was +0.0 or -0.0. That assumption is wrong: negative zero is a distinct IEEE-754 value and the codebase's intended behavior is to preserve the sign for -0.0.
+
+Where in the code it happens
+- The problem is in the integer-handling branch starting at line 176:
+  - line 176: if x == int(x) ...
+  - line 177: value = int(x)
+  - lines 191–192: self.add(str(value))
+- Because the sign is lost at line 177, the printed result at line 192 becomes "0" for both +0.0 and -0.0.
+
+How to fix it (concrete steps)
+1. Detect negative zero before converting to int. Use the existing utility method is_negative_zero (or use math.copysign/1.0/x) to check the sign. Do this as the first action inside the branch that handles integer-valued floats.
+2. If x is negative zero, emit the representation that preserves the sign (e.g. "-0.0") and return/skip the integer conversion and standard printing path.
+3. Otherwise proceed with the existing logic.
+
+Exact example patch (place near line 176, before line 177):
+- Add:
+    if CodeConsumer.is_negative_zero(x):
+        # preserve sign for negative zero
+        self.add("-0.0")
+        return
+- Then keep the existing code for all other cases.
+
+Alternative: If you want to keep the rest of the integer-formatting logic, you can check is_negative_zero(x) immediately after line 176 and set a special flag to force printing "-0.0" instead of str(value).
+
+Why this fix works
+- The check runs while x is still a float with its sign bit intact. It detects negative zero and causes the consumer to output a string that contains the minus sign. This prevents converting the float to int (which would lose the sign) and therefore preserves the intended output.
+
+Notes and pitfalls
+- Do not rely on x == int(x) or int(x) to detect negative zero — those operations erase the information needed to tell +0.0 and -0.0 apart.
+- Use CodeConsumer.is_negative_zero(x) (which your tests exercise) or math.copysign/1.0/x to detect negative zero robustly before any int conversion.

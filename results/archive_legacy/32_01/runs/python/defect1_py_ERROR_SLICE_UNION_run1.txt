@@ -1,0 +1,51 @@
+What happened (where it failed)
+- The ValueError was thrown at line 400: the code checks
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  and your call supplied minutes_offset == -15, so the check immediately raised ValueError("Minutes out of range: -15").
+
+Why it happened (root cause)
+- The code validates minutes_offset before it applies the sign or normalization logic that appears later (lines 406 and 408). The later code expects to be able to adjust minutes_offset (flip sign or convert to a complementary value) depending on the hours sign, but because the validation runs first a negative minute value is treated as invalid and rejected.
+- In short: the method assumes minutes will be normalized (non-negative 0..59) before validation, but callers are passing a negative minutes argument (e.g. -15) to represent a negative offset. The validator runs too early and rejects that legitimate intent.
+
+Exactly where to look (line references)
+- Failure point: line 400 — the range check that throws the ValueError.
+- Related logic that should handle sign/normalization: lines 406 and 408 — these manipulate minutes_offset depending on the hour-sign and should run before rejecting minute values.
+- Outcome: the exception is raised on line 401, before lines 406/408 can correct the negative minutes.
+
+How to fix it (clear, step-by-step options)
+Pick one of these concrete fixes depending on intended API behavior:
+
+Option A — require callers to pass minutes as a non-negative value (simplest)
+1. Document the method to require minutes in 0..59 and reject negative minutes (no code change).
+2. Change all call sites to pass positive minutes and put the sign in the hours parameter (e.g. for -1 hour 15 minutes pass hours=-1, minutes=15 instead of hours=-1, minutes=-15).
+
+Option B — normalize minutes before validation (if you want to accept negative minutes argument)
+1. Move the minutes range check to after the sign/normalization code (after line 408), or
+2. Replace the check at line 400 with:
+     if Math.abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   and then apply the existing sign/normalization logic (lines 406/408) so negative minutes become a valid representation of a negative offset.
+3. Ensure the code consistently computes a single signed minutes_offset before converting to milliseconds at line 409.
+
+Option C — explicitly normalize input immediately (preferred for clarity)
+1. At the start of the method, add:
+     boolean negative = minutes_offset < 0;
+     minutes_offset = Math.abs(minutes_offset);
+2. Then run the existing check:
+     if (minutes_offset < 0 || minutes_offset > 59) ...
+   (now minutes_offset < 0 will never be true)
+3. Then apply sign using hours or the negative flag before computing offset (lines 406/408).
+
+Which to choose
+- If the API contract is that minutes must be 0..59, choose Option A.
+- If you want the method to accept callers passing negative minutes (convenience/fault-tolerance), choose Option B or C. Option C is safest because it explicitly documents and normalizes negative minute input, then validates.
+
+Minimal patch example (Option C, Java-like pseudocode)
+1. Before line 400:
+     boolean negativeMinutes = minutes_offset < 0;
+     minutes_offset = Math.abs(minutes_offset);
+2. Keep the range check as-is (it will now only reject >59).
+3. Later, when applying sign, use negativeMinutes or the hours sign to make the final minutes_offset negative if intended.
+
+This will prevent ValueError: Minutes out of range: -15 from being raised when callers pass minutes = -15 to indicate a negative offset.

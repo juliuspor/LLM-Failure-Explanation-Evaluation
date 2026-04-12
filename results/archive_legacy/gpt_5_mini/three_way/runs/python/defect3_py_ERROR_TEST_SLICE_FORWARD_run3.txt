@@ -1,0 +1,58 @@
+What happened (what failed)
+- The IndexError came from this line: high = code_units[index] (slice lines 38–44).
+- The exception says index == 2 while len(code_units) == 2, so the caller passed an out‑of‑range index into code_point_at (index >= len(code_units)).
+- In short: code_point_at assumes the caller only ever calls it with a valid index; the caller sometimes advances the index incorrectly and ends up calling code_point_at with index == len(code_units), which causes the IndexError.
+
+Why it happened (root cause)
+- code_point_at reads a UTF‑16 code unit at index into variable high and then, if it looks like a high surrogate, peeks at index+1 for a low surrogate. That logic (lines 38–44) is fine provided index is within bounds.
+- The failure is not in the surrogate detection code itself but in how the caller advances index through code_units when translating the string:
+  - For a surrogate pair the caller must consume two UTF‑16 code units and advance the loop index by 2.
+  - The bug is that the caller sometimes advances the index incorrectly (for example advancing once too many or not enough), so later it calls code_point_at with index equal to len(code_units). That call tries to read code_units[index] and raises IndexError.
+- Concretely for the failing test input "\U0001F630A":
+  - The UTF‑16 code unit sequence has length 2 for the emoji (a high and a low surrogate) plus 1 for the 'A' → total expected 3 units. If the code turns Python code points into code_units incorrectly or mismanages the index increment, the loop can reach a point where index==len(code_units) and still call code_point_at.
+
+Where in the code this occurs
+- The crash happens at line 38 (high = code_units[index]) inside code_point_at (the slice you showed).
+- The caller (CharSequenceTranslator.translate / CsvEscaper.translate_string) is the one that advanced index incorrectly; you should inspect the loop that iterates over code_units and how it increments the index after handling a code point (look for a for/while that updates index or uses i += 1).
+
+How to fix it (clear, specific steps)
+1. Make the caller robust: ensure the loop never calls code_point_at with index >= len(code_units).
+   - Use a while loop that checks the index before calling:
+     - while index < len(code_units):
+         cp = code_point_at(code_units, index)
+         if cp is a surrogate pair: index += 2
+         else: index += 1
+   - This guarantees you only call code_point_at for valid indices.
+
+2. Or add a defensive check at start of code_point_at:
+   - At top of code_point_at add:
+       if index >= len(code_units):
+           raise IndexError("index out of range")  # or return None / sentinel
+   - Prefer raising a clear error early (helps debugging) or return a sentinel that the caller handles; do not allow implicit out‑of‑range access.
+
+3. When consuming a surrogate pair, be explicit about how many code units you consumed:
+   - If you detect a high surrogate and a valid low surrogate, you must advance the caller's index by 2 (not by 1). Inspect where you do index increments; make it explicit in code so you cannot accidentally increment the same variable twice.
+
+4. Verify UTF‑16 conversion and indexing:
+   - If you convert Python str to UTF‑16 code units, ensure the conversion produces a list/array whose length and content match UTF‑16 code units (e.g., using s.encode('utf-16-le') and unpacking 16‑bit units). Mismatches here can also make index math wrong.
+
+Minimal concrete change example (caller-side):
+- Replace any pattern like:
+    for i in range(len(code_units)):
+        cp = code_point_at(code_units, i)
+        ...  # handle cp
+  with:
+    i = 0
+    while i < len(code_units):
+        cp = code_point_at(code_units, i)
+        # if cp came from a surrogate pair:
+        if consumed_two_units(cp):
+            i += 2
+        else:
+            i += 1
+
+Why this will stop the IndexError
+- The while condition prevents calls to code_point_at when index == len(code_units).
+- Explicitly advancing by 2 when consuming a surrogate pair prevents the loop from skipping/overstepping code units and later making an out‑of‑range call.
+
+If you want, paste the translate loop here and I will mark the exact line where the index is advanced incorrectly and provide the minimal code edit.

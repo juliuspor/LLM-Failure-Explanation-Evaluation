@@ -1,0 +1,60 @@
+What happened (root cause)
+- At runtime the code reaches lines 346–351 and raises a TypeError because the condition inferred_type == object and expected_type != object is true.
+- inferred_type is object when the algorithm could not determine a more specific element type (for example, when the input array contains only None values, or when array is None and element is None).
+- expected_type is some specific class passed by the caller (not object).
+- The code interprets "inferred_type is object but caller expects a concrete type" as an illegal cast and raises the TypeError with the message about casting [Ljava.lang.Object; to [Ljava.lang.X;.
+
+Where it occurs
+- Exact check is at lines 346–351 (the slice you gave). The variables involved are inferred_type and expected_type. The raise happens inside that if-block.
+
+Why it fails (step-by-step):
+1. Caller passes either:
+   - array that has no non-None elements (so the code sets inferred_type = object), or
+   - array is None and element is None (so inferred_type becomes object), but also passes expected_type != object.
+2. The code reaches the check:
+   if inferred_type == object and expected_type != object:
+3. That condition is true, so it raises TypeError claiming an attempt to cast an object-list to the expected_type list.
+4. In reality there is no actual incompatible element; there are only unknown/None elements. The code is being overly strict: it refuses to produce a list of the requested expected_type when it cannot infer a more specific type.
+
+Concrete consequences for the developer
+- If you call the method with array=None and element=None and expected_type=SomeClass, it will raise TypeError at line ~346 even though the sensible behavior would be to return a List[object] (or accept casting to SomeClass if the caller insisted).
+- If you pass an array of all None values and ask for expected_type != object, same failure happens.
+
+Specific fixes (actionable, by line)
+Option A — Prefer returning List[object] when elements are unknown
+- Replace the current if-block (lines 346–351) with logic that:
+  - If inferred_type == object and element is None (or array contains only None), ignore expected_type and return a List[object].
+  - Implementation steps:
+    1. At line 346, change check to:
+       if inferred_type == object and expected_type != object and element is not None:
+           raise TypeError(…)
+    2. This allows the function to continue and produce a List[object] when element is None or all elements are None.
+- Pros: minimal change, matches docstring that element None => return List[object].
+- Cons: if caller provided expected_type and really wanted that type enforced, it will not be enforced here.
+
+Option B — Enforce expected_type only when there is a real element to check
+- Only raise when expected_type != object and there is at least one non-None element whose type conflicts with expected_type.
+- Implementation steps:
+  1. Compute has_non_none_element earlier (scan array and element).
+  2. Replace the if-block with:
+       if inferred_type == object and expected_type != object and has_non_none_element:
+           raise TypeError(…)
+  3. If no non-None elements, create a new list typed as object (or, if you must, create typed list but leave entries None).
+- Pros: strictness only when there is a real type conflict.
+
+Option C — Respect caller's expected_type by attempting to create a typed list
+- If expected_type != object and the caller provided it, attempt to create the new list and cast None entries to expected_type (acceptable if language allows), or validate/cast existing elements and raise only on actual incompatible elements.
+- Implementation steps:
+  1. Before raising at line 346, if expected_type != object attempt to validate/cast each non-None element to expected_type.
+  2. If all are compatible or None, proceed; otherwise raise TypeError showing which element failed and where.
+- Pros: fulfills caller's expectation to get a list of expected_type when possible.
+- Cons: must implement safe casting/validation logic.
+
+Minimal change recommendation
+- Change the if-condition at line 346 to require an actual non-None element/type conflict before raising:
+  if inferred_type == object and expected_type != object and (element is not None or any(x is not None for x in array or [])):
+      raise TypeError(...)
+
+This matches the docstring ("If the input list is None, a new one element list is returned whose component type is the same as the element, unless the element itself is None, in which case the return type is List[object].") and avoids rejecting legitimate calls where only None values exist.
+
+If you want, provide the surrounding code that sets inferred_type and how array/element are inspected and I will give the exact patch (diff) to replace lines 346–351.

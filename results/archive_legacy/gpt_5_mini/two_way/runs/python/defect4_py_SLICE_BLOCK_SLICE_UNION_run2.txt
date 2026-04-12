@@ -1,0 +1,45 @@
+What happened (where it fails)
+- The exception occurs at the comparison on line 346: the code evaluates "if start < min_start:" but min_start may never have been assigned. That raises an UnboundLocalError (or similar) at runtime.
+
+Why it happens (root cause, referencing variables and lines)
+- At line 340 the code checks self._min_start_index >= 0 and then reads min_start_period (line 341).
+- Lines 342–345 try to set min_start from min_start_period in two different ways:
+  - If min_start_period is a SimpleTimePeriod, min_start is set at line 343.
+  - Otherwise min_start is set at line 345.
+- But those assignments are inside mutually exclusive branches that assume min_start_period will be one of the handled types. If min_start_period is not a SimpleTimePeriod and also does not have the path used at line 345 (or control flow skips both assignments), min_start will remain undefined.
+- Immediately after (line 346) the code unconditionally does "if start < min_start:", which refers to min_start even when it was never set. That is the precise point of failure.
+
+Where in your code this can happen
+- The problematic sequence is lines 340–347 (check + read + conditional comparison).
+- The initial value self._min_start_index is set to -1 at line 253, so the code path where _min_start_index < 0 skips this block entirely and sets _min_start_index = index at line 349 — that path is fine. The bug is specifically when _min_start_index >= 0 but min_start_period is an unexpected/unsupported type and min_start is not assigned before comparison.
+
+Concrete fixes (step-by-step, pick one)
+1) Ensure min_start is always assigned before use
+   - Before the comparison, initialize min_start to a safe default (for example None) and only compare when it has a valid numeric value. Example steps:
+     - At top of the block, add: min_start = None
+     - Replace the comparison with: if min_start is not None and start < min_start:
+     - This avoids referencing an uninitialized variable.
+
+2) Make the type handling exhaustive or use a common accessor
+   - If time period objects always expose a canonical API (e.g., get_start_millis() or get_start()), call that API instead of branching on type.
+   - Example steps:
+     - Try to obtain min_start in a single try/except:
+       - try: min_start = min_start_period.get_start_millis()
+       - except AttributeError: min_start = int(min_start_period.get_start().timestamp() * 1000)
+     - Then do the comparison unconditionally.
+
+3) Move the comparison inside the branch that sets min_start
+   - Only do "if start < min_start:" in the branch(es) where min_start is known to have been assigned.
+   - Example steps:
+     - After line 343 and after line 345, immediately perform the comparison and update self._min_start_index there, rather than doing a single comparison at line 346.
+
+Which fix I recommend
+- Use fix #2 if you control the time period classes and can rely on a single accessor — cleaner and less error prone.
+- Use fix #1 if you need a minimal safe change quickly.
+
+Exact lines to change (concise)
+- Initialize min_start before line 342 (e.g., add min_start = None).
+- Replace line 346 with a guarded check: if min_start is not None and start < min_start:
+- Or refactor as described in fix #2 to call a single accessor in a try/except and then compare.
+
+That is the cause and concrete ways to fix it.

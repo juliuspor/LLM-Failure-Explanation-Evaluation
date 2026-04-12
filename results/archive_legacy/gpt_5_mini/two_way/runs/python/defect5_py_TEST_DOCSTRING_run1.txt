@@ -1,0 +1,63 @@
+What happened (root cause)
+- In ArrayUtils.add(array, element, expected_type=...), the code decides the "component type" it should use for the returned list by inspecting the inputs.
+- The buggy logic chooses the element's type (type(element)) too early, even when element is None. That produces NoneType and then the code compares that with expected_type (str in your failing test) and raises a TypeError because NoneType is not str.
+- In short: when both array is None and element is None but expected_type is provided, the code still treats the element's type as the authoritative type and rejects the expected_type -> TypeError. That is why TestArrayUtilsAdd.test_add_null_to_null_with_expected_type fails.
+
+Where it happens (variables and code path)
+- The failure occurs inside ArrayUtils.add, at the branch that infers the component/element type.
+- The relevant variables are:
+  - array (argument): None in the failing test
+  - element (argument): None in the failing test
+  - expected_type (argument): str in the failing test
+- The buggy sequence looks like (pseudocode of the offending lines):
+    component_type = type(element) if element is not None else (type(array[0]) if array is not None else object)
+    if expected_type is not None and component_type is not expected_type:
+        raise TypeError("type mismatch")
+  Because element is None, type(element) == NoneType is used (or code doesn't special-case None) and then compared to expected_type.
+
+Why that is wrong
+- The intent described in the docstring: "If the input list is None, a new one element list is returned whose component type is the same as the element, unless the element itself is None, in which case the return type is List[object]."
+- The test calls add(None, None, expected_type=str). The caller is explicitly telling the method it expects a list of strings. The method must honor expected_type when provided, and must not treat None as a conflicting type. Instead of rejecting the call it should use expected_type to decide the returned list's element type, or at least not raise when element is None and an expected_type exists.
+- The current code treats None as an actual type mismatch rather than a "no concrete element type" case.
+
+How to reproduce quickly
+- Call ArrayUtils.add(None, None, expected_type=str) and observe TypeError (or test failure). This is exactly the unit test that fails.
+
+Concrete fix (step-by-step)
+1. Change the order of type inference so expected_type takes precedence when provided:
+   - If expected_type is not None: component_type = expected_type
+   - Else if array is not None and len(array) > 0: component_type = type(array[0])  (or more robust inference)
+   - Else if element is not None: component_type = type(element)
+   - Else: component_type = object
+2. Only perform a strict type-check (and raise TypeError) when:
+   - component_type is concrete (not object), and
+   - element is not None, and
+   - not isinstance(element, component_type)
+   This avoids rejecting None elements when expected_type is present.
+3. Return a new list created from array + [element] (or [element] if array is None). No casting is needed in Python; just ensure the above type checks/choices are correct.
+
+Minimal illustrative patch (pseudocode)
+- Replace the current inference logic with:
+    if expected_type is not None:
+        component_type = expected_type
+    elif array is not None and len(array) > 0:
+        component_type = type(array[0])
+    elif element is not None:
+        component_type = type(element)
+    else:
+        component_type = object
+
+    # Validate only when element is not None
+    if element is not None and component_type is not object and not isinstance(element, component_type):
+        raise TypeError("Element type does not match expected/component type")
+
+Why this fix resolves the failure
+- When array=None and element=None and expected_type=str:
+  - component_type becomes str (because expected_type is used first)
+  - element is None, so no type-check is performed (we only validate non-None elements)
+  - The function returns [None] (a list whose runtime elements are None, but the caller asked for str and the method accepts that because None is allowed)
+- This matches the docstring and the test's expectation.
+
+Other notes
+- In Java the original bug produced a ClassCastException when an Object[] was returned but a String[] was expected. Python has no runtime array element-type enforcement, but the same logical mistake (choosing the wrong component type) leads to the failing unit test and/or a TypeError if the implementation tries to be strict.
+- If you want stricter runtime checks (e.g., prohibit None where expected_type is non-None) change the validation to raise only if element is not None and not instance of expected_type. But for parity with the docstring/test, allow None elements when expected_type exists.

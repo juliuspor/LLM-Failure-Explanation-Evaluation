@@ -1,0 +1,55 @@
+What happened (where it fails)
+- The code rejects the test input "fr__POSIX" inside the branch that handles language + country/variant (the else after length == 2).
+- After confirming locale_str[2] == '_' the code immediately does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - and then checks ch3 and ch4 are uppercase letters (lines 237–240 in your slice).
+- For "fr__POSIX" the characters are:
+  - locale_str[0:2] == "fr"
+  - locale_str[2] == '_'
+  - locale_str[3] == '_'  (empty country indicated by a second underscore)
+  - locale_str[4] == 'P' (start of the variant)
+- The uppercase-letter check at lines 239–240 fails because ch3 == '_' is not between 'A' and 'Z', so the code raises ValueError: "Invalid locale format: fr__POSIX".
+
+Why that happened (root cause)
+- The function assumes that whenever there is something after the first underscore (locale_str[2]), the next two characters (positions 3 and 4) must be an uppercase country code.
+- It does not handle the valid locale form language__variant (empty country with a double underscore), where position 3 is another '_' and the variant begins at position 4.
+- Concretely, the check at lines 237–240 is too strict: it doesn't allow ch3 to be '_' to indicate an empty country.
+
+What to change (clear steps with exact spots)
+1. After confirming locale_str[2] == '_' (line ~231+), detect whether locale_str[3] == '_' (empty country). If so:
+   - set country = ""
+   - set variant = locale_str[4:] (everything after the second underscore)
+   - return Locale(locale_str[0:2], "", variant)
+2. Otherwise, keep the existing behavior: validate ch3 and ch4 are uppercase letters and treat them as the country, then either return Locale(language, country) for length == 5 or read the variant after the next underscore.
+
+Suggested replacement snippet for the block starting at line 231 (keep line numbers for reference):
+
+Replace the block that begins after checking locale_str[2] == '_' with something like:
+
+    # handle empty country (language__variant)
+    if locale_str[3] == '_':
+        # country is empty, variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    else:
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        if length == 5:
+            return Locale(locale_str[0:2], locale_str[3:5])
+        else:
+            if locale_str[5] != '_':
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fix works
+- It explicitly handles the double-underscore case by treating it as an empty country and extracting the variant correctly (variant starts at index 4).
+- For normal language_country and language_country_variant forms it preserves the existing validation and behavior.
+
+Optional note about length validation
+- The initial length check (if length != 2 and length != 5 and length < 7) is awkward but not directly responsible for this test failure; the failure happens later because of the uppercase-country assumption. You can leave it as-is or rewrite it to be clearer (for example: if length < 2 or (3 <= length <= 4) or length == 6: raise ValueError(...)) but that's secondary to fixing the empty-country handling.
+
+Summary
+- Root cause: code assumes positions 3–4 are always an uppercase country code and does not handle locale strings with an empty country indicated by a second underscore (language__variant).
+- Fix: check for locale_str[3] == '_' and treat that as empty country with variant at locale_str[4:], otherwise validate ch3/ch4 as uppercase country letters.

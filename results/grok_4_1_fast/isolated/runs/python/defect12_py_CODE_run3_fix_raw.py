@@ -1,0 +1,25 @@
+@staticmethod
+def abbreviate(
+    text: Optional[str], lower: int, upper: int, append_to_end: Optional[str]
+) -> Optional[str]:
+    if text is None:
+        return None
+    if len(text) == 0:
+        return ''
+
+    if upper == -1 or upper > len(text):
+        upper = len(text)
+    if upper < lower:
+        upper = lower
+
+    index = text.find(' ', lower)
+    if index == -1:
+        result = text[:upper]
+        if upper != len(text):
+            result += '' if append_to_end is None else append_to_end
+        return result
+
+    if index > upper:
+        return text[:upper] + ('' if append_to_end is None else append_to_end)
+
+    return text[:index] + ('' if append_to_end is None else append_to_end)

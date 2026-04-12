@@ -1,0 +1,76 @@
+What happened (the immediate failure)
+
+- The IndexError comes from to_utf16_code_units at the check on line 35 ("if index < 0 or index >= len(code_units): raise IndexError..."). That is triggered by a call to code_point_at(code_units, pos) where pos >= len(code_units).
+- That call occurs inside the "for pt in range(consumed):" loop near the end of translate. So translate is trying to read a code point past the end of the code_units array.
+
+Why it happens (root cause, by variable / line)
+
+- translate_codepoint(...) returns consumed. The code treats consumed as "how many codepoints were handled" and enters the loop for pt in range(consumed).
+- Inside that loop you advance pos by char_count(code_point_at(code_units, pos)).
+  - code_point_at(code_units, pos) reads one code point starting at the current pos; it performs bounds checks against len(code_units) (the check that throws).
+  - char_count(...) returns 1 for BMP code points and 2 for supplementary ones (surrogate pairs).
+- The bug is a mismatch in units:
+  - consumed is a count of codepoints (as the comments imply), but the loop body advances pos by the number of UTF-16 code units for each code point. That in itself is ok — but the loop uses code_point_at at the current pos on every iteration.
+  - If consumed indicates more codepoints than remain at pos (for example due to a translator reporting it consumed a surrogate pair or because the translator counts codepoints differently), the loop will call code_point_at with pos equal to len(code_units) (or greater), which triggers the IndexError in to_utf16_code_units.
+- Concretely: suppose pos is near the end and translate_codepoint returned consumed = 1 because it consumed a codepoint that was represented by two code units (a surrogate pair). The for-loop runs once and calls code_point_at(code_units, pos). If pos points to the low-surrogate or pos == len(code_units) because the translator already logically advanced past the pair, code_point_at will attempt to read beyond the list and raise IndexError.
+
+Why this is an error in logic (not a random race)
+
+- The code assumes a contract: translate_codepoint returns a count that fits the loop's expectations and that calling code_point_at(pos) inside the loop is always safe. That contract is not enforced/fulfilled: translate_codepoint's meaning (codepoints vs code units and whether pos is already advanced) is ambiguous.
+- The immediate effect is an out-of-range read (IndexError) from code_point_at(...) because pos is advanced incorrectly or consumed was misinterpreted.
+
+How to fix it (clear, numbered steps with precise code changes)
+
+Pick one of these two definite fixes (do one, not both):
+
+Fix A — Have translate_codepoint return number of UTF-16 code units consumed
+1. Change translate_codepoint so it returns the number of UTF-16 code units it consumed (1 for BMP, 2 for a surrogate pair). This removes ambiguity: consumed is then "code units".
+2. Replace the loop with a single pos += consumed. Example:
+   - Replace
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+     with
+       pos += consumed
+   This avoids repeated calls to code_point_at and cannot step past len(code_units) incorrectly.
+
+Fix B — Keep translate_codepoint as returning codepoints, but compute code-unit advancement safely
+1. If consumed is the number of codepoints, advance pos by inspecting code_units without calling code_point_at on out-of-range indices.
+2. Implement advancement by checking code_units directly:
+   - For i in range(consumed):
+       if pos >= length: break_or_raise_appropriate_error
+       first = code_units[pos]
+       if is_high_surrogate(first) and pos + 1 < length and is_low_surrogate(code_units[pos + 1]):
+           pos += 2
+       else:
+           pos += 1
+3. This avoids calling code_point_at(pos) when pos is already at or beyond length and does correct UTF-16 unit advancement.
+
+Which one to use
+- Prefer Fix A if you control translate_codepoint: it is simpler and avoids repeated code-point decoding.
+- Use Fix B if translate_codepoint's returned semantics are fixed (must be a codepoint count) and you must adapt the caller.
+
+Where to change it (exact lines)
+- The bug-causing loop is the block starting at "for pt in range(consumed):" near the end of translate. Replace that loop with either pos += consumed (Fix A) or the explicit surrogate-aware advancement loop shown in Fix B.
+- The IndexError originates in to_utf16_code_units line ~35 because code_point_at was called with an out-of-range index. After applying one of the fixes above, code_point_at will no longer be called with pos >= len(code_units).
+
+Minimal example change (Fix A)
+- Before:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- After:
+    pos += consumed
+
+Minimal example change (Fix B)
+- Before same as above.
+- After:
+    for _ in range(consumed):
+        if pos >= length:
+            raise IndexError("translate advanced past end of input")
+        cu = code_units[pos]
+        if is_high_surrogate(cu) and pos + 1 < length and is_low_surrogate(code_units[pos + 1]):
+            pos += 2
+        else:
+            pos += 1
+
+Summary (one-sentence root cause)
+- The code advances pos using code_point_at inside a loop whose iteration count (consumed) is inconsistent with the units measured (codepoints vs UTF-16 code units), causing code_point_at to be called with pos >= len(code_units) and raising IndexError.

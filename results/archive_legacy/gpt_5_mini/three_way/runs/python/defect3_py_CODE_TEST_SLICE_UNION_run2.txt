@@ -1,0 +1,47 @@
+What happened (root cause)
+- The loop that advances pos after a translator handles some codepoints mixes two different units: UTF-16 code units (elements of code_units) and Unicode codepoints.
+- translate_codepoint(...) returns a value named consumed (the number of codepoints the translator consumed), but the code advances pos by repeatedly calling code_point_at(code_units, pos) inside the loop while also incrementing pos during the loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+- Because pos is updated inside that loop, code_point_at sometimes gets called with pos pointing at the low surrogate (the second UTF-16 code unit of a pair). When that happens code_point_at treats the low surrogate as a standalone code unit (not part of a valid high+low pair) and returns the low surrogate value. char_count then yields 1, so pos is advanced incorrectly. Eventually code_point_at may be called with an index equal to len(code_units) or another out-of-range index, causing the IndexError you see.
+
+Where it occurs
+- The bug is in the block that runs when consumed > 0 (the "advance pos" loop). The problematic calls are:
+  - code_point_at(code_units, pos)
+  - char_count(...)
+  while pos is modified inside the for pt in range(consumed) loop.
+
+Why that fails for your test
+- For the string "\U0001F630A" (high surrogate, low surrogate, 'A'):
+  - If a translator signals it consumed 1 codepoint (the emoji), the code does one iteration and reads code_point_at at the original pos — that will return the full codepoint and advance pos by 2 (OK).
+  - If the translator signals it consumed >1 or pos is changed inside the loop in a different order, code_point_at can be called on the low surrogate index (pos pointing to the low surrogate). That call will not combine it with the preceding high surrogate and yields wrong results, leading to wrong increments and eventually an IndexError when you step past the end of code_units.
+
+Concrete list of fixes (clear steps)
+1. Stop calling code_point_at on indices that may point to a low surrogate. Always compute the total number of UTF-16 code units that correspond to the consumed codepoints starting from the original pos, not by advancing pos and repeatedly querying the current index.
+2. Replace the current per-iteration pos update with a safe accumulation computed from the original pos:
+   - Let start = pos
+   - total_units = 0
+   - for i in range(consumed):
+       cp = code_point_at(code_units, start + total_units)
+       total_units += char_count(cp)
+   - pos += total_units
+   This ensures code_point_at is always called at the start+offset of a valid codepoint boundary and never on an orphaned low surrogate.
+3. Alternatively, change the translator contract so translate_codepoint returns the number of UTF-16 code units consumed (not codepoints). If you do that, you can advance pos by that many units directly (pos += consumed). That is simpler but requires updating all translators to use code units consistently.
+
+Minimal corrected code sketch (apply to your loop)
+- Replace the current for pt loop with:
+    if consumed > 0:
+        start = pos
+        units = 0
+        for _ in range(consumed):
+            cp = code_point_at(code_units, start + units)
+            units += char_count(cp)
+        pos += units
+This avoids calling code_point_at on a low surrogate and prevents the IndexError.
+
+Why this explanation pins down the bug
+- The bug is not in code_point_at itself (that function is correct: it expects to see a high surrogate followed by a low surrogate).
+- The bug is that the loop calls code_point_at at indices that are not guaranteed to be the start of a codepoint because pos is mutated while iterating. That leads to treating low surrogates as standalone code units and miscounting, producing out-of-range indices.
+
+If you want, I can produce a one-line patch for the exact file or update translate_codepoint's contract and adapt all translators accordingly.

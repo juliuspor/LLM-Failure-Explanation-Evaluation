@@ -1,0 +1,37 @@
+What happened (where it fails)
+- At line 396 the code accepts minutes_offset values in the range 0..59:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later, at line 402 and line 404 the code reassigns minutes_offset using hours_in_minutes:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Then at line 405 the code multiplies minutes_offset by MILLIS_PER_MINUTE and eventually may raise "Offset is too large" at line 407.
+
+Root cause (why it fails)
+- The arithmetic at lines 402 and 404 treats minutes_offset as if it were purely a minute magnitude to be added to the hours, but it does not preserve the sign of the hours. In particular, when the hour offset is negative and minutes_offset is zero, the code computes a positive large minutes value instead of a negative one.
+- Concretely: suppose hours_in_minutes = 5 * 60 = 300 (built from a negative hour -5) and minutes_offset = 0 (valid per the check at line 396). Line 402 computes minutes_offset = hours_in_minutes - minutes_offset = 300. The code then converts 300 minutes into milliseconds (line 405) and later finds the offset "too large" (line 407) or returns the wrong sign. The result is either an unexpected exception or an incorrect offset sign/value.
+- In short: the code mixes up sign handling and magnitude. It validated minutes_offset as 0..59, then later uses subtraction/addition with hours_in_minutes in a way that produces the wrong sign or double-counts hours when the hour part is negative or when minutes is zero.
+
+Exactly where the logic went wrong
+- Validation at line 396 treats minutes_offset as an absolute minute count (0..59).
+- Lines 402 and 404 assume they can produce the combined minutes by arithmetic on hours_in_minutes, but they do not consult the original sign of the hour offset (or combine absolute magnitudes correctly).
+- The mismatch between those assumptions is the direct cause of wrong offsets or the "Offset is too large" error at line 407.
+
+How to fix it (concrete steps)
+1. Compute the total minutes explicitly from absolute hour and minute magnitudes, then apply the sign once. For example:
+   - Introduce a sign variable set from the hours value (e.g. sign = 1 if hours >= 0 else -1).
+   - Let total_minutes = abs(hours) * 60 + minutes_offset
+   - Apply sign: total_minutes *= sign
+2. Replace the existing lines 402 and 404 with the single, unambiguous computation above.
+3. Continue to multiply total_minutes by MILLIS_PER_MINUTE (line 405), and keep the existing overflow/too-large check (line 407) after that multiply.
+4. Keep the minutes validation at line 396 (0..59) but ensure the hours sign is preserved in the combination step.
+
+Minimal corrected pseudocode (replace the problematic block)
+- sign = 1 if hours >= 0 else -1
+- total_minutes = abs(hours) * 60 + minutes_offset
+- offset = FieldUtils.safe_multiply(total_minutes * sign, DateTimeConstants.MILLIS_PER_MINUTE)
+- (then keep the existing overflow check and return)
+
+Why this fix works
+- It separates magnitude and sign, so minutes_offset is treated consistently as a 0..59 magnitude and the hour sign is applied exactly once. That prevents producing a wrongly positive large minutes value when the hour was negative or when minutes = 0.
+
+If you want, paste the surrounding code (how hours_in_minutes is computed and the branches around lines 402 and 404) and I’ll give a line-by-line replacement that fits your code style.

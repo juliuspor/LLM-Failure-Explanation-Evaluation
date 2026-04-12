@@ -1,0 +1,40 @@
+What happened (root cause)
+- At lines 340–349 you try to update self._min_start_index when a new data item is added.
+- The intent is: if there's no minimum yet (self._min_start_index < 0) set it to this index; otherwise only replace it when the new start is earlier than the current minimum.
+- Instead the code always executes `self._min_start_index = index` at line 349, unconditionally overwriting the result of the comparison done earlier (lines 340–347). That makes _min_start_index become the last-seen index rather than the true minimum start index.
+- get_min_start_index (lines 437–439) simply returns that overwritten value, so tests that expect the earliest index (1) see the last index (3) and the assertion fails.
+
+Where it occurs (exact lines)
+- Initialization: line 253 sets `self._min_start_index = -1`.
+- Decision & comparison: lines 340–347 do `if self._min_start_index >= 0:` then compute `min_start` and `if start < min_start:` set `self._min_start_index = index`.
+- Buggy overwrite: line 349 does `self._min_start_index = index` unconditionally, undoing the earlier logic.
+- Access: lines 437–439 `get_min_start_index` returns the wrong value.
+
+Why that causes the test failure
+- Because line 349 always assigns the current index, the variable ends up equal to the last-added index (3 in your failing run). The test expected the index with the earliest start time (1), so it fails with "Expected max_middle_index=1, got 3".
+
+Concrete fixes (exact code-level steps)
+1. Remove the unconditional overwrite at line 349 and make it part of an else branch for the case when no minimum exists yet. Replace the block at 340–349 with:
+
+    if self._min_start_index >= 0:
+        # existing comparison path; only replace if new start is earlier
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        if isinstance(min_start_period, SimpleTimePeriod):
+            min_start = int(min_start_period.get_start().timestamp() * 1000)
+        if start < min_start:
+            self._min_start_index = index
+    else:
+        # first item becomes the current minimum
+        self._min_start_index = index
+
+2. Alternatively, keep the structure but delete the unconditional `self._min_start_index = index` line 349 and add a single assignment only when `_min_start_index < 0`:
+
+    if self._min_start_index < 0:
+        self._min_start_index = index
+
+3. Add a small unit test to exercise adding multiple periods in non-sorted order and assert get_min_start_index() returns the index of the earliest start to prevent regressions.
+
+Why these fixes work
+- They ensure you only set _min_start_index to the new index when you either have no minimum yet, or the new start is strictly earlier than the current minimum. This preserves the intended semantics and makes the getter return the true earliest-start index instead of the last index seen.
+
+If you want, paste the surrounding method and I can produce a ready-to-drop-in patch showing exact line numbers adjusted for your file.

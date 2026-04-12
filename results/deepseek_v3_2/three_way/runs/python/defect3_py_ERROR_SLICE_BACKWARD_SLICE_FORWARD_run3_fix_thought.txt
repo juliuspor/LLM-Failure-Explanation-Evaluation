@@ -1,0 +1,92 @@
+The bug is in the loop that advances `pos` after a non-zero consumption. The original code used `for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))`. However, `code_point_at` expects an index into `code_units`, but `pos` is being updated inside the loop, and `code_point_at` is called with the updated `pos` each iteration. This is correct because we need to get the codepoint at the current position, which may be a surrogate pair. However, there is a subtle issue: the loop iterates `consumed` times, but `consumed` is the number of codepoints consumed, not code units. The loop correctly advances `pos` by the char count of each codepoint. But the bug diagnosis indicated an index out of range error at index 2. This could happen if the string is short and the loop tries to access beyond the length. However, the loop condition `pos < length` ensures we don't exceed. The error might be in the `translate_codepoint` method of a subclass, but the diagnosis says the error occurs in `CharSequenceTranslator.translate`. Actually, the diagnosis says the error occurs because `to_utf16_code_units` returns a list of UTF-16 code units, and the index 2 is out of range. That suggests that the string had only 2 code units, but the caller tried to access index 2. This could happen if the caller (like `translate_codepoint`) tries to access `code_units[index]` without checking bounds. However, the `translate_codepoint` method in `CsvEscaper` does check bounds for surrogate pairs. But the error might be in the `translate` method itself: when `consumed == 0`, we call `code_point_at(code_units, pos)`. If `pos` is at the end of the list, `code_point_at` will raise an IndexError. But the while loop condition ensures `pos < length`, so `pos` is valid. However, `code_point_at` may access `index+1` for a surrogate pair. If `pos` is the last index and the last code unit is a high surrogate, `code_point_at` will check `index+1 < len(code_units)` and see it's out of range, so it returns the high surrogate itself. That's fine.
+
+Wait, the diagnosis says the error occurs at line 38 (which is `high = code_units[index]` in `code_point_at`). That means `index` is out of range. So the caller passed an index that is >= len(code_units). In `translate`, the only calls to `code_point_at` are in the loop. The loop condition is `pos < length`. So `pos` is always less than length. However, `length` is the length of `code_units`. So `pos` is a valid index. But `code_point_at` is also called in the loop for advancing after consumption? Actually, the original code after consumption does:
+```python
+for pt in range(consumed):
+    pos += char_count(code_point_at(code_units, pos))
+```
+Here, `code_point_at` is called with `pos` which may have been updated in the previous iteration. If `consumed` is greater than 1, after the first iteration, `pos` may become equal to `length`, and then the second iteration calls `code_point_at` with `pos` equal to `length`, causing IndexError. That's the bug! For example, if a translator consumes 2 codepoints at once, and the first codepoint is a surrogate pair (2 code units), then after first iteration `pos` increases by 2. If the total length is 2, then `pos` becomes 2, which equals length, and the second iteration tries to access `code_units[2]`.
+
+Thus, the fix is to avoid calling `code_point_at` after we have already consumed all code units. We should advance `pos` by the total code units consumed, not by iterating over codepoints. But we don't know how many code units correspond to the consumed codepoints. We can compute that by iterating over the codepoints until we have consumed the required number of code units? Actually, the translator's `translate_codepoint` returns the number of codepoints consumed. It may have written some code units to `out`. We need to advance `pos` by the number of code units that correspond to those consumed codepoints. We can do a loop similar to the original, but we must ensure we don't go out of bounds. However, the translator is supposed to have consumed exactly those codepoints, so we can trust that the code units from `pos` onward correspond to exactly `consumed` codepoints. We can iterate over each codepoint, but we need to stop if we reach the end of code units. But if the translator consumed `consumed` codepoints, there must be enough code units. So we can do:
+```python
+temp_pos = pos
+for _ in range(consumed):
+    cp = code_point_at(code_units, temp_pos)
+    temp_pos += char_count(cp)
+# Now temp_pos should be the new position
+pos = temp_pos
+```
+But we must ensure that `temp_pos` does not exceed length. However, if the translator consumed `consumed` codepoints, it must have been able to read them, so `temp_pos` should be <= length. Actually, after consuming the last codepoint, `temp_pos` should equal length. So we can compute the new position directly.
+
+Alternatively, we can change the contract: `translate_codepoint` returns the number of code units consumed, not codepoints. But that would break existing subclasses. The existing subclasses like `CsvEscaper` return 1 or 2 for codepoints? Actually, `CsvEscaper` returns 2 when it handles a surrogate pair (two code units), but that's the number of codepoints? It returns 2 because it consumed a surrogate pair as one codepoint? Wait, in `CsvEscaper.translate_codepoint`, if it sees a high surrogate and a low surrogate, it writes both code units and returns 2. That 2 is the number of codepoints consumed? Actually, a surrogate pair is one codepoint. But the method returns 2, which is the number of code units consumed, not codepoints. The docstring says "Returns: int count of codepoints consumed". So there is a mismatch. The bug might be that `CsvEscaper` returns 2 for a surrogate pair, meaning it consumed two codepoints? But a surrogate pair is one codepoint. This is ambiguous.
+
+Looking at the original Java code (Apache Commons Text), `translate` method uses `CharSequence` and `Writer`. The `translate` method in Java uses `codepoint` methods. The `translate` method in our Python version is trying to mimic that. In Java, the `translate` method calls `translateCodepoint` which returns the number of codepoints consumed. Then it advances the index by the number of characters (code units) corresponding to those codepoints. The Java code does:
+```java
+int consumed = translateCodepoint(input, i, out);
+if (consumed == 0) {
+    // char[] ch = Character.toChars(Character.codePointAt(input, i));
+    // out.write(ch);
+    // i += Character.charCount(Character.codePointAt(input, i));
+} else {
+    for (int pt = 0; pt < consumed; pt++) {
+        i += Character.charCount(Character.codePointAt(input, i));
+    }
+}
+```
+That's exactly what we have. The bug is that after the first iteration of the inner loop, `i` may become equal to `input.length()`, and then the second iteration calls `Character.codePointAt(input, i)` which throws an index out of bounds. The Java code likely has the same bug? Actually, the Java code in Apache Commons Text might have been fixed. Let's think: if `consumed` is 2, that means the translator consumed two codepoints. The first codepoint may be a surrogate pair (2 chars), so after first iteration i increases by 2. If the total length is 2, then i becomes 2, and the second iteration tries to get codepoint at index 2, which is out of bounds. So the translator should not have consumed 2 codepoints if there is only one codepoint. But the translator might have consumed 2 codepoints because it saw two code units that are not a surrogate pair? Actually, a codepoint is either one or two code units. So if the translator consumed 2 codepoints, it must have consumed at least 2 code units. If the total length is 2, then consuming 2 codepoints would consume exactly 2 code units, but only if both codepoints are single code units. In that case, after consuming the first codepoint (1 code unit), i becomes 1, then second codepoint (1 code unit) i becomes 2, and the second iteration's `Character.codePointAt(input, i)` with i=2 is out of bounds. So the loop should stop when i reaches length. The Java code likely has a check? Actually, the loop condition is `pt < consumed`, and they call `Character.codePointAt(input, i)` which will throw if i >= length. So the bug is that the loop does not check that i < length. But the translator should have consumed exactly the right number of code units, so i should never exceed length. However, after the last codepoint, i equals length, and then the loop tries to get another codepoint. So the loop should be structured differently: we need to advance i by the char count for each codepoint, but we must not call `codePointAt` when i is already at length. We can do:
+```java
+for (int pt = 0; pt < consumed && i < length; pt++) {
+    i += Character.charCount(Character.codePointAt(input, i));
+}
+```
+But if i < length fails, then we didn't consume all codepoints? That would be inconsistent.
+
+Better to compute the new position by iterating over codepoints without calling `codePointAt` on the last iteration. We can do:
+```python
+temp_pos = pos
+for _ in range(consumed):
+    if temp_pos >= length:
+        break
+    cp = code_point_at(code_units, temp_pos)
+    temp_pos += char_count(cp)
+pos = temp_pos
+```
+But if temp_pos exceeds length, that's an error. Actually, the translator should have consumed exactly the code units, so temp_pos should be <= length. If temp_pos < length after consuming all codepoints, then there are leftover code units that were not consumed, but the translator said it consumed `consumed` codepoints, which might be less than the actual number of codepoints? That's okay.
+
+Given the bug report, the immediate fix is to ensure we don't call `code_point_at` with an index that is out of bounds. We can change the loop to:
+```python
+for _ in range(consumed):
+    if pos >= length:
+        break
+    cp = code_point_at(code_units, pos)
+    pos += char_count(cp)
+```
+But if pos >= length, we break, meaning we didn't consume all codepoints, but the translator said it did. That's a contract violation. However, it's safer.
+
+Alternatively, we can compute the new position by summing char counts without repeatedly calling `code_point_at` on the updated pos. We can do:
+```python
+temp_pos = pos
+for _ in range(consumed):
+    cp = code_point_at(code_units, temp_pos)
+    temp_pos += char_count(cp)
+pos = temp_pos
+```
+But this still calls `code_point_at` with temp_pos that may become equal to length after the last iteration? Actually, after the last iteration, temp_pos is the new position, which should be <= length. The call to `code_point_at` for the last codepoint uses the temp_pos before increment, which is < length. So it's safe. The bug is that the original code calls `code_point_at` with `pos` that has been updated, so after the first iteration, pos may be length, and then the second iteration calls `code_point_at` with pos == length. So we need to capture the starting position and compute each codepoint's char count from the current position without updating pos until after all computations. Let's implement that.
+
+We'll change the else block to:
+```python
+else:
+    # Advance pos by the number of code units corresponding to consumed codepoints
+    temp_pos = pos
+    for _ in range(consumed):
+        cp = code_point_at(code_units, temp_pos)
+        temp_pos += char_count(cp)
+    pos = temp_pos
+```
+This ensures that each call to `code_point_at` uses the correct temporary position, and we don't modify pos until the end.
+
+Also, we need to adjust the `if consumed == 0` block: after writing the codepoint, we advance pos by `char_count(codepoint)`. That's correct because we already got the codepoint at pos.
+
+Let's write the fixed code accordingly.
+
+We'll output the entire `translate` method with the fix.

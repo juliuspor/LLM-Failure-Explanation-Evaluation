@@ -1,0 +1,52 @@
+What happened (symptom)
+- The failing test input "\U0001F630A" (emoji U+1F630 followed by "A") causes an IndexError from to_utf16_code_units. The error is raised by the check at lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+
+Why it happens (root cause, precisely)
+- to_utf16_code_units converts the Python string into UTF‑16 code units in a list called code_units. For the failing input that list has length 3: [high_surrogate, low_surrogate, ord('A')].
+- The translator logic walks that code_units list using a variable named index. When it encounters a surrogate pair it advances the index by 2 to skip the pair. But the loop also does an additional index increment (or otherwise checks the index after advancing) so index can become equal to len(code_units) (i.e. 3).
+- The explicit bounds check at lines 35–36 treats index == len(code_units) as out of range and raises IndexError. That happens when the code advances past the surrogate pair and then tries to validate the resulting index before finishing the loop. In short: the code both advances past the low surrogate and then still performs a bounds check against the full length, which sees index == len and throws.
+
+Where it occurs (exact identifiers & lines)
+- Function: to_utf16_code_units (def at line 10 in the slice)
+- Variables: code_units (the list of UTF‑16 code units), index (loop index into code_units)
+- Check that raises: lines 35–36 in the provided slice:
+    if index < 0 or index >= len(code_units):
+        raise IndexError(f"String index out of range: {index}")
+
+How to fix it (concrete steps you can apply)
+1. Ensure you never advance index past len(code_units) and that you validate bounds before consuming a surrogate pair:
+   - Before forming a surrogate pair, check that index + 1 < len(code_units). If not, treat the high surrogate as unpaired or handle the error appropriately.
+   - When you consume a valid surrogate pair, set index += 2 and continue the loop without performing an extra index++ afterward.
+
+2. Alternatively, change the loop structure so you only increment index in one place:
+   - Use a while index < len(code_units): loop and at the end of the iteration only increment index by 1 unless you explicitly consumed two code units (then increment by 2).
+   - This avoids the situation where you increment twice and end up with index == len(code_units) and then hit the strict >= check.
+
+3. Another robust option: iterate over Unicode code points instead of UTF‑16 code units:
+   - Convert the string to Python code points (e.g., use the string itself; Python iterates by code point), or use a helper like code_point_at that returns a code point and the proper advance, and base your loop on code-point length instead of code_units length. This avoids manual surrogate handling entirely.
+
+Minimal code edits (exact changes)
+- Replace the current surrogate handling and index updates with one of these precise edits:
+  a) Before using the low surrogate:
+     if index + 1 >= len(code_units):
+         # handle unpaired high surrogate (e.g., append replacement or the high surrogate code unit)
+         ...
+     else:
+         # form code point from code_units[index] and code_units[index+1]
+         index += 2
+         continue  # do not fall through to an extra index increment
+  b) Or rewrite loop header:
+     index = 0
+     while index < len(code_units):
+         # process code_units[index]
+         if consumed_two_units:
+             index += 2
+         else:
+             index += 1
+
+Why this fixes the failure
+- These changes prevent index from becoming equal to len(code_units) and then being considered out of range by the strict bounds check. They ensure surrogate pairs are consumed safely only when the low surrogate exists, and they keep a single, consistent place that increments index so you do not accidentally skip or overrun the list.
+
+If you want, paste the translate loop here and I will show the exact patch (3–5 lines) to fix the index advance and bounds check.

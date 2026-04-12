@@ -1,0 +1,50 @@
+What happened (where it failed)
+- Error raised at line 251: raise ValueError(f"Invalid locale format: {locale_str}")
+- The failing input was "fr__POSIX".
+- The code before that (lines 248–252) is trying to parse the locale string by fixed positions:
+  - line 248 returns Locale(locale_str[0:2], locale_str[3:5]) in one branch
+  - then line 250 checks locale_str[5] != '_'
+  - finally line 252 returns Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why it failed (root cause)
+- The parser assumes the country code is always two characters located at positions 3–4 and that the variant (if present) starts at position 6 (after a separator underscore at position 5).
+- The input "fr__POSIX" uses an empty country code (language = "fr", empty country, variant = "POSIX"). Empty country is represented by two adjacent underscores. That pattern shifts the expected positions:
+  - locale_str[3:5] yields "_P" (not a valid 2-letter country),
+  - locale_str[5] is "O" (not the underscore the code expects at position 5), so the check at line 250 fails and the ValueError at line 251 is raised.
+- In short: the code cannot handle an empty country field (double underscore). It parses by fixed indices instead of detecting empty country/variant fields.
+
+Exactly where to change behaviour (concrete steps)
+1. Stop parsing by fixed indices. Use splitting and explicit presence checks so empty fields are handled correctly.
+2. Replace the block around lines 248–252 with logic that:
+   - splits on '_' with a maximum number of parts,
+   - accepts an empty country part (i.e., parts like ["fr", "", "POSIX"]),
+   - validates each part's length/characters appropriately,
+   - constructs Locale(language, country or None, variant or None).
+
+Suggested replacement code (clear step-by-step)
+- Locate the function that contains lines 248–252 (the parser that returns Locale(...)) and replace that code with something like:
+
+  parts = locale_str.split('_', 2)  # splits into at most 3 parts
+  language = parts[0]
+  if len(parts) == 1:
+      return Locale(language)
+  country = parts[1]  # may be '' (empty) for fr__POSIX
+  variant = parts[2] if len(parts) == 3 else None
+
+  # Optional validations:
+  if len(language) != 2:
+      raise ValueError(f"Invalid language code: {language}")
+  if country not in ('', None) and len(country) != 2:
+      raise ValueError(f"Invalid country code: {country}")
+
+  return Locale(language, country or None, variant)
+
+Why this fixes it
+- split('_', 2) preserves an empty country field when there are two underscores in a row, so "fr__POSIX" becomes ["fr", "", "POSIX"] and you get language="fr", country="" (treated as None), variant="POSIX".
+- No fragile index arithmetic; the presence and emptiness of fields are handled explicitly.
+
+Notes
+- Keep any additional validation you need (e.g., allowed character sets) but validate fields by value/length, not by fixed character positions.
+- If your Locale constructor treats None differently than empty string, convert empty country to None as shown.
+
+This addresses the exact failure at line 251 and explains why "fr__POSIX" caused the ValueError.

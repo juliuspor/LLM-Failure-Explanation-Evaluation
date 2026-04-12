@@ -1,0 +1,44 @@
+What happened (root cause)
+- At line 336 you set inferred_type = type(array). That returns the Python type of the list object itself (i.e. <class 'list'>), not the type of the list elements.
+- Later code uses inferred_type as the component/element type when it builds or casts the new list. Because inferred_type is the list type instead of the element type, the code tries to treat a list-of-objects as a list-of-strings and the runtime cast fails with ClassCastException / TypeError: "Cannot cast object list to str list".
+- Concretely: if you pass array = ['a','b'] or array = [object(), ...] or array = [] then type(array) == list. That incorrect inferred_type makes the code produce a list whose declared component type doesn't match the actual elements, which is why you see the casting error.
+
+Where this occurs (lines)
+- Line 336: inferred_type = type(array) (wrong — returns list type)
+- Line 337–338: other branches set inferred_type = type(element) or inferred_type = object (those are okay when element is non-None or both are None)
+- Line 346: a later check uses inferred_type and expected_type to validate types; because inferred_type is list you get a mismatch and the code attempts an invalid cast (producing the error shown).
+
+Why it fails (clear cause)
+- You are using the type of the container (type(array)) where you should use the type of the elements (e.g. type(array[0]) or an inferred element type).
+- That makes the code believe the component type is list rather than str (or object), so when you cast/convert to List[str] it tries to cast the actual list elements to strings under the wrong assumption about the component type and the JVM/interop rejects the cast.
+
+How to fix it (concrete steps)
+1. Replace inferred_type = type(array) with logic that inspects the element type(s) inside the array:
+   - If the array is non-empty, use the element type of the first element:
+     inferred_type = type(array[0])
+   - If the array may be heterogeneous, decide how you want to handle mixed types:
+     - require homogeneity: verify all(type(x) is inferred_type for x in array)
+     - or compute a common base class (e.g. use isinstance checks or inspect MRO to pick a common ancestor), or fall back to object.
+2. Handle empty arrays explicitly:
+   - If array is empty and expected_type is provided, use expected_type as inferred_type.
+   - If array is empty and element is not None, use type(element).
+   - If array is empty and element is None and expected_type not given, set inferred_type = object.
+3. Keep the existing check at line 346 but make sure inferred_type is an element/component type, not list.
+
+Example replacement (conceptual):
+- Instead of:
+    if array is not None:
+        inferred_type = type(array)
+- Use:
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+            # optionally validate homogeneity:
+            # if any(type(x) is not inferred_type for x in array): inferred_type = object
+        else:
+            inferred_type = expected_type if expected_type is not None else object
+
+4. After fixing inferred_type, ensure the cast/construction code that creates the returned list uses that element type only for validation, not by confusing it with the container type.
+
+Summary
+- The bug is that you used type(array) (the list class) instead of the element type. That leads to an invalid cast (list-of-object → list-of-str). Fix by inferring the element type from array contents (or expected_type) and validate/handle empty or heterogeneous arrays accordingly.

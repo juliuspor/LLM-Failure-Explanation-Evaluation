@@ -1,0 +1,46 @@
+What happened
+- The test expected the stored value to be negative zero (-0.0). The code produced regular zero (0). The assertion failure shows "Expected -0.0, got 0".
+- That means the negative sign on zero was lost between the call to add(...) and the actual stored value.
+
+Where it happened
+- The problem occurs inside your add method (def add(self, newcode):) around line 126 and when you append to the container at line 138 (self.append(newcode)). Those are the two lines the traceback slices point to.
+
+Why it happened (root cause)
+- Negative zero is a distinct float sign bit (float -0.0) even though -0.0 == 0.0 compares equal. The test is checking for the negative sign.
+- The code is converting or normalizing the value before/when appending, so the stored value is the integer 0 (or a plain positive float 0.0) instead of preserving float(-0.0). Common ways this can happen:
+  - You or a helper coerced newcode to int (int(newcode)) or to a non-sign-preserving type before calling self.append.
+  - The container you're using normalizes values (for example using a set or dict keys, where -0.0 and 0.0 are treated the same and one canonical representation is kept).
+  - You implicitly used float->int conversion elsewhere (e.g. newcode = int(newcode) or newcode = round(...) without keeping sign).
+- Because add simply forwards to append at line 138, the conversion or normalization is happening either before line 126 (caller) or inside add if you mutate newcode before calling append.
+
+How to confirm it (exact checks to run)
+1. Add an immediate debug print/inspect at line 126, before you call append:
+   - Print repr(newcode) and type(newcode): e.g. print("add: newcode =", repr(newcode), "type =", type(newcode))
+2. Inspect the value right after append (line 138) or look at the container slot you just wrote:
+   - If you have an index, read it back and print repr(self[...]).
+
+What to change (concrete fixes, step-by-step)
+1. If you are unintentionally converting to int:
+   - Remove the conversion. Replace code like newcode = int(newcode) with newcode = float(newcode) (if you need a numeric type) so the sign bit is preserved.
+   - Example change at or before line 126:
+     - Wrong: newcode = int(newcode)
+     - Fix: newcode = float(newcode)   # keeps -0.0
+2. If a container deduplication (set/dict) is collapsing -0.0 to 0.0:
+   - Use a list (which preserves items and their exact float representation) instead of a set, or store a tuple that encodes sign explicitly (e.g. (newcode, math.copysign(1.0, newcode))).
+3. If you intentionally need to preserve the negative-zero sign for later assertions:
+   - Ensure you append the float value directly. Change line 138 from self.append(newcode) to:
+     - self.append(float(newcode))   # forces float and preserves negative zero
+4. If you need to assert negative zero in tests, do not rely on equality alone. Detect negative zero explicitly:
+   - Use math.copysign or 1.0/x:
+     - math.copysign(1.0, x) == -1.0 indicates negative zero
+     - or (x == 0.0 and math.copysign(1.0, x) < 0)
+   - Example test check:
+     - assert x == 0.0 and math.copysign(1.0, x) < 0, f"Expected -0.0, got {x!r}"
+
+Summary of concrete steps to fix now
+1. At or before line 126, inspect the incoming newcode with repr() and type().
+2. If you see int or 0 instead of -0.0, remove any int() coercion and use float(newcode) when appending.
+3. Replace line 138 self.append(newcode) with self.append(float(newcode)) if you want to be defensive and preserve sign.
+4. Re-run the failing test. If the test still fails, inspect whether the container type (set/dict) is collapsing values and switch to a structure that preserves the float sign.
+
+That pinpoints the root cause: the negative sign for zero is being stripped by a conversion or by the container, so ensure you store a float(-0.0) (not an int 0 or a normalized 0.0) and adjust the test if necessary to detect negative zero properly.

@@ -1,0 +1,78 @@
+What happened (what fails)
+- The test test_add_null_to_null_with_expected_type calls:
+  ArrayUtils.add(None, None, expected_type=str)
+  expecting to get [None].
+- Instead the code raises TypeError at lines 346–347:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(
+
+Where it goes wrong (exact lines / variables)
+- At line 335 the code sets inferred_type from the array:
+  335: if array is not None:
+  336:     inferred_type = type(array)
+  This uses type(array) (the list type) rather than the element/component type.
+- At line 337–338 it tries to fall back to the element type if array is None:
+  337: elif element is not None:
+  338:     inferred_type = type(element)
+- When both array and element are None the code sets inferred_type to object (line 340).
+- Finally, lines 346–347 raise a TypeError when inferred_type is object while expected_type is some other type:
+  346: if inferred_type == object and expected_type != object:
+  347:     raise TypeError(
+
+Why this causes the failure
+- The test passes expected_type=str. Both array and element are None, so inferred_type becomes object (line 340).
+- Because inferred_type == object and expected_type != object, the code raises TypeError (lines 346–347) instead of returning [None].
+- The root conceptual bug: inferred_type is computed incorrectly and the function treats an "unknown" inferred_type (object) as incompatible with a provided expected_type, even though expected_type should be honored when both array and element are None.
+- Also, when array is provided, using type(array) returns the Python container type (e.g. list) rather than the contained element type. That makes later comparisons against element/expected types incorrect.
+
+Concrete consequences
+- test_add_null_to_null_with_expected_type fails with TypeError (where the test expected no error).
+- Other cases may be subtly wrong when array is non-None: inferred_type becomes list (or whatever the array object type is), not the element type, which may break type checks or conversions later.
+
+Exactly how to fix it (step-by-step)
+1. Determine the element type, not the container type:
+   - If array is not None:
+     - If it's non-empty, use type(array[0]) (or search for a non-None element to infer type).
+     - If it's empty, do not use type(array) — treat element type as unknown.
+2. Prefer the explicit expected_type when provided:
+   - If expected_type is provided (not None), use it to decide the result type when array and element don't give a clearer type.
+3. Do not reject expected_type just because inferred_type is object:
+   - If inferred_type is object (unknown), but expected_type is specific (e.g. str), accept expected_type and proceed instead of raising TypeError.
+4. Handle None element specially:
+   - If element is None and array is None, returning [None] of type matching expected_type is acceptable; do not raise.
+
+Minimal concrete code changes (where to change)
+- Replace lines 335–340 with logic like:
+  if array is not None:
+      # Prefer a contained element's type if available
+      if len(array) > 0:
+          # find first non-None element for inference, else use type(array[0])
+          for e in array:
+              if e is not None:
+                  inferred_type = type(e)
+                  break
+          else:
+              inferred_type = object
+      else:
+          inferred_type = object
+  elif element is not None:
+      inferred_type = type(element)
+  else:
+      inferred_type = object
+
+- Replace the check at 346–347 with:
+  # If we couldn't infer type from array/element, use the expected_type if given.
+  if inferred_type == object and expected_type is not None:
+      inferred_type = expected_type
+  # Only error if inferred_type and expected_type are both specific and incompatible
+  if expected_type is not None and inferred_type is not object and expected_type is not inferred_type:
+      raise TypeError(...)
+
+Notes on behavior
+- This preserves the intent of type-safety when concrete types conflict, but allows expected_type to be honored when there is no concrete inference (both array and element are None).
+- If you need stronger behavior (e.g. pick a common supertype when element and array element types differ), implement a small compatibility check instead of strict equality.
+
+Summary
+- The code computes inferred_type incorrectly (uses type(array) instead of element type) and then rejects a provided expected_type when inferred_type is the generic object.
+- The failing line is the TypeError at 346–347, triggered because inferred_type was set to object at line 340.
+- Fix by inferring element type from array contents (not the container), and by using expected_type to resolve unknown (object) inference instead of raising.

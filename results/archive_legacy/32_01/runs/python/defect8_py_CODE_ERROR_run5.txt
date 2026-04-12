@@ -1,0 +1,65 @@
+What happened (where it failed)
+- The failure occurs inside the to_locale method when parsing "fr__POSIX".
+- The code raises ValueError at the check:
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+  because ch3 is '_' (the second underscore in "fr__POSIX") and '_' is not between 'A' and 'Z'.
+
+Why it failed (root cause)
+- The code assumes that when there is a third character (after "ll_"), positions 3 and 4 must always be two uppercase letters (a 2-letter country). That does not cover the valid form where the country is empty and the string uses two consecutive underscores to indicate an empty country and a variant (language + "_" + "" + "_" + variant), e.g. "fr__POSIX".
+- For "fr__POSIX" the indices are:
+  0:'f', 1:'r', 2:'_', 3:'_', 4:'P' ...
+  so ch3 == '_' and ch4 == 'P'. The check expects ch3 to be 'A'..'Z', so it fails and raises the ValueError.
+
+Where in the code this happens
+- In to_locale, after:
+    if locale_str[2] != '_':
+        raise ValueError(...)
+  the code does:
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+  That is the exact check that rejects "fr__POSIX".
+
+How to fix it (concrete steps)
+1. Accept the empty-country form (two consecutive underscores). Replace the ch3/ch4-only check with logic that allows an underscore at position 3 to indicate an empty country:
+   - After confirming locale_str[2] == '_', test if locale_str[3] == '_':
+     - If yes: set country = "" and variant = locale_str[4:].
+     - If no: enforce that locale_str[3:5] are two uppercase letters and proceed as before (country = locale_str[3:5]).
+2. Simplify / correct the initial length validation:
+   - The existing condition if length != 2 and length != 5 and length < 7: is confusing and error-prone.
+   - Use explicit allowed shapes: length == 2, length == 5 (ll_CC), or length >= 7 (ll_CC_variant or ll__variant). For example:
+       if length < 2:
+           raise ValueError(...)
+       # then handle length == 2, length == 5, else length >= 7
+3. Example corrected snippet (replace the middle section of the method):
+
+    if length == 2:
+        return Locale(locale_str, "")
+    else:
+        if locale_str[2] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        # handle empty country: "ll__variant"
+        if locale_str[3] == '_':
+            country = ""
+            variant = locale_str[4:]
+            if not variant:
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            return Locale(locale_str[0:2], country, variant)
+        # normal country present: expect two uppercase letters
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        if length == 5:
+            return Locale(locale_str[0:2], locale_str[3:5])
+        if locale_str[5] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fix works
+- It correctly recognizes the two-underscore form for empty country and extracts the variant starting one position earlier.
+- It preserves the existing validation for two-letter country codes and for the usual ll_CC_variant form.
+
+Summary
+The code fails because it assumes a two-letter country always exists when a third character is present; it does not handle the valid "ll__variant" form (empty country). Adjust the parsing to detect the second underscore and treat the country as empty (variant starts after that underscore).

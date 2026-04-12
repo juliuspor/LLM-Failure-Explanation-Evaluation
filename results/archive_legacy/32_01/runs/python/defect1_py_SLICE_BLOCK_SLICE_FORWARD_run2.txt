@@ -1,0 +1,38 @@
+What happened (where it fails)
+- The code validates the minutes component at lines 400–401:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later (lines 406 and 408) the code expects to be able to apply a sign to the minutes by doing arithmetic with minutes_offset:
+  - minutes_offset = hours_in_minutes - minutes_offset
+  - minutes_offset = hours_in_minutes + minutes_offset
+- Because minutes_offset was forced to be non‑negative at 400–401, the later sign logic does not work as intended. That leads to an incorrect computed offset or an overflow that triggers the "Offset is too large" error at line 411, and ultimately the code fails when parsing signed minute values (for example negative offsets like "-00:30" or when the sign for minutes must be applied separately).
+
+Why it fails (root cause)
+- The root cause is the order and meaning of validation versus sign handling:
+  - The code validates the minutes value as if it must already include its sign (lines 400–401).
+  - But later code (lines 406 & 408) treats minutes_offset as an unsigned magnitude to which a sign is applied by adding/subtracting from hours_in_minutes.
+- Those two approaches conflict. For negative offsets the validation rejects valid inputs (or forces the value to be non‑negative) so the later arithmetic produces the wrong result or an out‑of‑range millisecond offset and triggers the error at line 411.
+
+Exactly where to change it (precise steps)
+1. Stop validating sign before sign is applied:
+   - Remove or change the check at lines 400–401 so it validates the absolute minutes magnitude, not a signed value.
+   - Replace it with: if minutes_offset < 0 or minutes_offset > 59 should be changed to check abs(minutes) or be deferred until after sign is applied.
+
+2. Parse and apply the sign explicitly before computing total minutes:
+   - Determine the sign of the whole offset (from the hours part or the leading +/−) first.
+   - Ensure minutes_offset is the magnitude (0..59). For example:
+     - parsed_minutes = parsed integer from the minutes substring
+     - if parsed_minutes < 0: parsed_minutes = abs(parsed_minutes) or raise if your parser shouldn't produce negative numbers
+     - then apply sign: total_minutes = sign * (hours_in_minutes + parsed_minutes) — or, if current code uses subtract/add at lines 406/408, do that only after sign is known.
+
+3. Keep the range check but apply it to the magnitude:
+   - After parsing the raw minutes digits, check 0 <= parsed_minutes <= 59.
+   - Do this check before adding to hours_in_minutes, but after extracting digits and before applying the sign.
+
+4. Add unit tests:
+   - Test positive offsets: "+02:30" and "+00:30"
+   - Test negative offsets: "-02:30" and "-00:30"
+   - Test boundary minutes: "HH:00" and "HH:59"
+   - Test invalid minutes: "HH:60" and any negative minute magnitude if your parser can produce it.
+
+Summary (concise)
+- The immediate bug is that the minutes validation at lines 400–401 conflicts with later sign application at lines 406/408. Validate the minutes as an unsigned magnitude (0–59) and apply the sign before combining with hours_in_minutes. That will prevent the wrong arithmetic and the "Offset is too large" failure at line 411.

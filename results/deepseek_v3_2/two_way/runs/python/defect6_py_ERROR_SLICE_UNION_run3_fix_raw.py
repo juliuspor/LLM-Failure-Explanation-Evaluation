@@ -1,0 +1,32 @@
+    def add_number(self, x: float):
+        prev = self.get_last_char()
+        if x < 0 and prev == '-':
+            self.add(" ")
+        
+        # Handle negative zero separately to preserve the sign.
+        if CodeConsumer.is_negative_zero(x):
+            # For negative zero, we need to output '-0' (or '-0.0' if not integer).
+            # Since -0.0 == 0, the integer branch would output '0'.
+            # We'll output '-0' for integer-like negative zero.
+            self.add("-0")
+            return
+        
+        if x == int(x) and not math.isinf(x) and not math.isnan(x):
+            value = int(x)
+            mantissa = value
+            exp = 0
+            if abs(x) >= 100:
+                while mantissa % 10 == 0:
+                    check_val = (mantissa // 10) * (10 ** (exp + 1))
+                    if check_val == value:
+                         mantissa //= 10
+                         exp += 1
+                    else:
+                        break
+            
+            if exp > 2:
+                self.add(str(mantissa) + "E" + str(exp))
+            else:
+                self.add(str(value))
+        else:
+            self.add(str(x))

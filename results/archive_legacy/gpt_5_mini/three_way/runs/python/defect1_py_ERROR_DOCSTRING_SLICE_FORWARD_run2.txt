@@ -1,0 +1,49 @@
+What happened (where it failed)
+- The failure happened inside the offset factory code shown in the slice; the ValueError ("Minutes out of range: -15") was triggered because minutes_offset ended up negative for a positive hours_offset.
+- The problematic lines are 402 and 404:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Those two assignments are reversed relative to the intended sign logic. As written they cause the wrong sign to be applied to minutes when hours is positive vs negative, producing an invalid minute value (e.g. -15) and later a ValueError.
+
+Why that causes the specific error
+- The docstring requires that when hours is positive you cannot have a negative minutes value (e.g. (2, -15) is invalid). The code is supposed to build a total offset in minutes from hours_in_minutes (hours * 60) and minutes_offset (0..59).
+- Because lines 402/404 are swapped, for a call like (hours_offset = 2, minutes_offset = 15) the code may execute the wrong branch and compute minutes_offset = hours_in_minutes - minutes_offset (or the equivalent wrong sign), producing a negative minute component (for some paths) or a final minutes value that violates the allowed range, which triggers the ValueError you observed.
+- The code later multiplies minutes_offset by MILLIS_PER_MINUTE and checks size (line 405 and 407). The earlier incorrect sign leads to an invalid intermediate minutes value and thus the ValueError.
+
+Where to change it (concrete steps)
+1. Fix the two assignments so the minutes sign is applied correctly:
+   - At line 402 replace
+     minutes_offset = hours_in_minutes - minutes_offset
+     with
+     minutes_offset = hours_in_minutes + minutes_offset
+   - At line 404 replace
+     minutes_offset = hours_in_minutes + minutes_offset
+     with
+     minutes_offset = hours_in_minutes - minutes_offset
+
+   (In other words, swap the two expressions so the minutes are added when they should be positive and subtracted when they should be negative.)
+
+2. Add explicit validation and clearer calculation:
+   - Compute total_minutes in one place to avoid sign confusion:
+     total_minutes = hours_offset * 60
+     if hours_offset > 0:
+         if minutes_offset < 0: raise ValueError("minutes negative when hours positive")
+         total_minutes += minutes_offset
+     elif hours_offset < 0:
+         if minutes_offset < 0:
+             total_minutes -= abs(minutes_offset)   # same as total_minutes - minutes
+         else:
+             total_minutes -= minutes_offset
+     else:  # hours_offset == 0
+         total_minutes += minutes_offset  # allow positive or negative minutes
+
+   - This makes the intended rules explicit and prevents the swapped-sign bug.
+
+3. Update tests:
+   - Add unit tests for all combinations in the docstring (e.g. (2,15), (2,0), (2,-15), (0,-15), (-2,15), (-2,-15)) to verify valid/invalid cases and prevent regression.
+
+Why this fix is safe
+- It directly corrects the inverted sign application at the lines where the bug occurs.
+- The explicit total_minutes computation prevents confusing in-place modification of minutes_offset that led to the negative minute value and ValueError.
+
+If you want, paste the surrounding function (lines ~390–410) and I will produce the exact corrected code snippet to drop in place.

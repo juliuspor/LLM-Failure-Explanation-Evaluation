@@ -1,0 +1,41 @@
+What goes wrong
+- Root cause: the code applies the minutes with the wrong sign in the branch that combines hours and minutes, i.e. the + and - are swapped. That wrong arithmetic produces an incorrect total-minute offset (sometimes too large) and then either produces a wrong zone or triggers the "Offset is too large" ValueError at line 411.
+
+Where it happens
+- The faulty statements are at the lines you pasted:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Those two lines are intended to compute the combined offset in minutes from the separate hour and minute parts, but the operator used in the branch for positive minutes is reversed (so subtraction is used where addition is required, and vice versa).
+
+Concrete example showing the error
+- Suppose hours_offset = 2 and minutes_offset = 15 (expected result: +135 minutes).
+  - Correct computation: 2*60 + 15 = 135.
+  - With the current code path that executes line 406, it does 120 - 15 = 105 — returning +01:45 instead of +02:15.
+- Conversely, another combination can produce an offset whose absolute value is larger than allowed and trigger the ValueError at line 411, because the bug changes the sign/ magnitude in unexpected ways.
+
+Why this is the root cause (not just a symptom)
+- The docstring describes exactly which sign combinations are valid and how to combine hours and minutes. The only place those numbers are combined is these lines. No other arithmetic is performed before the safe_multiply at line 409, so a wrong operator here directly causes the wrong total minutes. The downstream check then sees an unexpected value and raises the exception at line 411, or returns an incorrect zone.
+
+How to fix it (step-by-step, explicit)
+1. Replace the fragile branch logic with an explicit sign-aware combination:
+   - Compute hours_in_minutes = hours_offset * 60 (already done in code).
+   - Determine sign = 1 if hours_offset >= 0 else -1.
+   - Validate minutes per the docstring (minutes must be 0..59; when hours > 0, minutes must be non-negative; when hours < 0, minutes must be non-negative; when hours == 0 minutes may be negative to indicate negative zero-offset).
+   - Compute total_minutes = hours_in_minutes + sign * abs(minutes_offset).
+   - Use total_minutes for bounds checks and for the later multiply-to-millis.
+
+2. Replace the two lines with one clear expression, for example:
+   - sign = 1 if hours_in_minutes >= 0 else -1
+   - minutes_offset = hours_in_minutes + sign * abs(minutes_offset)
+
+3. Keep the existing bounds checks (the check that raises ValueError("Offset is too large") at line 411), but make sure those checks run after the corrected combination.
+
+Why this fix works
+- It follows the docstring rules exactly: the minutes are added in the same direction as the hours. Using the sign of the hour when combining guarantees correct signs for all allowed combinations and prevents the addition/subtraction being swapped by mistake.
+
+Minimal patch (conceptual)
+- Delete line 406 and 408 and replace with:
+  - sign = 1 if hours_in_minutes >= 0 else -1
+  - minutes_offset = hours_in_minutes + sign * abs(minutes_offset)
+
+This makes the intent explicit, removes the subtle operator bug, and prevents the incorrect offsets or spurious "Offset is too large" ValueError.

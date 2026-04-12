@@ -1,0 +1,38 @@
+What happened (root cause)
+- The code combines hours_offset and minutes_offset with the wrong sign handling when hours_offset is negative. That makes the computed total minutes incorrect for negative offsets.
+- Concretely, lines 402–405 mutate minutes_offset into the total minutes using:
+  - if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+  - else: minutes_offset = hours_in_minutes + minutes_offset
+- That subtraction is the wrong operation for the intent. When hours_offset is negative you must apply the minutes with the same overall sign as the hours, not subtract them a second time.
+
+Where it fails (concrete example)
+- Call: hours_offset = -1, minutes_offset = 30
+  - hours_in_minutes = hours_offset * 60 = -60
+  - current code (line 402) computes minutes_offset = hours_in_minutes - minutes_offset = -60 - 30 = -90
+  - The code then multiplies -90 by MILLIS_PER_MINUTE and builds the zone for -1:30 (i.e. -90 minutes)
+- That is wrong if the intended meaning of the arguments is "hours offset plus minutes offset" where the sign of the whole offset should follow the sign of hours_offset. For an input of (-1, 30) you typically expect -60 + (-30) = -90 only if the caller intended -1 hour 30 minutes; but callers often mean sign(hours) applies to minutes, so the correct general computation should explicitly apply the hours sign to the minutes rather than subtracting unconditionally.
+
+Why this matters (clear effect)
+- The code double-counts the sign on the minutes for negative hours: subtracting the positive minutes makes the negative total more negative than intended in the common interpretation.
+- The bug is located at lines 402–405 (the two assignments to minutes_offset and the call to FieldUtils.safe_multiply). Those lines produce the wrong total minutes and therefore the wrong offset.
+
+Precise fix (step-by-step)
+1. Stop reusing the parameter variable minutes_offset for the total. Use a new variable total_minutes to avoid confusion.
+2. Compute total_minutes by applying the hours sign to the minutes, for example:
+   - total_minutes = hours_offset*60 + (hours_offset < 0 ? -minutes_offset : minutes_offset)
+   - In Python syntax: total_minutes = hours_in_minutes + (-minutes_offset if hours_in_minutes < 0 else minutes_offset)
+3. Then call:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing range checks and exception handling.
+
+Fixed code sketch (showing exact replacement for lines 400–405)
+- hours_in_minutes = hours_offset * 60
+- total_minutes = hours_in_minutes + (-minutes_offset if hours_in_minutes < 0 else minutes_offset)
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix is correct
+- It makes explicit that the minutes component shares the sign of the hours component when hours are negative.
+- It avoids in-place mutation of minutes_offset, preventing accidental reuse or sign mistakes.
+- It produces the correct total minutes for all combinations of hours_offset and minutes_offset within the validated ranges.
+
+If you want, tell me which interpretation you require for negative offsets (i.e. should (-1,30) mean -90 minutes or -30 minutes) and I will give an exact one-line replacement for those three lines in your code.

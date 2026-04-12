@@ -1,0 +1,54 @@
+What happened
+- The code raises ValueError at lines 396–397 because minutes_offset is negative when the range check runs:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That negative value comes from applying the sign to the parsed minutes component too early. A negative timezone like "-00:30" produces minutes_offset = -30 before the range check, so the check fails even though the minutes component (30) is valid.
+
+Why it fails (root cause)
+- The code validates minutes_offset while minutes_offset still carries the sign. The minutes component should be validated as a non‑negative value 0..59, then the sign should be applied when you compute the total offset in minutes.
+- Because the sign is applied before validation, valid inputs with negative offsets (e.g. "-00:30", "-05:15") trigger the "Minutes out of range" error incorrectly.
+
+Where it occurs
+- Validation failure at line 396–397.
+- Later code (lines 402, 404) expects minutes_offset to be the unsigned minute component or to be recombined with hours_in_minutes, so the sign/validation mismatch is the root problem.
+
+Concrete fixes (step‑by‑step)
+1. Keep the raw parsed minutes in an unsigned variable (e.g. minutes_component). Do not apply the sign yet.
+   - Replace uses of minutes_offset for the parsed value with minutes_component.
+2. Validate the unsigned minutes_component against 0..59:
+   - if not (0 <= minutes_component <= 59): raise ValueError(f"Minutes out of range: {minutes_component}")
+   - This replaces lines 396–397.
+3. After you have validated the component and parsed the sign (let sign = +1 or -1), compute the total minutes using the sign and the validated component:
+   - hours_in_minutes = hours * 60
+   - if sign < 0:
+       total_minutes = -(hours_in_minutes + minutes_component)
+     else:
+       total_minutes = hours_in_minutes + minutes_component
+   - Assign total_minutes to the variable you later use as minutes_offset / offset calculation (the code at lines 402 and 404 should use this logic).
+4. Keep the later steps that multiply by MILLIS_PER_MINUTE and check overflow unchanged, but use total_minutes instead of a possibly signed minutes_component.
+
+Example change (pseudocode mapped to your lines)
+- Before (problematic):
+  minutes_offset = parsed_minutes_signed   // sign already applied
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+  ...
+  if negative:
+      minutes_offset = hours_in_minutes - minutes_offset   // confusing because sign already present
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- After (correct):
+  minutes_component = parsed_minutes_unsigned
+  if minutes_component < 0 or minutes_component > 59:
+      raise ValueError(f"Minutes out of range: {minutes_component}")    // replace lines 396-397
+  if negative:
+      total_minutes = -(hours_in_minutes + minutes_component)          // replace lines 402/404 logic
+  else:
+      total_minutes = hours_in_minutes + minutes_component
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- You validate the actual minutes value (0..59) regardless of sign, so "-00:30" no longer fails the range check.
+- You then combine hours and minutes correctly taking the sign into account, so offset computation and overflow checks behave correctly.
+
+If you want, paste the small parsing snippet around lines 390–410 and I can rewrite those lines with the exact variable names used in your file.

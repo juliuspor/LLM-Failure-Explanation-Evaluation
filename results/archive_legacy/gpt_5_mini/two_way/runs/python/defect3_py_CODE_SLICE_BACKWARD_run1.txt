@@ -1,0 +1,37 @@
+What happened (root cause)
+- The loop that advances pos after a translator consumes code units calls code_point_at(code_units, pos) repeatedly (lines shown in your slice). If the translator consumed the last code unit(s), the next call to code_point_at uses pos == len(code_units), which is out of bounds. That makes code_point_at raise an IndexError in to_utf16_code_units (lines 35–36 in your slice): "String index out of range: index".
+- Concretely: after
+  - consumed = self.translate_codepoint(code_units, pos)
+  - you enter the for pt in range(consumed) loop and immediately call code_point_at(code_units, pos)
+  - but if the translator consumed the code units at the end of code_units, pos is at the end and code_point_at tries to read code_units[pos] and fails.
+
+Why this is wrong (specific variable/methods/lines)
+- translate sets consumed based on translate_codepoint (line with consumed = ...).
+- The for loop uses consumed as a count of code units to advance:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  This is wrong because:
+  - code_point_at(code_units, pos) expects pos to point to an existing code unit; if pos == length this call raises IndexError (see to_utf16_code_units index check at lines 35–36).
+  - The translator contract (your comment) says "they just took care of a surrogate pair", so consumed already tells you how many code units to skip. Calling code_point_at on positions that may be past the end is unnecessary and unsafe.
+
+Where it fails
+- The failure occurs inside code_point_at (called from the for loop) when pos equals len(code_units). The stack shows the exception coming from to_utf16_code_units index check (lines 35–36 in your slice).
+
+How to fix it (concrete steps / exact replacement)
+1. Replace the for-loop that increments pos with a single advance by consumed code units. Change:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+   to:
+    pos += consumed
+   Rationale: consumed is already the number of UTF-16 code units the translator consumed (1 or 2 for surrogate pairs), so you can advance pos by that amount without calling code_point_at.
+
+2. If translate_codepoint returns number of code points instead of code units (verify the contract), make it explicit and adjust:
+   - If consumed is count of code points: you need to compute how many code units those code points occupied. But given your comment ("they just took care of a surrogate pair"), it appears consumed is code units. Confirm translate_codepoint's contract and unit semantics, and then use the appropriate increment (pos += consumed_code_units).
+
+3. Add a defensive check (optional) before calling code_point_at anywhere:
+    if pos >= length:
+        break  # or handle end-of-input
+   This prevents accidental out-of-bounds calls.
+
+Summary (short)
+- The code calls code_point_at(code_units, pos) when pos can be equal to len(code_units), causing an IndexError in to_utf16_code_units (lines 35–36). Fix by advancing pos with pos += consumed (or otherwise ensure you never call code_point_at on an out-of-range pos) after translate_codepoint returns.

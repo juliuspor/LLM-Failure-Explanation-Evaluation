@@ -1,0 +1,52 @@
+What’s failing
+- The failure happens in LocaleUtils.to_locale when the method refuses valid-looking locale strings. The root cause is that the method’s validation is too strict and implemented in a way that rejects or mis-parses normal inputs (for example "en-GB", "EN_gb", or "en_GB_xxx_more"). Concretely, the checks that enforce:
+  - language must be lowercase,
+  - country must be uppercase,
+  - separator must be an underscore,
+  - and lengths must match exact fixed values,
+cause correct inputs to be rejected or incorrectly parsed.
+
+Where it occurs
+- In LocaleUtils.to_locale (the input validation / parsing block) the code:
+  - splits or slices the incoming string with the expectation of exact lengths/positions for language/country/variant,
+  - then calls language.islower() and country.isupper() (or equivalent checks) and throws ValueError/IllegalArgumentException if these checks fail.
+  - If the implementation uses split("_") to get parts and assumes at most three parts, it will also mis-handle variants that themselves contain underscores.
+
+Why that is the root cause (plain explanation)
+1. Separator variants: Many callers use the hyphen "-" (e.g. "en-GB") or mixed separators. The method only accepts "_" so "en-GB" will be rejected even though it is a valid locale notation in many contexts. The code is failing because it does not normalize separator characters before validation.
+2. Case sensitivity: The method enforces language.islower() and country.isupper() exactly. Inputs that are correct semantically but use different casing (e.g. "EN_GB", "en_gb") will be rejected. This makes the method brittle.
+3. Fixed-length assumptions: If the code checks lengths like len(language)==2 or len(country)==2 and slices by fixed indices rather than parsing parts, then non-standard but valid variants (like "zh_Hant_TW" or variants containing extra underscores) will be misparsed or throw errors.
+4. Split/underscore handling: If the implementation uses parts = locale_str.split("_") and then expects parts length <= 3, any variant containing underscores (e.g. "en_GB_xxx_more") will produce more than 3 parts and be treated as an invalid format, even though Java Locale allows variants with underscores.
+
+Concrete symptoms you’ll see
+- ValueError (or IllegalArgumentException) thrown with a message like “Invalid locale format” when calling LocaleUtils.to_locale("en-GB"), LocaleUtils.to_locale("en_gb"), or LocaleUtils.to_locale("en_GB_xxx_more").
+- Correctly formatted strings with different casing or separators fail unexpectedly.
+
+How to reproduce quickly
+- Call LocaleUtils.to_locale("en-GB") — fails because separator is '-' not '_'.
+- Call LocaleUtils.to_locale("en_gb") — fails because country is not uppercase.
+- Call LocaleUtils.to_locale("en_GB_xxx_more") — fails because split produced >3 parts.
+
+Clear fixes (steps to implement)
+1. Normalize separator first
+   - Replace '-' with '_' before parsing: locale_str = locale_str.replace('-', '_')
+2. Parse robustly
+   - Do NOT rely on fixed indices. Use indexOf('_') (or find) to get the first and second underscores and substring accordingly. This preserves any extra underscores in the variant part.
+   - Example approach:
+     - If no underscore: language = whole string
+     - If one underscore: language = before first underscore; country = after first underscore
+     - If two or more underscores: language = before first; country = between first and second; variant = substring from second underscore to end (keep all remaining underscores)
+3. Relax case handling but validate content
+   - Accept language/country in any case, but validate that language contains only letters and is length 2–3 if you want strictness. Then normalize: language = language.lower(), country = country.upper()
+   - This avoids rejecting input solely because of caller casing.
+4. Return clear errors for truly invalid formats
+   - After parsing and normalization, if language or country lengths are out of allowed ranges, throw ValueError with a message that includes the offending input and which part failed.
+5. Add unit tests
+   - Tests for "en", "en_GB", "en-GB", "en_GB_xxx", "en_GB_xxx_more", "EN_gb", "zh_Hant_TW".
+
+Why these fixes work
+- Normalizing separators and case makes the method tolerant of common input variants while still enforcing a consistent output Locale.
+- Using substring/index-based parsing preserves the full variant string (including embedded underscores) instead of losing/miscounting parts.
+- Clear, specific validation errors make it obvious what failed and why.
+
+If you paste the exact code of LocaleUtils.to_locale I can point to the exact lines to change and give a minimal patch that implements the steps above.

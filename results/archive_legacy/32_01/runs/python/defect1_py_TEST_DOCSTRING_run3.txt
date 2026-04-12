@@ -1,0 +1,58 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15) but the returned zone id is wrong (it fails the assert expecting "-02:15").
+- Root cause: the for_offset_hours_minutes method applies the sign of the hours to the minutes incorrectly when hours are negative and minutes are negative. Instead of combining the two signed values, the implementation flips or re-applies a sign to minutes and computes the total offset incorrectly.
+
+Where it occurs
+- Inside DateTimeZone.for_offset_hours_minutes, in the code that converts hours and minutes into a single offset (the lines that validate/normalize minutes and then compute totalSeconds/totalMinutes).
+- Typical buggy pattern to look for:
+  - code that does something like:
+    if (hours < 0) { minutes = -Math.abs(minutes); }
+    totalMinutes = hours * 60 - minutes;    // or similar subtraction
+  - or code that unconditionally uses totalMinutes = hours*60 - minutes when hours < 0.
+- That produces the wrong total when both inputs are negative. Example: hours = -2, minutes = -15
+  - Correct total minutes = -2*60 + (-15) = -135 => -02:15
+  - Buggy code may compute -2*60 - (-15) = -120 + 15 = -105 => -01:45 (wrong)
+
+Why that is wrong
+- Minutes already carry their own sign. Flipping or subtracting minutes again double-counts sign and changes magnitude.
+- The intended semantics in your docstring are: combine the signed hour and minute into a single signed offset. You must either:
+  - add the two signed quantities directly: total = hours*60 + minutes, or
+  - compute a sign once and apply it to abs(hours)*60 + abs(minutes).
+
+How to fix (concrete steps)
+1. Find the code in DateTimeZone.for_offset_hours_minutes where hours and minutes are validated and then converted to seconds/minutes. Look for any lines that change minutes based on the sign of hours or that use subtraction when hours are negative.
+2. Replace the incorrect combination logic with one of these correct options:
+
+Option A (simplest if minutes already may be negative):
+- Validate ranges as you already do.
+- Compute totalMinutes = hours * 60 + minutes;
+- Compute totalMillis = totalMinutes * 60 * 1000 (or totalSeconds similarly).
+- Create the zone from that total.
+
+Option B (explicit single-sign construction — preferred when you want strict sign rules):
+- Determine sign:
+    if (hours < 0 || (hours == 0 && minutes < 0)) sign = -1; else sign = +1;
+- Use absolute values:
+    totalSeconds = sign * (Math.abs(hours) * 3600 + Math.abs(minutes) * 60);
+- This yields the same result but makes the sign handling explicit and avoids mixing signs.
+
+3. Keep or add validation to reject combinations the doc says are invalid (for example, positive hours with negative minutes should raise ValueError).
+4. Add tests that cover edge cases:
+- for_offset_hours_minutes(-2, -15) -> "-02:15"  (current failing case)
+- for_offset_hours_minutes(-2, 15) -> "-02:15"
+- for_offset_hours_minutes(2, -15) -> raise ValueError (invalid per doc)
+- for_offset_hours_minutes(0, -15) -> "-00:15"
+- for_offset_hours_minutes(0, 15) -> "+00:15"
+- boundaries: (-23, -59), (+23, +59), etc.
+
+Minimal code example (Java-like pseudocode)
+- Buggy (do not use):
+    if (hours < 0) minutes = -Math.abs(minutes);
+    int minutesTotal = hours * 60 - minutes;
+- Correct:
+    int minutesTotal = hours * 60 + minutes;
+
+Why this will fix your failing test
+- Using totalMinutes = hours*60 + minutes preserves the existing sign and magnitude of both components. For (-2, -15) this gives -120 + (-15) = -135 minutes => "-02:15", which matches the docstring and your assertion.
+
+If you want, paste the current body of DateTimeZone.for_offset_hours_minutes (the lines that validate and combine the inputs) and I will point to the exact lines and show the minimal patch.

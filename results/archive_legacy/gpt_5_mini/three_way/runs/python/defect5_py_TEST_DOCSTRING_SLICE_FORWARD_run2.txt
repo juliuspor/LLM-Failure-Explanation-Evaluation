@@ -1,0 +1,70 @@
+Short answer: the tests call ArrayUtils.add(..., expected_type=...), but the actual function in hit05_arrayutils.py does not accept a keyword named expected_type (and/or it mis-handles a None element). That causes either an immediate TypeError: unexpected keyword argument 'expected_type' at import/run time, or later a type-check branch to misbehave when element is None and expected_type is supplied.
+
+What went wrong (root causes, precisely and with variables/methods to inspect)
+1. Wrong keyword name / signature mismatch
+   - Where to look: the add function definition in hit05_arrayutils.py (the top of that file where def add(...) appears).
+   - Symptom: when you run the test that calls ArrayUtils.add(None, None, expected_type=str) you get:
+        TypeError: add() got an unexpected keyword argument 'expected_type'
+   - Why: the implementation probably declared a different parameter name (for example component_type or elem_type or expected_component_type) instead of expected_type. The test passes expected_type as a keyword, so Python raises the TypeError before any other logic runs.
+
+2. Incorrect handling of None + expected type
+   - Where to look: the branch in add that handles array is None and/or element is None (look for "if array is None" or "if element is None").
+   - Symptom: if the signature mismatch is fixed but the test still fails, you will see either:
+     - A TypeError raised from a type-check (e.g. doing issubclass(type(element), expected_type) when element is None), or
+     - A logic bug that always returns a list typed as object-like when element is None, ignoring expected_type, which reproduces the LANG-35 behavior analog (caller expected a string-type array but got an object-type array).
+   - Why: common mistakes:
+     - Doing something like if element is None: return [None] without consulting expected_type, so the function "loses" the caller's expected_type hint.
+     - Doing issubclass(type(element), expected_type) or similar without guarding element is None, which raises a TypeError because type(None) is not a subclass of arbitrary classes in the way the code expects or because expected_type may itself be None.
+     - Trying to coerce types by calling expected_type() or constructing an instance when element is None; that can produce an unexpected value or fail for types without no-arg constructors.
+
+Concrete places to inspect in hit05_arrayutils.py
+- The def add(...): signature (line where def add is declared). Verify the parameter names and defaults. Make sure it includes expected_type as a keyword or accepts **kwargs.
+- The branch that handles array is None (look for "if array is None:" or similar). Ensure it consults the expected_type parameter when element is None.
+- Any type-check lines that use isinstance/issubclass or call expected_type() — ensure they guard for element is None and for expected_type being None.
+
+How to fix (step-by-step)
+1. Fix the function signature
+   - If tests expect expected_type, change the add function signature to accept that keyword:
+        def add(array, element, expected_type=None):
+     or accept a more general name AND alias it:
+        def add(array, element, expected_component_type=None, **kwargs):
+            expected_type = kwargs.get('expected_type', expected_component_type)
+   - This removes the immediate TypeError.
+
+2. Correctly handle element is None
+   - When array is None and element is None:
+     - If expected_type is provided, you must honor that hint (the test expects that the result "has" the expected type information). In Python lists don't enforce element types, but the code should not raise because of a type mismatch and should not perform invalid class operations.
+     - Implement a safe branch:
+         if array is None:
+             if element is None:
+                 # Return a list containing None; do not attempt isinstance/issubclass checks
+                 return [None]
+             else:
+                 return [element]
+   - If your code tries to validate element against expected_type, guard it:
+         if element is not None and expected_type is not None and not isinstance(element, expected_type):
+             raise TypeError(...)
+
+3. Avoid using issubclass on instance types and avoid calling expected_type() when element is None
+   - Use isinstance(element, expected_type) for runtime checks.
+   - Only call expected_type() if you actually need to construct a default value and the expected_type is a callable that takes no arguments—otherwise don't.
+
+4. Add unit tests that exercise the previously failing branch
+   - The provided tests already do this; run them after the changes.
+
+Example minimal change (conceptual)
+- Change signature:
+      def add(array, element, expected_type=None):
+- Change handling:
+      if array is None:
+          if element is None:
+              return [None]   # honor that caller expected a list; no further checks
+          else:
+              if expected_type is not None and not isinstance(element, expected_type):
+                  raise TypeError(...)
+              return [element]
+
+Why this explanation is certain
+- The failing test in your log calls ArrayUtils.add(None, None, expected_type=str). The most common immediate failure is a TypeError about an unexpected keyword argument. If that is not the visible error, the next most likely failure is a type-check/issubclass/constructor call when element is None that raises a TypeError or otherwise ignores the expected_type. Both of these root causes point to (a) signature mismatch and (b) fragile handling of element == None — exactly the areas mentioned above.
+
+If you paste the add function header and the few lines that handle array is None / element is None from hit05_arrayutils.py I will point to the exact line(s) and give the exact patch to apply.

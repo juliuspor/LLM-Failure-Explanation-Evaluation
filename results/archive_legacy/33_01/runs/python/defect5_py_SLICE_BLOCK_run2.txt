@@ -1,0 +1,49 @@
+What happens (where it fails)
+- The code raises a TypeError at lines 346–351 whenever inferred_type == object and expected_type != object.
+- That condition is hit even when every element in the list is actually an instance of expected_type (so the cast should be valid). The error message is produced and the caller gets the ClassCastException text.
+
+Why it happens (root cause)
+- inferred_type is being computed as the top-level Python built-in object type (inferred_type == object) in situations where the inference logic cannot determine a more specific common type.
+  - Common causes: the list is empty, the list contains None, the list contains mixed types, or the inference code uses a loose rule that falls back to Python object when it sees a Java object wrapper or mixed subclasses.
+- The code treats inferred_type == object as a guaranteed mismatch and unconditionally rejects the list whenever expected_type is more specific (expected_type != object). That logic is at line 346:
+  - if inferred_type == object and expected_type != object:
+- Because the test is just equality with object, it does not check whether the actual elements are instances/subclasses of expected_type. So a legitimate list (e.g., [MyClass(), MySubclass()] or a list of Java objects that map to MyClass) can be rejected simply because the inference algorithm returned object as the “safe” fallback.
+- In short: the failure is not caused by an actual incompatible element; it’s caused by the inference returning object and the code treating that return value as definitive proof of incompatibility.
+
+Where to look in your code
+- Line 346: the conditional that decides to raise.
+- Lines 347–351: the TypeError and error message construction, which assume a ClassCastException-style mismatch.
+- The code that computes inferred_type (the lines before 346) — that’s the real place to fix the root cause. The inference logic is producing object in cases where it should either compute a more specific common type or accept the list as valid.
+
+Concrete fixes (exact steps)
+1. Make inference skip None and empty lists:
+   - Before computing inferred_type, filter out None elements: elements = [e for e in elements if e is not None].
+   - If the filtered list is empty, treat inferred_type as expected_type (or allow casting) instead of object.
+
+2. Replace the simple object-equals check with a proper type compatibility check:
+   - Instead of if inferred_type == object and expected_type != object:
+     use:
+       if not all(isinstance(e, expected_type) for e in elements if e is not None):
+           raise TypeError(...)
+   - This verifies actual elements against expected_type, not an imprecise inferred_type.
+
+3. Or compute a correct common type:
+   - Implement a function common_base_type(elements) that finds the nearest common base class (skipping None and possibly Java wrappers) and set inferred_type to that. Then check issubclass(inferred_type, expected_type) or issubclass(expected_type, inferred_type) as appropriate.
+
+4. If interacting with Java objects, normalize types first:
+   - Map Java wrappers to their Python-visible types (or use Java reflection) before inferring. The fallback to object is often caused by unrecognized Java proxies.
+
+5. Update the error message if you keep the guard:
+   - If you must keep a fallback guard, include the element types found (e.g., set(elements.__class__.__name__ per element) or a sample) so the message reflects why inference returned object.
+
+Minimal change example (apply at or before line 346)
+- Filter None, check actual instances, then raise only if at least one non-None element is not an instance of expected_type:
+  - elems = [e for e in elements if e is not None]
+  - if elems and not all(isinstance(e, expected_type) for e in elems):
+      raise TypeError(...)
+
+Why this will fix the error
+- It avoids treating an imprecise inference result (object) as definitive proof of incompatibility.
+- It ensures the code accepts lists that really do contain expected_type objects, and only rejects lists that contain incompatible elements.
+
+If you want, paste the code that computes inferred_type and I will give the exact replacement lines to insert around 346–351.

@@ -1,0 +1,63 @@
+What happened (root cause)
+- At line 82 the code does: greater = len(replacement_list[i]) - len(search_list[i]).
+- If either replacement_list[i] or search_list[i] is None that len(...) call raises TypeError: "object of type 'NoneType' has no len()".
+- The docstring says None items in search_list/replacement_list should be ignored, but the code only checks for None later (lines 102–107) when searching for matches. The length computation at line 82 runs before those checks, so a None there causes an immediate crash.
+
+Where it occurred (exact spots)
+- Line 52: search_length = len(search_list) — this is fine (length of the outer list).
+- Line 82: greater = len(replacement_list[i]) - len(search_list[i]) — this is the first place that directly calls len(...) on list elements and will crash if either element is None.
+- Other places also assume elements are strings:
+  - Line 94: parts.append(replacement_list[replace_index]) — could append None if not filtered.
+  - Line 94 / 94..95: start = text_index + len(search_list[replace_index]) — calls len(...) again on an element.
+  - Line 108: temp_index = text.find(search_list[i], start) — calling str.find with None would also fail if not skipped.
+- The condition that intends to skip bad entries is at 102–107, but that condition is checked inside a loop that runs after the length calculations, so it does not protect the earlier len() call.
+
+Why it happened (explanation)
+- The algorithm estimates an "increase" buffer (lines 81–85) by comparing replacement and search string lengths. It loops over indices 0..search_length-1 and calls len(replacement_list[i]) and len(search_list[i]) unconditionally.
+- If the input lists include None (which the docstring says are valid and should be ignored), the unconditional len(...) calls blow up before any ignoring logic is applied. In short: the code assumes all list elements are strings when computing sizing/indices, but later code only conditionally ignores None values — too late.
+
+Concrete fixes (step-by-step)
+Option A — Fast local guard (minimal changes)
+1. At the start of the loop that computes increase (around line 81–85), add a guard:
+   - if search_list[i] is None or replacement_list[i] is None: continue
+   - if len(search_list[i]) == 0: continue
+2. This makes lines 82 safe because you only call len() when both elements are non-None.
+
+Example replacement for that loop:
+for i in range(search_length):
+    if search_list[i] is None or replacement_list[i] is None:
+        continue
+    if len(search_list[i]) == 0:
+        continue
+    greater = len(replacement_list[i]) - len(search_list[i])
+    if greater > 0:
+        increase += 3 * greater
+    ...
+
+Option B — Pre-filter lists (cleaner, recommended)
+1. Before any processing, build filtered parallel lists that drop entries where search_list[i] is None, search_list[i] == '', or replacement_list[i] is None.
+2. Use these filtered lists for all subsequent loops and computations (increase estimate, searching, replacements). This centralizes the "ignore None" rule and prevents repeated guards.
+
+Example steps:
+- new_search = []
+- new_repl = []
+- for i in range(len(search_list)):
+    if search_list[i] is None or len(search_list[i]) == 0:
+        continue
+    # If you also want to drop replacements that are None:
+    if replacement_list[i] is None:
+        continue
+    new_search.append(search_list[i])
+    new_repl.append(replacement_list[i])
+- Then set search_list = new_search; replacement_list = new_repl; search_length = len(search_list)
+
+Why Option B is better:
+- Eliminates many conditional checks scattered through the function.
+- Guarantees later code can safely call len(...) and text.find(...) on elements.
+
+Other small notes
+- Make sure you handle the case where after filtering there are zero search strings (search_length == 0): just return the original text unchanged early.
+- If replacement_list is shorter/longer than search_list, make sure indices are still matched; the filtering should maintain pairing.
+
+Summary
+The crash is caused by calling len() on list elements that can be None (line 82 is the immediate offender). Fix by skipping None elements before any len() or find() calls — either by adding guards in the loops or by pre-filtering the parallel lists so later code can safely assume elements are strings.

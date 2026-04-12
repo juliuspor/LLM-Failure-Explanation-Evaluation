@@ -1,0 +1,44 @@
+What happened (root cause)
+- The loop that walks the UTF‑16 code units advances the index by 1 every iteration, but some characters are UTF‑16 surrogate pairs and consume 2 code units.
+- The helper at lines 38–44 (code_point_at) correctly detects a high surrogate and returns the combined Unicode code point (line 43), but it only returns the code point value — it does not tell the caller that it consumed two UTF‑16 code units.
+- Because the caller (translate_string) doesn’t know whether code_point_at consumed 1 or 2 code units, it always increments the index by 1. That leaves the low surrogate unskipped (or leaves the index in an inconsistent position), and eventually the loop tries to read past the end of the code_units list and triggers the IndexError at the bounds check on line 35.
+
+Where it occurs
+- Detection/combination happens in code_point_at at lines 38–44 (high = code_units[index]; if 0xD800 <= high <= 0xDBFF ... return combined code point).
+- The bounds check that fails is at line 35: if index < 0 or index >= len(code_units): raise IndexError(...)
+- The mismatch between consumption (2 code units) and advancement (1) is the immediate cause of the out‑of‑range index.
+
+Why that produces the failing test
+- Example input "\U0001F630A" becomes three UTF‑16 code units: [high, low, 'A'].
+- At index 0 code_point_at returns the code point for the emoji (combining high+low), but the caller advances index by only 1.
+- The next iteration then starts at the low surrogate (index 1) or otherwise leaves the index inconsistent, and subsequent reads eventually try to use index == len(code_units) and hit the IndexError at line 35.
+
+Concrete fixes (step‑by‑step, not vague)
+Option A — Make code_point_at report how many code units it consumed
+1. Change code_point_at signature to return (code_point: int, units_consumed: int).
+2. When combining a high+low surrogate (lines 39–43), return (combined_cp, 2). Otherwise return (high, 1).
+3. In translate_string, use the returned units_consumed to advance the index: index += units_consumed.
+
+Option B — Make the caller detect and advance by 2 when necessary
+1. In translate_string, when reading code_units[index], check if it’s a high surrogate (0xD800 <= high <= 0xDBFF) and index+1 < len(code_units) and the next is a low surrogate (0xDC00 <= low <= 0xDFFF).
+2. If so, compute the combined code point exactly as lines 43 do and then advance index by 2; otherwise handle a single code unit and advance index by 1.
+
+Option C — Avoid manual UTF‑16 handling altogether
+1. Use Python’s native str iteration (which is by code point) rather than converting to UTF‑16 code units. This removes surrogate bookkeeping and the whole mismatch problem.
+
+Minimal code change example (Option A)
+- Modify code_point_at to:
+    def code_point_at(...):
+        ...
+        if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+            low = code_units[index + 1]
+            if 0xDC00 <= low <= 0xDFFF:
+                cp = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+                return cp, 2
+        return high, 1
+- Then in translate_string, unpack and advance index by the second value.
+
+Why these fixes work
+- They ensure the loop index reflects the actual number of UTF‑16 code units consumed per logical character, so the loop never slips into a low surrogate or reads outside code_units. That removes the IndexError and preserves the intended output for surrogate pairs and following characters.
+
+If you want, paste the translate_string implementation and I’ll show the exact minimal patch (either changing code_point_at to return units or changing translate_string to detect surrogates) and run through the three failing scenarios in your tests.

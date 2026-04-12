@@ -1,0 +1,57 @@
+What happened (what fails)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- Execution reaches the branch after the length/language checks (the else after if length == 2).
+- The code then assumes positions 3 and 4 (variables ch3, ch4) hold an uppercase 2-letter country code:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - it requires ch3 and ch4 to be between 'A' and 'Z' and raises ValueError otherwise.
+- For the input 'fr__POSIX', locale_str[3] is '_' (the second underscore that separates empty country and the variant), not an uppercase letter. That tripped the ch3/ch4 check and caused a ValueError.
+
+Why that assumption is wrong (root cause)
+- The code only supports two patterns after the language: either a 2-letter country (en_GB) or a 2-letter country plus variant (en_GB_xxx).
+- It does not allow the valid pattern language + '_' + '' + '_' + variant (language, empty country, variant), which is exactly 'fr__POSIX' (language 'fr', empty country, variant 'POSIX').
+- In other words, the code assumes the country portion is always two uppercase letters when a second underscore exists, but the country can be empty (two adjacent underscores) and the variant follows the second underscore.
+
+Where in the code this occurs
+- The failure occurs in the else branch after "if length == 2": specifically these lines:
+  - if locale_str[2] != '_':
+      raise ValueError(...)
+  - ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(...)
+- For 'fr__POSIX', locale_str[3] == '_' so the if condition raises the ValueError.
+
+How to fix it (concrete steps)
+1. After confirming locale_str[2] == '_', detect the empty-country case (second underscore at index 3). Example change (pseudo-code with exact indices):
+   - if locale_str[2] != '_':
+       raise ValueError(...)
+   - if locale_str[3] == '_':
+       # empty country, variant begins at index 4
+       if length < 4 + 1:   # ensure at least one char of variant
+           raise ValueError(...)
+       return Locale(locale_str[0:2], "", locale_str[4:])
+   - else:
+       # existing 2-letter country handling
+       ch3 = locale_str[3]; ch4 = locale_str[4]
+       if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+           raise ValueError(...)
+       if length == 5:
+           return Locale(locale_str[0:2], locale_str[3:5])
+       if locale_str[5] != '_':
+           raise ValueError(...)
+       return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+2. Add a unit test for the empty-country case (the one you already have: LocaleUtils.to_locale('fr__POSIX') should produce Locale('fr', '', 'POSIX')).
+
+Why this fix works
+- It explicitly recognizes the valid pattern where the country is empty (two adjacent underscores) and extracts the variant starting after the second underscore.
+- It preserves the existing strict validation for the non-empty 2-letter country path.
+
+Minimal note about indices
+- language: locale_str[0:2]
+- first separator: locale_str[2] == '_'
+- empty country case: locale_str[3] == '_', variant at locale_str[4:]
+- non-empty country case: country is locale_str[3:5], optional variant separator at locale_str[5], variant at locale_str[6:]
+
+This is the single direct reason the test fails: the code incorrectly treats locale_str[3] and locale_str[4] as letters even when the country is empty (i.e., when locale_str[3] == '_').

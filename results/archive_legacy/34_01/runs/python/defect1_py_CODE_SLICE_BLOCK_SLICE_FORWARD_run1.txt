@@ -1,0 +1,52 @@
+What happened (where)
+- The method rejects any minutes_offset < 0 at line 396:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Callers who pass a negative minutes_offset (for a negative offset like hours = -3, minutes = -30) hit that check and get a ValueError immediately. The code therefore fails when callers supply signed minutes (negative minutes for negative offsets).
+
+Why it fails (root cause)
+- The code assumes minutes_offset is always non‑negative (0..59) and then later combines it with hours_in_minutes by adding or subtracting:
+  402 |             hours_in_minutes = hours_offset * 60
+  403 |             if hours_in_minutes < 0:
+  404 |                 minutes_offset = hours_in_minutes - minutes_offset
+  405 |             else:
+  406 |                 minutes_offset = hours_in_minutes + minutes_offset
+- That combination logic shows the author intended callers to supply minutes as a non‑negative magnitude, and then adjust sign based on hours. But some callers instead pass a signed minutes_offset (e.g. -30) when the intended overall offset is negative. Those callers are blocked by the minutes range check and get the error at line 396. In short: callers and the validation disagree about whether minutes_offset can be negative.
+
+How to fix (concrete steps)
+Pick one clear API and implement it. Two options below; use one and update callers/docs accordingly.
+
+Option A — require non‑negative minutes (keep current API but document and enforce):
+1. Document that minutes_offset must be in 0..59 and that its sign is determined by hours_offset. Example: for -3:30 pass hours_offset = -3, minutes_offset = 30.
+2. Optionally, change the error message at line 396 to mention the expected sign rule (so callers are not confused).
+   - Replace the raise with:
+     raise ValueError(f"Minutes out of range: {minutes_offset}. Provide minutes as 0..59; sign follows hours_offset.")
+
+Option B — accept signed minutes (more forgiving; recommended if callers already pass signed minutes):
+1. Change the validation to accept minutes_offset in -59..59, not only 0..59. For example:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute the total offset in minutes using hours_offset and signed minutes in a single expression (clear and less error prone):
+   total_minutes = hours_offset * 60 + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Remove the later branch that conditionally subtracts or adds minutes (lines 402–405). Return cls.for_offset_millis(offset).
+
+Concrete replacement code (Option B)
+    if hours_offset == 0 and minutes_offset == 0:
+        return cls.UTC
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError(f"Hours out of range: {hours_offset}")
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    try:
+        total_minutes = hours_offset * 60 + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+    return cls.for_offset_millis(offset)
+
+Why this fix works
+- It eliminates the mismatch between caller behavior and validation. If callers were already passing signed minutes, Option B accepts them and correctly computes the combined offset (no fragile add/subtract logic). If you prefer callers to pass unsigned minutes, use Option A and update docs and error wording so the failure is clear.
+
+Summary
+- The code fails because minutes_offset is validated as non‑negative (line 396) but some callers pass negative minutes for negative offsets. Fix by choosing one API (signed minutes or unsigned minutes-with-sign-following-hours) and updating validation and combining logic accordingly; the simplest robust fix is to accept signed minutes and compute total_minutes = hours_offset * 60 + minutes_offset.

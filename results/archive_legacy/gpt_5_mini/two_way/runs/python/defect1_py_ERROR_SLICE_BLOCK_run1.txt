@@ -1,0 +1,48 @@
+What happened (where it failed)
+- The exception was raised on lines 396–397:
+  - Line 396 checks the value of minutes_offset.
+  - Line 397 raises ValueError(f"Minutes out of range: {minutes_offset}") when the check fails.
+- The actual value was minutes_offset = -15, so the condition minutes_offset < 0 or minutes_offset > 59 evaluated true and triggered the error.
+
+Why it failed (root cause)
+- The code assumes minutes_offset must be between 0 and 59 (inclusive). That assumption is wrong for your input because minutes_offset was computed as -15.
+- minutes_offset became negative before the check. That can happen if the code subtracts an hour offset from the total offset or if it parsed a timezone string like "-05:15" and left the minute part negative.
+- In short: the validation treats negative minute components as invalid, but your upstream logic produces a negative minute component (value -15), so the guard incorrectly rejects a valid scenario.
+
+Exactly where to look and what to change (step‑by‑step)
+1. Find where minutes_offset is set (caller code above line 396). Typical patterns to inspect:
+   - Parsing of a timezone string, e.g. parsing "-05:15".
+   - Calculation like minutes_offset = total_offset_minutes - hours * 60 or minutes_offset = sign * parsed_minutes.
+2. Decide the intended meaning of minutes_offset:
+   - If minutes_offset is supposed to be the minute component of a signed offset (range -59..59), then validation should allow negative minutes.
+   - If minutes_offset is supposed to be an unsigned minute component (0..59) and sign is stored separately, then upstream code must supply a non‑negative minutes_offset (abs(parsed_minutes)).
+3. Apply one of these concrete fixes (pick the one that matches your design):
+
+Option A — allow signed minute component
+- Change the check to allow negative minutes in range -59..59:
+  Replace
+    if minutes_offset < 0 or minutes_offset > 59:
+with
+    if minutes_offset < -59 or minutes_offset > 59:
+- Keep the rest of the logic that uses the sign of minutes_offset.
+
+Option B — normalize minutes to be non‑negative and keep sign elsewhere
+- Ensure upstream parsing produces sign and absolute minutes:
+  - If you parse "-05:15", set sign = -1 and minutes_offset = 15 (not -15).
+- Then keep the existing check (0..59) and use sign when building the total offset:
+  - total_offset = sign * (hours * 60 + minutes_offset)
+
+Option C — validate against full offset range if minutes_offset is actually total minutes
+- If minutes_offset represents total minutes from UTC, enforce the full valid range (for example -1439..1439) rather than 0..59:
+  Replace the check with appropriate bounds for total minutes.
+
+4. Add a unit test or logging
+- Add a test for input that produced the failure (e.g. "-05:15") to confirm the chosen fix accepts it.
+- Or add a small debug log before the raise to show how minutes_offset was derived, to avoid future guesswork.
+
+Why these fixes fix the root cause
+- Option A fixes the validator so it matches a signed minute value produced by parsing (lets -15 through).
+- Option B fixes the parser so the validator remains correct (minutes component is non‑negative).
+- Option C fixes the validator if the variable meaning was actually "total offset minutes" rather than a minute component.
+
+If you tell me the code that sets minutes_offset (the lines above 396) I’ll recommend the single best fix and give an exact patch.

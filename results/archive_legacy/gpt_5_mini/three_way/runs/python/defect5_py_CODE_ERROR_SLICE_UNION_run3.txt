@@ -1,0 +1,51 @@
+What happened (root cause, simply)
+
+- At line 335 you do: inferred_type = type(array). That records the Python type of the list object (i.e. builtins.list), not the element type inside the list.
+- ArrayUtils._copy_list_grow1(...) and the later casting logic expect inferred_type to represent the element/component type (for example str), or object when there is no information.
+- Because you used type(array) instead of the element type, the code ends up creating/copying a list with the wrong component type information. That leads to the TypeError you see at runtime: the code thinks it has an object-element list but the caller expected a str-element list (expected_type == str) and you raise the TypeError on line 346–347.
+
+Where it fails (lines and variables)
+
+- Line 335: inferred_type = type(array) — wrong value (list type rather than element type).
+- Line 336–338: the code only falls back to element’s type (type(element)) if array is None, so when array is a list but empty, you still used type(array).
+- Line 346–347: you raise TypeError because inferred_type ended up being object (or otherwise not the expected element type), and expected_type was provided as str.
+
+Why this produces that exact error
+
+- If array is an empty list, or an array whose elements are not inspected, type(array) is list; if your copy helper treats that as "unknown element type" (or converts it to object), inferred_type becomes object and you hit the branch that raises when expected_type != object. The message mentions "[Ljava.lang.Object;" because your code is trying to represent a Java-style array-of-object vs array-of-str mismatch — the upstream copy/creation code and your comparison expect a component type but you passed the container type.
+
+Concrete fixes (step-by-step)
+
+1. Use the element type when the array is provided:
+   - If array is not None and len(array) > 0, set inferred_type = type(array[0]) (or better: determine a common element type if you require homogeneity).
+   - If array is not None but empty, fall back to element (if present) or to expected_type (if provided), or to object as last resort.
+
+2. Change the code at the start to something like:
+   - if array is not None:
+       if len(array) > 0:
+           inferred_type = type(array[0])
+       elif element is not None:
+           inferred_type = type(element)
+       elif expected_type is not None:
+           inferred_type = expected_type
+       else:
+           inferred_type = object
+     elif element is not None:
+       inferred_type = type(element)
+     else:
+       inferred_type = expected_type or object
+
+3. Validate assumptions explicitly:
+   - If expected_type is provided, prefer it when array is empty and element is None (so you don't create an object list and then immediately reject it).
+   - If array contains elements of mixed types, decide a policy (raise, use object, or use expected_type).
+
+4. Example corrected logic (pseudocode referencing your variable names and lines):
+   - replace lines 335–341 with the logic above (choose array[0] when available; otherwise element; otherwise expected_type; otherwise object).
+
+Why these fixes work
+
+- They ensure inferred_type actually represents the element/component type you need to create or expand the list, so ArrayUtils._copy_list_grow1 receives the correct element type and you won’t raise the TypeError later because inferred_type will match expected_type when appropriate.
+
+Extra note
+
+- At runtime you cannot read generic type arguments (typing.List[T]) from a Python list object; you must infer element type from actual elements (array[0] or element) or rely on an explicit expected_type parameter. Make your code choose a clear precedence (array elements > element > expected_type > object) and document it.

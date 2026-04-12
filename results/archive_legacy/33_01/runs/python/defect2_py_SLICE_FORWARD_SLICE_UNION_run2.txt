@@ -1,0 +1,56 @@
+What happened (where it fails)
+- Failure occurs inside get_paint at line 71 and then at line 75:
+  - Line 71 computes g: g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - Line 75 raises ValueError when g is outside 0..255.
+- The ValueError is raised because g is outside the expected 0–255 range. The code explicitly tests "if g < 0 or g > 255" and raises the error when that condition is true.
+
+Why it happens (root cause)
+- The expression that produces g can produce values outside 0..255 whenever:
+  1. The caller passes value outside the interval [self._lower_bound, self._upper_bound]; or
+  2. self._upper_bound <= self._lower_bound (which flips or zeroes the denominator), producing a negative or undefined scale.
+- Concretely:
+  - If value < self._lower_bound then (value - lower) < 0 → g < 0 → triggers the ValueError.
+  - If value > self._upper_bound then (value - lower) > (upper - lower) → g > 255 → triggers the ValueError.
+  - If self._upper_bound == self._lower_bound the expression divides by zero (ZeroDivisionError before you even get to the ValueError).
+  - If self._upper_bound < self._lower_bound the scale is negative and g will typically be outside 0..255 (negative or >255) → triggers ValueError.
+- The current error message makes the failure worse: the raised ValueError uses the literal string "Color parameter outside of expected range: Red Green Blue" and does not include any of the actual values (g, value, self._lower_bound, self._upper_bound). That leaves the caller guessing which input caused the failure.
+
+How to reproduce this exact failure
+- Call get_paint with a value outside the configured bounds, or set bounds so upper <= lower. Example:
+  - If lower=0.0, upper=1.0, calling get_paint(1.5) produces g > 255 and triggers the ValueError at line 75.
+  - If lower=1.0, upper=0.0, calling get_paint(0.5) will either raise ZeroDivisionError (if equal) or produce g outside range and trigger ValueError.
+
+Precise fixes (step-by-step)
+1. Validate bounds once (when bounds are set or in get_paint) so upper > lower. Example check:
+   - if self._upper_bound <= self._lower_bound: raise ValueError(f"Invalid bounds: upper={self._upper_bound} must be > lower={self._lower_bound}")
+   - Add that either in the initializer or at the top of get_paint.
+2. Validate input value (explicit, with informative error) or clamp it:
+   - Option A (strict): If you want to reject out-of-range values, check:
+     - if not (self._lower_bound <= value <= self._upper_bound):
+         raise ValueError(f"value {value} out of bounds [{self._lower_bound}, {self._upper_bound}]")
+   - Option B (lenient): If you want to map anything into 0..255, clamp before computing g:
+     - value = min(max(value, self._lower_bound), self._upper_bound)
+3. Improve the error message at line 75 so it shows the offending numbers (not the literal words). For example:
+   - raise ValueError(f"Computed channel g={g} outside 0..255 for value={value} with bounds [{self._lower_bound}, {self._upper_bound}]")
+4. (Optional) Avoid integer truncation surprises: consider rounding instead of int():
+   - g = int(round((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0))
+
+Minimal patch example (replace inside get_paint)
+- Validate bounds:
+  if self._upper_bound <= self._lower_bound:
+      raise ValueError(f"Invalid bounds: upper={self._upper_bound} must be > lower={self._lower_bound}")
+- (Strict input check) Validate value:
+  if value < self._lower_bound or value > self._upper_bound:
+      raise ValueError(f"value {value} out of bounds [{self._lower_bound}, {self._upper_bound}]")
+- Compute g and give informative error if something still goes wrong:
+  g = int(round((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0))
+  if g < 0 or g > 255:
+      raise ValueError(f"Computed g={g} outside 0..255 for value={value} with bounds [{self._lower_bound}, {self._upper_bound}]")
+
+Why this fixes it
+- You avoid dividing by zero and make sure the denominator is right.
+- You stop accepting values that would map outside 0..255 (or you clamp them if you prefer), so the ValueError is not raised unexpectedly.
+- You give specific diagnostic information (g, value, bounds) so future failures are easy to debug.
+
+Summary
+- Root cause: value or bounds produce a normalized result outside 0..255 (or denominator is zero/negative), triggering the ValueError at line 75. The error message is unhelpful because it uses the static text "Red Green Blue" instead of the actual numbers. Fix by validating bounds, validating or clamping value, and improving the error message to include g, value, and the bounds.

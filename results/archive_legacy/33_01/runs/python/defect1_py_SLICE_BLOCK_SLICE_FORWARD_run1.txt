@@ -1,0 +1,44 @@
+What happened (where)
+- At lines 396–397 the code validates minutes_offset as a minute value: it enforces 0 <= minutes_offset <= 59.
+- Later, at line 402 and line 404 that same variable minutes_offset is reused to hold the total offset in minutes (hours_in_minutes ± minutes_offset).
+- At line 405 the code multiplies minutes_offset by DateTimeConstants.MILLIS_PER_MINUTE and then (if the multiplication overflows the allowed range) raises "Offset is too large" at line 407.
+
+Why it fails (root cause)
+- The variable minutes_offset is being used for two different things: the parsed "minutes" part (0..59) and then the combined "total minutes" offset. Reusing the same variable hides the sign and range intent.
+- Because the code combines hours_in_minutes and minutes_offset with + or − at lines 402/404, the resulting minutes_offset can be much larger in magnitude than 0..59 (for example, hours = -12 and minutes = 30 produces minutes_offset = -720 - 30 = -750). That large value can cause FieldUtils.safe_multiply(...) to detect an overflow and trigger the "Offset is too large" error at line 407 — which is not obvious from the earlier minute-range check.
+- The validation at lines 396–397 only checks the minutes part, not the final combined offset or that the minutes' sign is consistent with the hours' sign. So the code can pass the minute check but still produce a final offset that's invalid/overflows.
+
+Concrete fixes (step-by-step)
+1. Stop reusing minutes_offset for two different meanings. Introduce separate variables:
+   - minutes (the parsed minutes part, 0..59)
+   - totalMinutes (hours_in_minutes ± minutes)
+2. Make the minute-range check apply to minutes only:
+   - if minutes < 0 or minutes > 59: raise ValueError(...)
+3. When combining, apply the sign of the hours to the minutes explicitly:
+   - if hours_in_minutes < 0:
+         totalMinutes = hours_in_minutes - minutes
+     else:
+         totalMinutes = hours_in_minutes + minutes
+   This reproduces the current ± logic but keeps meaning clear.
+4. Validate totalMinutes before multiplying:
+   - Option A: check that abs(totalMinutes) <= allowedMaximumMinutes for the API (or ensure safe_multiply will not overflow)
+   - Option B: use FieldUtils.safe_multiply on a checked integer and handle its exception so you produce a clear error message that references totalMinutes, not the original minutes.
+5. Replace the multiplication call with:
+   - offset = FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Minimal example patch (conceptual)
+- Rename minutes_offset → minutes at lines 396–397 and keep the check.
+- After computing hours_in_minutes:
+    if hours_in_minutes < 0:
+        totalMinutes = hours_in_minutes - minutes
+    else:
+        totalMinutes = hours_in_minutes + minutes
+- Use totalMinutes for the multiply and overflow check.
+
+Why this fixes it
+- Separating the minute component from the combined offset makes the code’s intent explicit and prevents a minute-range check from being mistaken as a guarantee about the final value.
+- Explicitly applying the sign of hours to minutes prevents inconsistent sign combinations.
+- Validating totalMinutes (or handling safe_multiply’s overflow) ensures you fail with a clear, correct error that references the problematic combined offset rather than misleadingly passing the minutes check.
+
+If you want, paste the surrounding function and I will produce a precise 1–2 line patch you can apply.

@@ -1,0 +1,44 @@
+What happened (root cause)
+- The code treats -0.0 as an ordinary integer-valued float because of the test on line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  For x = -0.0 that condition is True (because -0.0 == 0).
+- It then does value = int(x) on line 177. int(-0.0) becomes 0 (sign lost).
+- Later the code prints the integer form (line 192: self.add(str(value))) or falls back to str(x) on line 194 — either way the negative sign is already lost and the output becomes "0" (or "0.0"), not "-0.0".
+- The net result: the negative sign on negative zero is discarded before output, so the test expecting "-0.0" fails.
+
+Where it occurs (specific lines and variables)
+- The problematic branch begins at line 176 with the x == int(x) check.
+- The variable causing the sign loss is value = int(x) on line 177.
+- The output that uses the sign-less value is emitted on line 192 (self.add(str(value))) or via str(x) on line 194 after the integer branch finishes.
+- No check is performed for negative zero before converting x to an int, so negative zero is treated like plain zero.
+
+Why this matters
+- IEEE floats distinguish +0.0 and -0.0; for some consumers you must preserve the sign (the tests expect "-0.0").
+- Converting to int and printing the integer form discards the negative-zero sign irreversibly.
+
+Concrete fixes (exact steps you can apply)
+1. Detect negative zero before any integer conversion. At the start of add_number (before line 176) add:
+   - if CodeConsumer.is_negative_zero(x): self.add("-0.0"); return
+   This relies on the existing utility is_negative_zero (the tests reference it).
+2. Alternatively, change the integer branch so it preserves negative zero:
+   - Before doing value = int(x) add:
+     if x == 0.0 and math.copysign(1.0, x) < 0:
+         self.add("-0.0")
+         return
+   This uses math.copysign to detect the negative sign bit of zero.
+3. If you prefer not to return early, ensure any path that prints value or str(x) special-cases negative zero (but early-return is simplest and least error-prone).
+
+Concrete patch example (pseudocode to drop in before line 176)
+- import math (already used)
+- add:
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        self.add("-0.0")
+        return
+
+Why this fix works
+- It detects the unique case (-0.0) before you do int(x) and therefore does not lose the sign by integer conversion.
+- After applying this change, the tests asserting "-0.0" will pass because you emit the signed zero explicitly.
+
+Notes
+- This change only affects the negative zero edge-case; other numeric formatting logic (integers, scientific notation, etc.) remains unchanged.
+- The tests that check spacing after a minus operator or positive/negative integers/floats should continue to behave the same.

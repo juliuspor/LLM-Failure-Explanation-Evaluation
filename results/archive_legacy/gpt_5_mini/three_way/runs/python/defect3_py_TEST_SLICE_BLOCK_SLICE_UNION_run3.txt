@@ -1,0 +1,45 @@
+What happened (root cause)
+- The code that reads Unicode code points (code_point_at / to_utf16_code_units) indexes into a list of UTF-16 code units (variable code_units). That list contains 2 entries for a non-BMP character (a surrogate pair), e.g. for "\U0001F630A" code_units = [high, low, ord('A')] with indices 0..2.
+- The translator loop that calls code_point_at uses the Python string index (0..len(s)-1). Python strings are counted as Unicode code points (non-BMP characters count as 1), so the translator's index is in code points, not UTF-16 code units.
+- When the translator detects a surrogate pair it advances the loop index incorrectly (advances relative to the wrong unit). That mismatch causes an index value that is too large to be passed to code_point_at. The bound check at lines 35–36 in to_utf16_code_units:
+    if index < 0 or index >= len(code_units):
+        raise IndexError(f"String index out of range: {index}")
+  raises because index becomes >= len(code_units) (for the example it becomes 3) and code_point_at is asked to read code_units[3], which doesn't exist.
+
+Where it occurred (specific variables/methods/lines)
+- to_utf16_code_units builds code_units and then enforces bounds at lines 35–36 (the IndexError you see).
+- code_point_at (the code that reads a code point from code_units) expects an index into code_units and tries to combine a high surrogate with code_units[index+1] at lines 38–44.
+- The translator (CsvEscaper.translate_string / CharSequenceTranslator.translate) drives an index over the original Python string but incorrectly advances that index when it encounters a surrogate pair. That incorrect advance makes the translator pass an out-of-range index into code_point_at, triggering the IndexError at line 36.
+
+Why this is easy to miss
+- In Java/UTF-16 the index is normally into code units; in Python the str index is into Unicode code points. The code mixes the two indexing schemes (string index vs. UTF-16 code-unit index) and also double-advances the index when it tries to skip a surrogate pair. The mismatch only shows up when non-BMP characters (surrogate pairs in UTF-16) are present followed by other characters — exactly your failing test input "\U0001F630A".
+
+Concrete steps to fix (explicit, actionable)
+Option A — work consistently in code points (recommended for Python)
+1. Change the translator loop to treat indices as Python string indices (0..len(s)-1), never try to manipulate UTF-16 code-unit indexes.
+2. Replace calls to code_point_at/to_utf16_code_units with Python-native ord(s[i]) and, when you need the full code point for a character, use ord(s[i]) (Python already yields the whole Unicode code point for non-BMP characters). Do not attempt to read surrogate halves.
+3. When you want to skip a character you always advance the index by 1 (not by 2).
+
+Option B — work consistently in UTF-16 code units
+1. Convert the input string once to the UTF-16 code_units list and iterate over that list explicitly.
+2. Make sure the loop index and any index arithmetic are done relative to code_units, and when you consume a surrogate pair you advance by 2; when you consume a BMP unit advance by 1.
+3. Pass those same code-unit indexes to code_point_at.
+
+Minimal code-change suggestion (if you prefer minimal edits)
+- In CsvEscaper.translate_string / CharSequenceTranslator.translate, change the outer loop to a while-loop that increments index_by = 1 always, and do not additionally increment for surrogate pairs (so you only ever increment the Python string index by 1). Use ord(s[i]) to get the code point; if you need to detect non-BMP, use ord(s[i]) >= 0x10000 or rely on Python handling of code points — do not use code_unit indexing.
+
+Example of the incorrect pattern to look for (pseudo)
+- Wrong:
+    for i in range(len(s)):
+        cp = code_point_at(i)    # expects code-unit index
+        if is_surrogate_pair(cp):
+            i += 1               # attempts to skip the low surrogate
+- Right (Python-native):
+    i = 0
+    while i < len(s):
+        cp = ord(s[i])          # Python gives full code point
+        # handle cp
+        i += 1
+
+Summary
+- The exception occurs because the translator mixes two different index systems (Python string indices vs. UTF-16 code-unit indices) and advances the index incorrectly when it sees a surrogate pair. That leaves an index >= len(code_units) which triggers the IndexError in to_utf16_code_units (lines 35–36). Fix by choosing one index system and making all indexing/advancing consistent (prefer handling Unicode at Python code point level with ord(s[i]) and advancing by 1).

@@ -1,0 +1,38 @@
+What happened (where it fails)
+- The code raises ValueError at line 401 ("Minutes out of range: ...") when it checks minutes_offset < 0 or > 59.
+- That check runs before the later normalization code at lines 406–409 that applies the hour sign and combines hours and minutes into a proper offset.
+- In practice this means a valid offset like "-05:30" (or any time zone string where the minutes part is negative or needs sign application) will fail the check at line 400–401 and throw the error, even though the minutes are valid once the sign is applied.
+
+Why it fails (root cause)
+- The minutes part is being validated before the code applies the sign or normalizes minutes with hours. The validation at line 400 treats a negative minutes_offset (or a minutes value that only becomes >59/negative after intermediate arithmetic) as invalid, but that negative or out‑of‑range value is expected and legal until the code performs the adjustments at lines 406–409.
+- In short: validation happens in the wrong place. The code rejects minute values that are only temporarily out of range during intermediate calculation instead of validating the original minute component before sign application or validating the normalized combined offset.
+
+Exactly where it happens in the code
+- The failing check: lines 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This throws the error.
+- The normalization that would make those minute values legal happens later: lines 406–409:
+  minutes_offset = hours_in_minutes - minutes_offset
+  minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  So the check at 400–401 runs too early (before these adjustments).
+
+Clear steps to fix (concrete)
+1. Parse and separate sign from the minute component first:
+   - Extract the sign (positive/negative) from the input (e.g., the leading '+' or '-').
+   - Parse the absolute minute value into an integer minutes_component.
+
+2. Validate the raw minute component (absolute) in range 0–59:
+   - Replace the current check at lines 400–401 with a check that uses the absolute minute part:
+     if not (0 <= minutes_component <= 59):
+         raise ValueError(f"Minutes out of range: {minutes_component}")
+
+3. Apply the sign and combine hours and minutes, then do overflow checks:
+   - Compute minutes_offset = sign * (hours_in_minutes + minutes_component).
+   - After combining, check whether minutes_offset is too large (the existing overflow check at line 411) and then multiply:
+     offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Alternatively (simpler change): move the current minutes range check until after normalization (after line 408) and adjust the condition to validate the minute component as absolute minute (0..59) rather than the intermediate minutes_offset.
+
+Either approach ensures the code validates the actual minute component correctly and does not reject strings like "-05:30" that are valid after sign application.

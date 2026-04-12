@@ -1,0 +1,63 @@
+What happened (root cause)
+- The failure occurs in replace_each() in the "size guess" loop at lines 81–84:
+  ```
+  81 |         for i in range(search_length):
+  82 |             greater = len(replacement_list[i]) - len(search_list[i])
+  83 |             if greater > 0:
+  84 |                 increase += 3 * greater  # assume 3 matches
+  ```
+- That loop assumes both search_list[i] and replacement_list[i] are non-None (and that search_list[i] is non-empty). In your tests you pass None as an element of replacement_list (and the code also supports None in search_list). Calling len(None) raises a TypeError, so the function crashes here.
+- This is exactly what the comment in your snippet notes: "BUG: this loop is not null-safe for elements inside the arrays". The later loops in the same function already check for search_list[i] is None, replacement_list[i] is None, and empty search strings; this pre-checking is missing in the increase-estimation loop.
+
+Where it happens (specific variables and lines)
+- Method: replace_each
+- Variables: search_list, replacement_list (elements search_list[i], replacement_list[i])
+- Lines: 81–84 (the "increase" calculation loop)
+- Symptom: len(replacement_list[i]) or len(search_list[i]) is called when the element is None, raising TypeError.
+
+Why it happens (step-by-step)
+1. replace_each accepts None elements within the search/replace arrays (tests rely on that).
+2. The function later treats None entries as "skip this pair", as shown in the match-finding loops that check:
+   ```
+   if no_more_matches_for_repl_index[i]
+      or search_list[i] is None
+      or len(search_list[i]) == 0
+      or replacement_list[i] is None:
+       continue
+   ```
+   Those loops are safe.
+3. But the early "increase" loop (lines 81–84) does not include those None/empty checks and directly computes len(...) on possibly-None values. That causes the failure when replacement_list[i] is None.
+
+Concrete fixes (exact steps and code)
+Option A — Add the same null/empty checks to the "increase" loop (recommended):
+Replace lines 81–84 with:
+```
+for i in range(search_length):
+    # skip null/empty search strings and null replacements (same checks used later)
+    if search_list[i] is None or len(search_list[i]) == 0 or replacement_list[i] is None:
+        continue
+    greater = len(replacement_list[i]) - len(search_list[i])
+    if greater > 0:
+        increase += 3 * greater  # assume 3 matches
+```
+
+Option B — Defensive try/except (less explicit, not recommended because it's looser):
+```
+for i in range(search_length):
+    try:
+        greater = len(replacement_list[i]) - len(search_list[i])
+    except TypeError:
+        continue
+    if greater > 0:
+        increase += 3 * greater
+```
+But prefer Option A because it mirrors the logic used elsewhere and is clearer.
+
+Why this fix works
+- It ensures you only call len(...) on real strings, matching the function's later logic that treats None or empty searches as "skip".
+- It prevents the TypeError and keeps the heuristic "increase" calculation without changing behavior for valid entries.
+
+Tests impacted
+- test_null_safety_inside_arrays_single and test_null_safety_inside_arrays_mixed currently cause the crash because replacement_list contains None. After the fix those tests should pass (and the basic replacement test remains unaffected).
+
+Note: The "increase" calculation is only a pre-sizing heuristic (not required for correctness). Skipping None/empty entries makes the heuristic safe and consistent with the rest of the function.

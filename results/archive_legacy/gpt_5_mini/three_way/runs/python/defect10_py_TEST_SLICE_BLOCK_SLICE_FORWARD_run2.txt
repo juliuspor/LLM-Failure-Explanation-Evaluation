@@ -1,0 +1,57 @@
+What happened
+- The test expected NumberUtils.create_number("l", "L", "f", "F", "junk", "bobL") to raise ValueError (the Python equivalent of the Java NumberFormatException).
+- Instead the code raised IndexError from the small routine shown in the slice:
+  - At hit10_numberutils.py around lines 30–32 you have:
+    30 |     if index < 0 or index >= len(s):
+    31 |         raise IndexError(f"String index out of range: {index}")
+    32 |     return s[index]
+- That IndexError occurs when create_number calls this routine with index == len(s) (for example when processing a trailing type suffix or scanning past the last character of "bobL"). Because the helper raises IndexError before create_number can raise the intended ValueError, the test fails.
+
+Where it occurs
+- File: hit10_numberutils.py
+- Function: the helper that returns s[index] (the snippet at lines 30–32)
+- Call site: inside NumberUtils.create_number when it inspects characters near the end of the input string (e.g. while handling suffixes like 'L' or when scanning for digits). For input "bobL" the code advances past the last character and then attempts to read s[index] where index == len(s).
+
+Why it happens
+- The helper unconditionally raises IndexError if index >= len(s). create_number expects to handle end-of-string conditions itself (and raise ValueError for invalid numeric strings), but instead the lower-level helper prevents that by throwing IndexError first.
+- In short: boundary checking is wrong for the call pattern used; callers sometimes intentionally call with index at or beyond the last character and expect a cleaner signaling (ValueError / handled case), not IndexError bubbling up.
+
+Concrete fixes (pick one)
+1) Fix the helper so callers can detect end-of-string without an exception
+   - Edit the helper (around line 30) to return an empty string or None when index == len(s), and only raise for index < 0 or index > len(s). Example change:
+     - Replace
+         if index < 0 or index >= len(s):
+             raise IndexError(...)
+         return s[index]
+       with
+         if index < 0 or index > len(s):
+             raise IndexError(...)
+         if index == len(s):
+             return ""   # signal end-of-string to callers
+         return s[index]
+   - Then change callers (create_number) to treat "" as end-of-string and raise ValueError if the end-of-string is an invalid place.
+
+2) Or, avoid calling the helper when index == len(s)
+   - Before each call that might run off the end, check if index < len(s). For example in create_number:
+       if index >= len(s):
+           # handle end-of-string: raise ValueError for malformed input
+       else:
+           ch = s[index]
+   - This keeps the helper unchanged and makes create_number explicitly handle end-of-string and raise ValueError for bad inputs like "L" or "bobL".
+
+3) Catch IndexError in create_number and re-raise as ValueError
+   - Wrap calls that may index-past-end in try/except IndexError and raise ValueError("invalid number: ...") instead. This is the smallest change but less clean because it treats an unexpected IndexError as control flow. Example:
+       try:
+           ch = get_char(s, index)
+       except IndexError:
+           raise ValueError("Invalid numeric string")
+
+Which to choose
+- If the helper is designed to be a strict index accessor, choose option 2 (check bounds before calling). That keeps semantics consistent.
+- If callers are expected to tolerate an "end-of-string" token, choose option 1 (return ""/None for index == len(s)) and update callers accordingly.
+- Option 3 is a quick patch to make tests pass, but it's a workaround rather than a clear contract.
+
+Minimum change to make the tests pass
+- Add a bound check in create_number before any s[index] access and raise ValueError for inputs that end unexpectedly (e.g. check index < len(s) and if not raise ValueError("Invalid numeric string")). This guarantees ValueError is raised for the bad_inputs in your test instead of IndexError.
+
+If you want, paste the relevant portion of create_number into the conversation and I will show exactly where to insert the bound checks or supply a patch.

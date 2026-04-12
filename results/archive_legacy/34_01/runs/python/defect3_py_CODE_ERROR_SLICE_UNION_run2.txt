@@ -1,0 +1,66 @@
+What happened (where it fails)
+- The IndexError is raised inside code_point_at at this check:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  (slice shows that as line 35).
+- The caller that triggered that is this loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (the loop is in your translate method, immediately after translate_codepoint returned a non‑zero consumed).
+- The exception message shows index == 2, which means code_point_at was called with index == len(code_units) (out of range) and raised.
+
+Why it fails (root cause)
+- After a translator handles a code point, translate_codepoint returns consumed. Your code treats consumed as "number of code points handled" and advances pos by repeatedly calling code_point_at(code_units, pos) then adding char_count(...).
+- But the code calls code_point_at(code_units, pos) even when pos has already reached the end of code_units. That happens when consumed is larger than the number of remaining code units or when the loop runs one extra iteration.
+- In short: you are calling code_point_at with pos == len(code_units) (out of bounds). The immediate cause is the for loop that unconditionally calls code_point_at without checking pos < length.
+
+Why the logic is wrong (semantic mismatch)
+- There are two different "units" in play: code units (UTF‑16 char values stored in code_units) and code points. translate_codepoint's returned value consumed can mean either:
+  - "how many code units were consumed" or
+  - "how many code points were consumed".
+- Your loop assumes consumed counts code points and then tries to advance by char_count(code_point_at(...)) for each code point, but it does not protect against pos already being at or past the end. If consumed actually counts code units, the loop is the wrong way to advance pos (you should simply add consumed). Either way, the loop makes an out‑of‑bounds call to code_point_at.
+
+Exactly where to change (concrete fixes)
+Pick the fix that matches what translate_codepoint is supposed to return:
+
+1) If translate_codepoint returns the number of code units consumed:
+   Replace the whole for-loop with a single advancement:
+   pos += consumed
+   Rationale: consumed already tells you how many UTF‑16 code units were consumed; no need to decode code points again.
+
+2) If translate_codepoint returns the number of code points consumed:
+   Replace the loop with safe checks so you never call code_point_at with pos >= length:
+   for _ in range(consumed):
+       if pos >= length:
+           break   # or raise a clear error if this should never happen
+       cp = code_point_at(code_units, pos)
+       pos += char_count(cp)
+   Rationale: check pos before calling code_point_at; this avoids the out‑of‑range call.
+
+3) Extra safety / diagnostics (recommended while you confirm semantics):
+   - Add an assertion or explicit check immediately after translate_codepoint returns:
+     if consumed < 0 or consumed > length - pos:
+         raise ValueError(f"translate_codepoint returned invalid consumed={consumed} at pos={pos}")
+   This will make debugging clear if a translator returns a wrong value.
+
+Minimal code examples
+- If consumed is code units:
+  consumed = self.translate_codepoint(code_units, pos, out)
+  if consumed == 0:
+      ...
+  else:
+      pos += consumed
+
+- If consumed is code points:
+  consumed = self.translate_codepoint(code_units, pos, out)
+  if consumed == 0:
+      ...
+  else:
+      for _ in range(consumed):
+          if pos >= length:
+              break   # or raise
+          pos += char_count(code_point_at(code_units, pos))
+
+Summary
+- The crash is caused by calling code_point_at(code_units, pos) when pos == len(code_units).
+- Fix by deciding whether translate_codepoint returns code units or code points and advance pos accordingly (pos += consumed when consumed is code units; add a boundary check when consumed is code points). Add a validation check on consumed to catch incorrect values early.

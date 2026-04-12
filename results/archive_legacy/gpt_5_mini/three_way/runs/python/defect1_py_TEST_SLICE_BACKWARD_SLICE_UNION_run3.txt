@@ -1,0 +1,52 @@
+What went wrong
+- The guard at lines 396–397 rejects any negative minute value:
+  - Code (lines 396–397): if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+  - That condition treats minutes_offset < 0 as invalid, so calls like DateTimeZone.for_offset_hours_minutes(0, -15) or (-2, -15) raise ValueError immediately.
+- Several tests expect negative minutes to be accepted (e.g. test_zero_hours_negative_minutes, test_negative_hours_negative_minutes) or expect mixed-sign behavior described later in the file (lines ~402–405 adjust minutes_offset). Because negative minutes are rejected early, the logic that normalizes sign and computes the total offset never runs and the tests fail.
+
+Where it happens
+- Method: DateTimeZone.for_offset_hours_minutes
+- Variables: minutes_offset
+- Exact lines: 396–397 (the check raising ValueError for minutes_offset < 0)
+- Effect: any minutes_offset < 0 triggers ValueError; downstream normalization at lines 402 and 404 is never reached.
+
+Why that is wrong
+- The later code already contains logic to handle negative minutes and mixed hour/minute signs (lines 402–405). The early check contradicts that intent by forbidding negative minutes outright.
+- The specification / tests expect minutes to be allowed in the range -59..+59 (not only 0..59). The current condition enforces 0..59 instead.
+
+How to fix it (concrete steps)
+1. Change the range check to allow negative minutes: replace
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(...)
+   with
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This permits minutes in [-59, +59].
+
+2. Ensure the normalization code that follows uses the sign rules you want. For the behavior described in your docstring/tests (negative hours produce negative total offset and minutes extend magnitude regardless of minute sign), apply minutes with the sign of the hours when hours != 0:
+   - Example normalization logic (place after the fixed range check, before computing millis):
+       hours_in_minutes = hours * 60
+       if hours < 0 and minutes_offset > 0:
+           # (-2, 15) -> -2h - 15m => total minutes = hours_in_minutes - minutes_offset
+           minutes_total = hours_in_minutes - minutes_offset
+       elif hours < 0 and minutes_offset < 0:
+           # (-2, -15) -> -2h - 15m => total minutes = hours_in_minutes - abs(minutes_offset)
+           minutes_total = hours_in_minutes - abs(minutes_offset)
+       elif hours > 0 and minutes_offset < 0:
+           # (2, -15) -> invalid by spec/tests -> raise ValueError
+           raise ValueError("Mixed sign: positive hours with negative minutes")
+       else:
+           minutes_total = hours_in_minutes + minutes_offset
+   - Then compute offset = FieldUtils.safe_multiply(minutes_total, DateTimeConstants.MILLIS_PER_MINUTE).
+
+3. Add/adjust unit tests if your intended sign rules differ (e.g., if you prefer to reject (-2, 15) or accept (2, -15), make tests and code consistent).
+
+Exact minimal patch suggestion
+- Replace the single-line bounds check at 396–397 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Then confirm the existing normalization at lines ~402–405 is consistent with your docstring; if not, adjust as in step 2.
+
+Summary
+The immediate cause of failure is the range check at lines 396–397 rejecting negative minute values. Allow minutes in [-59..59] and make sure the subsequent normalization implements your intended sign rules; that will stop the tests from raising ValueError on calls like for_offset_hours_minutes(-2, -15) and for_offset_hours_minutes(0, -15).

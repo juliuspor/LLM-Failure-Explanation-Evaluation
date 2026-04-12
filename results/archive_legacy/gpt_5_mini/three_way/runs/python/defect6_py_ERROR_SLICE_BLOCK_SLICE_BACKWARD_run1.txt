@@ -1,0 +1,42 @@
+What happened (where and why)
+- Location: the integer-handling branch that starts at line 176: "if x == int(x) and not math.isinf(x) and not math.isnan(x):".
+- Root cause: negative zero (x == -0.0) compares equal to 0 and to int(x), so this branch runs. At line 177 you do "value = int(x)", and int(-0.0) is 0 (positive). That loses the negative sign bit. Later you call self.add(str(value)) at line 192, which produces "0" (positive zero). The test expected "-0.0", so the code reported the wrong sign.
+- In short: the code treats -0.0 as an ordinary integer 0 and discards the sign bit before formatting.
+
+Exactly where the sign was lost
+- Line 176: the boolean test x == int(x) returns True for x == -0.0.
+- Line 177: value = int(x) converts -0.0 → 0 (no sign).
+- Line 192: self.add(str(value)) emits "0" instead of preserving "-0.0".
+
+How to fix it (clear steps and exact code)
+Option A — detect negative zero and handle it before converting to int:
+1. Add a check for negative zero right after the branch test and before converting to int:
+   - Use math.copysign to detect sign bit: math.copysign(1.0, x) < 0
+2. If x is negative zero, emit the correct representation and return.
+
+Patch (replace lines 176–179 with):
+ 176 |         if x == int(x) and not math.isinf(x) and not math.isnan(x):
+ 177 |             # preserve negative zero: int(-0.0) == 0, but we must keep the sign
+ 178 |             if x == 0.0 and math.copysign(1.0, x) < 0:
+ 179 |                 self.add("-0.0")
+ 180 |                 return
+ 181 |             value = int(x)
+ 182 |             mantissa = value
+ 183 |             exp = 0
+ 184 |             ...
+
+Option B — treat zero specially earlier:
+- Before the integer branch, add:
+  if x == 0.0 and math.copysign(1.0, x) < 0:
+      self.add("-0.0")
+      return
+then proceed as before. This keeps the rest of the code unchanged.
+
+Why math.copysign is appropriate
+- math.copysign(1.0, x) inspects the sign bit even for -0.0. It returns -1.0 for negative zero and +1.0 for positive zero, so it detects the case that x == 0.0 but has a negative sign bit.
+
+Other notes
+- Do not rely on x == int(x) to distinguish signed zero — it treats -0.0 and 0.0 the same.
+- Ensure you also handle any other formatting paths that might call str(x) directly (line 194), but str(-0.0) already yields "-0.0", so only the integer branch needed the fix because it did an int() conversion that lost the sign.
+
+This change preserves the negative zero output and will make the test expecting "-0.0" pass.

@@ -1,0 +1,41 @@
+What failed
+- The tests call GrayPaintScale.get_paint(...) with values outside the [lower_bound, upper_bound] range (for example -0.5 and 1.5). The implementation (lines shown in the slice) raises a ValueError instead of clamping those inputs to the bounds.
+
+Where it happens (exact lines)
+- __init__ sets self._lower_bound and self._upper_bound (lines ~30–44).
+- get_paint computes g at line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after, lines 74–75 do:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+
+Why it fails (root cause)
+1. No input clamping: get_paint uses the raw value to compute g and then treats any resulting g outside 0..255 as an error. Tests expect values below lower_bound to be clamped to black (0,0,0) and values above upper_bound to be clamped to white (255,255,255), not to raise an exception. Because negative or >255 g triggers the ValueError on lines 74–75, calls like get_paint(-0.5) and get_paint(1.5) raise instead of returning (0,0,0) or (255,255,255).
+2. The code checks g (an integer result) for range and raises; this is the wrong place to enforce bounds. The correct behavior is to clamp the input (or the computed ratio) to [0.0, 1.0] before scaling to 0..255.
+3. (Minor) The exception message "Color parameter outside of expected range: Red Green Blue" is unhelpful and not used by tests — but the central issue is raising the exception at all instead of clamping.
+
+Concrete fix (step-by-step)
+1. Clamp value to the bounds before computing g:
+   - clamped = min(max(value, self._lower_bound), self._upper_bound)
+2. Compute the normalized ratio using clamped:
+   - ratio = (clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+3. Compute g from ratio:
+   - g = int(ratio * 255.0)
+   (This preserves the existing int-truncation behavior. If you prefer rounding, use round(...) but tests expect 0.5 -> 127.)
+4. Remove the raise ValueError block that treated out-of-range g as an error.
+
+Minimal code change example (replace the body around line 71):
+  # clamp the input value to [lower_bound, upper_bound]
+  clamped = min(max(value, self._lower_bound), self._upper_bound)
+  # normalize to [0.0, 1.0]
+  ratio = (clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+  g = int(ratio * 255.0)
+  # now g is guaranteed 0..255, so do not raise
+
+Why this fixes the tests
+- get_paint(-0.5) will be clamped to lower_bound and map to (0,0,0).
+- get_paint(1.5) will be clamped to upper_bound and map to (255,255,255).
+- Values inside the range will be interpolated as before (0.5 -> ratio 0.5 -> 127), matching the expected tuples.
+
+Optional additional check
+- If upper_bound == lower_bound could cause division by zero. If your code can be constructed with equal bounds, add a guard (e.g., treat ratio=0.0 or raise a clear error in __init__).

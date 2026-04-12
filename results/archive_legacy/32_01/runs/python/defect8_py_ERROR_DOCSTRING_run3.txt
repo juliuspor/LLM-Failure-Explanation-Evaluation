@@ -1,0 +1,37 @@
+What happened (where): The error is raised in LocaleUtils.to_locale when parsing the string "fr__POSIX". The method splits the input on underscores and then runs strict validation on the language, country and variant tokens. The code path that handles three underscore-separated parts (the branch after splitting into parts and likely the block guarded by len(parts) == 3) rejects this input and raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it failed (root cause): "fr__POSIX" is the form language + empty country + variant (there are two underscores in a row). Java Locale allows that form (a Locale with language="fr", country="" and variant="POSIX"), but the to_locale implementation enforces that the country token, when present in a 3-part string, must be exactly two uppercase letters. In other words, the code treats the presence of a third token as meaning the middle (country) token must be length==2 and uppercase, and refuses an empty country token. So the validator incorrectly rejects the valid "language__variant" form (empty country + variant) and raises the ValueError.
+
+Where to look in code: check LocaleUtils.to_locale, specifically the part after
+- splitting: parts = locale_str.split('_')
+- the branch handling len(parts) == 3 (the validation that checks country length and case)
+
+What to change (concrete steps to fix):
+1. In LocaleUtils.to_locale, find the branch that validates three-part locales (len(parts) == 3).
+2. Replace the strict country check that requires country length == 2 with a check that allows either:
+   - an empty country token (""), or
+   - a 2-character uppercase country token.
+3. Continue to validate language is 2 lowercase letters (or empty if your rules permit) and variant is non-empty and contains no underscores.
+
+Example of a concrete conditional replacement (pseudo/pythonic code for the three-part branch):
+
+    parts = locale_str.split('_')
+    if len(parts) == 3:
+        language, country, variant = parts
+        # language must be 2 lowercase letters
+        if not (len(language) == 2 and language.islower()):
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        # allow empty country OR exactly 2 uppercase letters
+        if not (country == "" or (len(country) == 2 and country.isupper())):
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        # variant must be non-empty
+        if variant == "":
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(language, country, variant)
+
+Tests to add:
+- LocaleUtils.to_locale("fr__POSIX") should return Locale("fr", "", "POSIX")
+- LocaleUtils.to_locale("en_GB_xxx") should still work
+- Existing invalid inputs should still raise ValueError (e.g., "EN_gb", "e_GB", "en_gb")
+
+Why this fix is safe: It keeps the strict checks on language and country format where country is provided, but allows the Java-supported variant form where the country is omitted (empty) and the variant is present. This matches the documented behavior Java allows and resolves the ValueError for strings like "fr__POSIX".

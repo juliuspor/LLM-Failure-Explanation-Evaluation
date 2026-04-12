@@ -1,0 +1,69 @@
+What happened (what fails)
+- At lines 346–351 the code raises a TypeError whenever inferred_type == object and expected_type != object.
+- That means if the code inferred the element type as object, it rejects creating a list of any narrower expected_type (for example expected_type == str).
+- A common trigger is when the code had no non-null value to infer from (element is None and/or array is None or contains only None). inferred_type becomes object, and the guard then throws the error.
+
+Why it fails (root cause)
+- The check conflates two different situations:
+  1. "I legitimately inferred object because there really are heterogeneous non-null elements that are only known as object" — here casting to a narrower type should fail.
+  2. "I inferred object because there was nothing non-null to infer from (element is None and array provides no non-null type)" — here it is valid to create a List[expected_type] containing None, so the TypeError is wrong.
+- The code uses only inferred_type == object as the condition to reject, which does not distinguish (1) and (2). As a result, it rejects cases where the developer supplied an expected_type but no concrete element to infer a type from.
+
+Where it happens (exact lines & variable names)
+- File slice shown, lines 346–351:
+  - if inferred_type == object and expected_type != object:
+  -     raise TypeError(
+  -         f"Cannot cast object list to {expected_type.__name__} list "
+  -         f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  -         f"[Ljava.lang.{expected_type.__name__};)"
+  -     )
+- Variables involved: inferred_type, expected_type, element, array.
+- This check executes when preparing the return list after inferring types from array and element.
+
+Concrete fixes (clear steps, exact changes)
+
+Option A — Preferred: allow expected_type when there is no actual non-null content to contradict it
+1. Replace the guard with an explicit test that there is at least one non-null element in array (or the new element) whose runtime type is object-only (i.e., no concrete narrower type was available).
+2. Example replacement (pseudo-patch for lines 346–351):
+
+  - Determine whether there are any non-null existing elements whose runtime type is not compatible with expected_type:
+      has_non_null = any(x is not None for x in array) if array is not None else False
+      has_concrete_type = any(type(x) is not object for x in array) if array is not None else False
+  - Then raise only when inferred_type == object AND expected_type != object AND has_non_null AND not has_concrete_type
+
+3. Concretely:
+  Replace
+    if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  With
+    # only fail if there are non-null elements but none had a concrete (narrower) type
+    if (inferred_type == object
+        and expected_type != object
+        and array is not None
+        and any(x is not None for x in array)):
+      raise TypeError(...)
+
+This allows creating a List[expected_type] when the only values are None (or array is None and element is None), while still rejecting cases where real non-null elements exist but are only typed as object.
+
+Option B — Alternative: prefer expected_type when element/array provide no information
+1. If array is None or array has no non-null elements and element is None, set inferred_type = expected_type (or object if expected_type is None).
+2. Example change before this guard:
+    if (inferred_type == object and expected_type is not None
+        and (array is None or not any(x is not None for x in array)) and element is None):
+        inferred_type = expected_type
+3. Then the existing guard will not trigger because inferred_type != object.
+
+Which to pick
+- Pick Option A if you want to refuse when actual non-null elements exist but cannot be narrowed.
+- Pick Option B if you want to prefer the supplied expected_type whenever there’s no evidence to the contrary.
+
+Minimal test cases to verify the fix
+- array = None, element = None, expected_type = str -> should return List[str] with single None (no TypeError).
+- array = [None, None], element = None, expected_type = int -> should return List[int] (no TypeError).
+- array = [1, "two"], element = None, expected_type = int -> should raise (heterogeneous non-null elements conflict).
+- array = ["a", None], element = None, expected_type = int -> should raise (non-null "a" is not int).
+
+Why this resolves the bug
+- The revised rule only rejects when there is actual non-null content that contradicts the requested narrow expected_type. It does not reject the valid case of building a typed list solely from None values or from no input array.
+
+If you want, I can produce the exact patch in the language of the codebase (showing exact replacement lines) — tell me whether this is Java, Python or another language used here.

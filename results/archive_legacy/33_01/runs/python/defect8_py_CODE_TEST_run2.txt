@@ -1,0 +1,58 @@
+What happened (where it failed)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- In to_locale, after confirming locale_str[2] == '_' the code reads
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+- For 'fr__POSIX', locale_str[3] is '_' (because the country is empty). The check expects an uppercase letter there, so the condition is true and the function raises ValueError.
+- Concretely: the failure occurs in to_locale at the ch3/ch4 validation (the lines that set ch3/ch4 and the if that raises). The function rejects the valid "language + empty country + variant" form like 'fr__POSIX'.
+
+Why it failed (root cause)
+- The code assumes that if length > 2 then positions 3 and 4 must always be uppercase country letters. It does not handle the allowed form where the country is empty and there are two consecutive underscores ("ll__variant"), so ch3 can legally be '_' instead of an uppercase letter.
+- As a result, the branch that validates ch3 and ch4 incorrectly rejects empty-country locales and raises the ValueError for 'fr__POSIX'.
+
+How to fix it (concrete steps and exact change)
+1. After verifying locale_str[2] == '_', detect the empty-country form by checking locale_str[3] == '_'. If locale_str[3] == '_' then:
+   - country = ""
+   - variant = locale_str[4:] (variant begins at index 4)
+   - return Locale(locale_str[0:2], "", locale_str[4:])
+2. Otherwise (locale_str[3] != '_'), validate that locale_str[3] and locale_str[4] are uppercase A–Z as the existing code intends, and keep the existing handling where the variant (if present) starts at index 6.
+
+Example patch (replace the middle part of the method)
+- Current problematic block (summary of lines):
+    if locale_str[2] != '_':
+        raise ValueError(...)
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' ... raise ...
+    if length == 5:
+        return Locale(...)
+    else:
+        if locale_str[5] != '_': raise ...
+        return Locale(..., ..., locale_str[6:])
+
+- Replace with this logic:
+    if locale_str[2] != '_':
+        raise ValueError(...)
+    # handle empty country: "ll__variant"
+    if locale_str[3] == '_':
+        # variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # otherwise expect two-letter country
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    if locale_str[5] != '_':
+        raise ValueError(...)
+    return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fixes it
+- It explicitly recognizes the empty-country case (the second underscore immediately after the first) and returns the correct Locale(language, "", variant). For 'fr__POSIX' that returns Locale('fr', '', 'POSIX').
+- It preserves the original validation for the normal language-country-variant and language-country forms.
+
+You can test the fix with:
+result = LocaleUtils.to_locale('fr__POSIX'); assert result == Locale('fr', '', 'POSIX')

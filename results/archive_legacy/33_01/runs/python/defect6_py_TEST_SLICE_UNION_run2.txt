@@ -1,0 +1,40 @@
+What happened
+- The test calls cc.add_number(-0.0) expecting the consumer to preserve the negative zero string "-0.0".
+- The code path that receives the new value is MockCodeConsumer.add (line 126), which normalizes numeric zeros before storing them. That normalization loses the negative sign.
+- The normalized value is then passed to self.append(...) on line 138 and later returned by get_code(), so result is "0.0" (or otherwise missing the minus) instead of "-0.0".
+
+Why it fails (root cause)
+- The code at add (line 126) uses an equality test like newcode == 0 (or replaces zeros with a canonical 0.0) to detect zero and normalize it. In IEEE floats -0.0 == 0.0 is True, so that test treats -0.0 the same as +0.0 and overwrites the sign.
+- Because that overwrite happens before append (line 138) stores the value, the negative sign is lost and get_code() returns the normalized, unsigned zero.
+
+Where exactly (lines and names)
+- MockCodeConsumer.add (line 126): does the zero normalization using newcode == 0 (or sets newcode = 0.0).
+- MockCodeConsumer.append (line 138): gets the already-normalized newcode and stores it, so the consumer never sees the original negative zero.
+
+How to fix it (concrete steps)
+1. Stop lumping -0.0 and +0.0 together when you need to preserve sign. Replace the boolean equality test used at line 126 with logic that preserves negative zero.
+2. Detect negative zero explicitly (examples below) instead of doing newcode == 0:
+   - Using math.copysign:
+     - import math
+     - if newcode == 0.0 and math.copysign(1.0, newcode) < 0:
+         # it's negative zero; keep it as-is
+       elif newcode == 0.0:
+         # it's positive zero, you can canonicalize if you must
+   - Or using reciprocal test (works for float):
+     - if newcode == 0.0 and 1.0 / newcode == float("-inf"):
+         # negative zero
+3. Only perform the “normalize zeros” assignment after checking sign. For example, change the code at line 126 from:
+     if newcode == 0:
+         newcode = 0.0
+   to:
+     import math
+     if newcode == 0.0 and math.copysign(1.0, newcode) >= 0:
+         newcode = 0.0
+     # else leave negative zero alone
+4. Run the test again. After this change, cc.add_number(-0.0) will preserve "-0.0" through add (line 126) into append (line 138) and get_code() will return "-0.0".
+
+Why these fixes are safe
+- They only change the handling of zeros; other numbers behave the same.
+- They explicitly detect and preserve the signed-zero case so tests that expect "-0.0" will pass.
+
+If you want, share the current body of add (lines ~120–140) and I will give an exact patched diff.

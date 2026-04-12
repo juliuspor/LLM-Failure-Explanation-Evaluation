@@ -1,0 +1,45 @@
+What happened (root cause)
+- The bug is a mismatch between what translate_codepoint(...) returns and how you advance pos afterwards.
+- translate_codepoint(...) is supposed to "take care of a surrogate pair" but the code that advances pos assumes translate_codepoint returned a number of codepoints (the variable name consumed and the comment say "codepoints").
+- In practice translate_codepoint(...) returns a number of UTF-16 code units (1 for BMP, 2 for a surrogate pair). The loop
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  therefore runs consumed times. If consumed == 2 (a surrogate pair), the loop runs twice. On the first iteration pos advances by 2 (char_count sees the high surrogate + low surrogate → 2). On the second iteration pos now points at the low surrogate. code_point_at(code_units, pos) is then asked to read a code point starting at a low surrogate (an unpaired low surrogate), which returns an invalid/unexpected result (or triggers an error depending on your code_point_at implementation). That is where the failure occurs: you either read an incorrect codepoint or hit an exception because you’re scanning into the middle of the pair.
+
+Where it occurs (exact lines/variables)
+- The problematic lines are the for-loop and the pos update:
+  - for pt in range(consumed):  <-- this loop count is wrong if consumed is code units
+  - pos += char_count(code_point_at(code_units, pos))  <-- here pos gets advanced into a low surrogate on the second iteration
+- The variable mismatch is between consumed (returned from translate_codepoint) and the expectation in the loop that consumed counts codepoints.
+
+Why this causes incorrect behavior
+- If consumed is code units (1 or 2), the for-loop iterates that many times. After the first iteration when consumed==2, pos is already advanced past the pair; a second iteration then reads at the low surrogate. That produces incorrect code_point_at results or errors. In short: you advance into the middle of a surrogate pair and then try to interpret the middle as a new codepoint.
+
+Concrete fixes (step-by-step)
+Pick one of these with clear code changes:
+
+1) If translate_codepoint returns UTF-16 code units consumed (1 or 2)
+   - Replace the for-loop with a single direct advance by consumed:
+     pos += consumed
+   - Rationale: consumed already tells you how many code units the translator consumed, so just move pos forward that many code units.
+
+2) If translate_codepoint is supposed to return codepoints consumed (1, 2, ...), make the implementation match that contract
+   - Change translate_codepoint so it returns a count of codepoints, not code units.
+   - Keep the existing loop (or convert it to a while), because advancing by actual codepoint sizes using char_count(...) is then correct.
+
+3) Defensive alternative (explicit and clear)
+   - Make translate_codepoint return a tuple: (codepoints_consumed, codeunits_consumed).
+   - Then use codeunits_consumed to advance pos: pos += codeunits_consumed.
+   - This removes any ambiguity and documents exactly what you use to advance.
+
+How to verify the fix (tests)
+- Test with a BMP-only string (no surrogates), e.g., "abc". translate_codepoint should return 1 (either codepoint or code unit) and pos should advance by 1 each step.
+- Test with an astral-plane character such as U+1F600 (😀). Ensure translate_codepoint returns:
+  - If you choose fix (1): codeunits_consumed == 2, and pos increases by 2.
+  - If you choose fix (2): codepoints_consumed == 1, and the existing loop advances pos by 2 via char_count.
+- Test mixed strings (BMP + astral) and ensure no reads start at low surrogates.
+
+Summary
+- The root cause is a contract mismatch: consumed is treated as "codepoints" in the loop but is actually "UTF-16 code units" returned by translate_codepoint. That causes the second iteration to start reading at a low surrogate. Fix by making the return value and the pos advancement agree (preferably advance pos by the number of code units consumed).

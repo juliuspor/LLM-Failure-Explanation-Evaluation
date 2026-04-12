@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The method is throwing ValueError("Minutes out of range: -15") at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means a call that passes minutes_offset = -15 hits this unconditional range check and fails immediately.
+
+Why it fails (root cause)
+- The docstring and later code expect negative minutes to be allowed in some cases (for example (0, -15) → -00:15, or (-2, -15) → -02:15). The code later (lines 402 and 404) adjusts minutes based on the sign of hours:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+  So the method intends to accept negative minutes in some hour-sign combinations and only reject invalid absolute values later.
+- But the validation at line 396 unconditionally rejects any negative minutes (minutes_offset < 0). That validation happens before the sign-aware adjustments, so valid cases like minutes_offset = -15 are rejected too early.
+
+Where to look in the code
+- Line 396: unconditional minutes range check (minutes_offset < 0 or > 59) — this is the immediate cause of the error.
+- Lines 402 and 404: sign-aware logic that expects to be able to handle negative minutes.
+- Line 405 onward: computes offset and checks full offset magnitude.
+
+What to change (concrete steps)
+1. Allow negative minutes in the initial range check (minutes must be between -59 and +59), not just non-negative:
+   - Replace the current check at line 396 with a bounds check that permits negative minutes:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Enforce the "minutes negative when hours positive" rule separately (as the docstring requires):
+   - Add a check after verifying minutes are within -59..59:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError(f"Minutes must be non-negative when hours is positive: {minutes_offset}")
+   This preserves the required invalid case (e.g. (2, -15) must raise).
+3. Alternatively (equivalent), move the original range check after the sign-aware adjustment logic so the method first handles combining hour and minute signs, then validates the resulting minute value is within allowed bounds.
+
+Minimal example fix to insert at or near line 396:
+- Replace
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  with
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError(f"Minutes must be non-negative when hours is positive: {minutes_offset}")
+
+Why this fix works
+- It matches the docstring: minutes can be negative when hours are zero or negative, but cannot be negative when hours are positive.
+- It lets the later sign-aware math at lines 402/404 run for legitimate negative-minute cases like (0, -15) and (-2, -15).
+- It still prevents out-of-range minutes (less than -59 or greater than 59) and enforces the disallowed combination (positive hours + negative minutes).
+
+If you want, I can produce a small unit test showing the failing input and the expected behavior after the change.

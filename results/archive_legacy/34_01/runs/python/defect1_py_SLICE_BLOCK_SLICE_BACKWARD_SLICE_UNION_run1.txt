@@ -1,0 +1,31 @@
+What happened (where it fails)
+- The code raises ValueError at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That validation runs before the code at 402–405 that adjusts minutes_offset depending on the sign:
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 404 |                 minutes_offset = hours_in_minutes + minutes_offset
+ 405 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code validates minutes_offset too early. minutes_offset at the point of the check can be negative because the sign of the overall offset has already been applied (or the sign handling expects to flip/adjust minutes later). Because of that, a perfectly valid input like a negative offset with a minutes portion (for example "-00:30" or "-2:15") produces minutes_offset < 0 and is rejected at line 396 even though lines 402–405 intend to handle that case and compute the final total minutes.
+- In short: the check enforces 0 <= minutes_offset <= 59 before the function finishes combining hours and minutes and/or applying the sign. That causes valid negative-minute cases to be treated as invalid.
+
+Concrete reproduction example
+- If the parser produced minutes_offset = -30 (because the sign was applied early), the condition at line 396 triggers and the code raises "Minutes out of range: -30" even though the later logic would convert that into a valid total offset.
+
+Exact fixes (step-by-step)
+1. Validate the parsed minute token before applying any sign to it:
+   - If you have a raw parsed minute value (call it raw_minutes) from the input string, check
+     if raw_minutes < 0 or raw_minutes > 59: raise ValueError(...)
+   - Then apply the sign when you combine hours and minutes into minutes_offset.
+2. Or move the existing validation so it runs after sign/combination logic (after lines 402–405). Then check that the final minutes portion (or the final normalized minute remainder) is within [0,59] if that is what you actually need.
+3. Alternatively, change the condition to validate the absolute minute part:
+   - Replace the check with if abs(minutes_offset) > 59: raise ValueError(...)
+   - But only do this if minutes_offset at that point is expected to represent only the minute component; otherwise prefer options 1 or 2.
+
+Which to pick
+- Preferred: validate the raw minute component (step 1). That makes the intent clear: minutes must be 0–59 regardless of sign, and you don't accidentally reject valid negative offsets when you apply the sign later.
+
+Summary
+- The check at lines 396–397 runs too early and rejects legitimate negative minute components. Move the validation to after sign handling or validate the raw minute token before applying the sign.

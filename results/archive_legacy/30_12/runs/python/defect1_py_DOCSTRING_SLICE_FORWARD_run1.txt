@@ -1,0 +1,55 @@
+What happened (where it fails)
+- The bug is in the code that combines hours_offset and minutes_offset into minutes before converting to milliseconds (around lines 406–409).
+- At line 406 the code does:
+  minutes_offset = hours_in_minutes - minutes_offset
+  and at 408:
+  minutes_offset = hours_in_minutes + minutes_offset
+  That reuse of minutes_offset and those arithmetic signs make negative minutes get treated as positive in some cases. As a result the method:
+  - does not raise the ValueError it should when minutes_offset is negative while hours_offset is positive (per the docstring), and
+  - can produce a wrong total offset (and sometimes trigger the "Offset is too large" path at line 411) because the signs are combined incorrectly.
+
+Why it fails (root cause)
+- The code mixes signs incorrectly when combining hours and minutes. The logic uses hours_in_minutes ± minutes_offset without first normalizing or validating the signs according to the allowed combinations in the docstring.
+- Example (concrete): hours_offset = 2, minutes_offset = -15
+  - Docstring: this combination is invalid and must raise ValueError.
+  - Current code path: minutes_offset becomes hours_in_minutes - minutes_offset = 120 - (-15) = 135, so it treats -15 as +15 and returns +02:15 (or later may trigger the "too large" check). The negative minutes were inverted instead of rejected.
+- The core error is both:
+  1) incorrect arithmetic sign usage when composing the final offset (lines 406–408), and
+  2) missing/incorrect validation of the sign rules stated in the docstring before combining values.
+
+Where exactly to change (concrete steps)
+1. Add explicit validation before combining hours and minutes:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (this is explicitly disallowed by the docstring).
+   - Ensure abs(hours_offset) <= 23 and abs(minutes_offset) <= 59.
+2. Compute the total offset minutes using an unambiguous rule that preserves sign:
+   - If hours_offset > 0: total_minutes = hours_offset * 60 + minutes_offset  (minutes_offset must be >= 0 because of step 1)
+   - If hours_offset < 0: total_minutes = -(abs(hours_offset) * 60 + abs(minutes_offset))  (minutes_offset may be >= 0 or <= 0, but use absolute values to get combined magnitude; docstring allows (-2, -15) and (-2, 15) both as -02:15)
+   - If hours_offset == 0: total_minutes = minutes_offset (signed; e.g., (0, -15) => -15)
+   - After computing total_minutes, check |total_minutes| <= 23*60 + 59 and raise ValueError if it exceeds.
+3. Replace the existing lines 406–409 arithmetic with the explicit computation above and leave the milliseconds conversion at line 409:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Suggested replacement pseudocode (drop into the method before the millis conversion):
+   if not (-23 <= hours_offset <= 23):
+       raise ValueError("hours_offset out of range")
+   if not (-59 <= minutes_offset <= 59):
+       raise ValueError("minutes_offset out of range")
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("minutes cannot be negative when hours are positive")
+   # combine safely
+   if hours_offset > 0:
+       total_minutes = hours_offset * 60 + minutes_offset
+   elif hours_offset < 0:
+       total_minutes = -(abs(hours_offset) * 60 + abs(minutes_offset))
+   else:  # hours_offset == 0
+       total_minutes = minutes_offset
+   if abs(total_minutes) > (23 * 60 + 59):
+       raise ValueError("Offset is too large")
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- It enforces the docstring rules (rejects forbidden sign combinations).
+- It makes sign handling explicit so minutes are not accidentally inverted by subtraction.
+- It centralizes the range check on the final magnitude so "Offset is too large" only happens for real overflow cases.
+
+If you want, I can produce a concrete patch (diff) that replaces the lines around 406–409 with the suggested code.

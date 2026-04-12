@@ -1,0 +1,42 @@
+What happened (what failed)
+- The test triggers an IndexError raised at line 36 in the slice you provided:
+  raise IndexError(f"String index out of range: {index}")
+- This happens when translating a string that contains a Unicode code point above U+FFFF (an emoji, e.g. "\U0001F630") followed by another character ("A"). The translator advances its index incorrectly and then calls code_point_at / to_utf16_code_units with an out-of-range index.
+
+Why it failed (root cause)
+- to_utf16_code_units builds a list called code_units (line 12). That list contains UTF-16 code units: for characters outside the BMP (like the emoji) it produces two entries (a high and a low surrogate).
+- The translator's main loop (translate_string / CharSequenceTranslator.translate) is operating with a Python string index i that advances in Unicode code points (Python str uses code points, so an emoji is a single character).
+- But code_point_at (the function that uses the code_units list) expects an index into the UTF-16 code_units list (a code-unit index). The caller passes the code-point index i directly to code_point_at.
+- Because the emoji occupies 2 UTF-16 code units but only 1 Python code point, the code-point index and the code-unit index diverge. Near the end of the string (emoji + "A"), the translator advances i in a way that causes an index value that is >= len(code_units). That is why line 36 raises IndexError: the index given to code_units[index] is out of range.
+- In short: the code mixes two incompatible indexing systems:
+  - Python str indexes by Unicode code points
+  - code_point_at / to_utf16_code_units expect UTF-16 code-unit indexes
+  Mixing them causes the out-of-range access when a surrogate pair is present.
+
+Where it occurred (what variables / methods / lines)
+- to_utf16_code_units builds code_units (line 12).
+- code_point_at uses index to read from code_units and checks bounds (line 35-36), then inspects high = code_units[index] and possibly low = code_units[index + 1] (lines 38–41).
+- The translator method translate_string (or CharSequenceTranslator.translate) passes a Python string index (i) into code_point_at without converting i to a UTF-16 code-unit index. That mismatch causes the IndexError at line 36 when index >= len(code_units).
+
+Concrete steps to fix (exact changes to make)
+1. Choose a single indexing model and use it consistently. Two practical options:
+   - Option A (preferred if you want correctness and simplicity in Python): operate on Python code points everywhere. Don’t use UTF-16 code-unit indexing. Replace any call to to_utf16_code_units/code_point_at with ord(s[i]) and logic based on code points (if you need to detect high/low surrogates for Java compatibility, you can detect > 0xFFFF via ord).
+     - Change translate_string so its loop and index i are Python code-point indexes.
+     - Remove or stop using to_utf16_code_units/code_point_at unless you actually need UTF-16 semantics.
+   - Option B (if you must emulate Java/UTF-16 exactly): iterate over the code_units list returned by to_utf16_code_units and use a code_unit_index variable for all calls to code_point_at. Advance that index by 1 or 2 depending on whether you saw a surrogate pair.
+     - Concretely: replace loops like `for i in range(len(s))` with `i = 0; while i < len(code_units): ...; i += delta` and pass i to code_point_at.
+
+2. If you keep to_utf16_code_units and code_point_at:
+   - Ensure the caller converts the Python-string index into a UTF-16 code-unit index before calling code_point_at, or iterate over code_units directly.
+   - Verify increments: when a code point is represented by a surrogate pair, the caller must advance the code-unit index by 2, not 1.
+
+3. Small defensive change in code_point_at:
+   - The current bounds check (line 35) is correct, but you might add clearer error messages noting index vs. code_units length to make the bug obvious:
+     raise IndexError(f"UTF-16 code unit index out of range: {index} >= {len(code_units)}")
+
+Why these fixes work
+- Option A avoids the mismatch entirely by using Python's natural unit (code points).
+- Option B preserves Java-like UTF-16 behavior by making sure both the data (code_units) and the index operate in UTF-16 code-unit space, eliminating the off-by-one/out-of-range caused by treating a surrogate pair as a single index.
+
+Summary
+- Root cause: mixing Python code-point indices (variable i in translate_string) with functions that expect UTF-16 code-unit indices (to_utf16_code_units / code_point_at). That mismatch causes an index >= len(code_units) and the IndexError at line 36. Fix by using one consistent indexing scheme and ensuring the index you pass to code_point_at is a UTF-16 code-unit index (or stop using UTF-16 indexing at all).

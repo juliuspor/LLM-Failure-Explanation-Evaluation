@@ -1,0 +1,57 @@
+What happened (root cause)
+- The code reuses the parameter minutes_offset to hold the total offset in minutes (lines 402 and 404). That makes the arithmetic wrong when hours_offset is negative because the sign handling is implemented incorrectly.
+- Specifically, at line 402 the code does:
+  minutes_offset = hours_in_minutes - minutes_offset
+  This intends to produce a total minutes value for negative hour offsets, but because minutes_offset is the original positive-minute parameter (0..59), the arithmetic should treat the minute portion as a subtraction from the negative hour part. The current expression produces the opposite effect in some cases (it mixes the wrong sign logic and the reuse of minutes_offset makes the intention unclear).
+- The result is an incorrect total-minute value before multiplying by MILLIS_PER_MINUTE (line 405), which leads to producing a wrong offset or throwing an unexpected error downstream.
+
+Where it occurs (exact lines and variables)
+- Validation is done at lines 396–397 on the variable minutes_offset (must be 0..59).
+- Computation of hours_in_minutes happens on line 402: hours_in_minutes = hours_offset * 60
+- The wrong reassignment happens at line 402 (negative branch) and line 404 (non-negative branch):
+  - if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset   <-- wrong reuse/logic
+    else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- The value minutes_offset is then multiplied at line 405:
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why that causes failure
+- Reusing minutes_offset both as input (0..59) and as the total minutes accumulator hides intent and made the negative/positive branch logic error-prone. The negative-branch formula is wrong for expressing "hours plus negative minutes" in a clear, correct way and leads to incorrect total minute calculations.
+- Because the wrong total is passed into safe_multiply, the code may compute an incorrect offset (or, in some contexts, trigger arithmetic errors).
+
+Concrete fix (step-by-step)
+1. Stop reusing minutes_offset as the accumulator. Introduce a new variable total_minutes to hold the computed total offset in minutes.
+2. Compute total_minutes explicitly using clear sign logic:
+   - If hours_in_minutes < 0, subtract the minute portion: total_minutes = hours_in_minutes - minutes_offset
+   - Else, add the minute portion: total_minutes = hours_in_minutes + minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE and pass the result to for_offset_millis.
+
+Exact replacement for the problematic block (lines ~402–405)
+- Replace:
+    offset = 0
+    try:
+        hours_in_minutes = hours_offset * 60
+        if hours_in_minutes < 0:
+            minutes_offset = hours_in_minutes - minutes_offset
+        else:
+            minutes_offset = hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+- With:
+    offset = 0
+    try:
+        hours_in_minutes = hours_offset * 60
+        total_minutes = hours_in_minutes - minutes_offset if hours_in_minutes < 0 else hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Why this fix works
+- It keeps the input parameter minutes_offset unchanged for validation clarity.
+- It makes the sign handling explicit and avoids accidental logic bugs from reusing the parameter name.
+- The multiplication receives the correct total_minutes, so offset is computed correctly.
+
+Optional extra: a small defensive improvement
+- If you prefer clarity over compactness, expand the conditional into two explicit branches (as the original tried), but still use total_minutes rather than overwriting minutes_offset. This makes the intention obvious in code review and reduces future regressions.

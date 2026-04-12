@@ -1,0 +1,55 @@
+What happened
+- The code computes the total minutes of the offset incorrectly because it reuses minutes_offset and applies the hours value twice, producing the wrong sign/magnitude. That bad value then gets multiplied into milliseconds (line 405) and can trigger the "Offset is too large" check (line 407) or produce the wrong timezone id/offset.
+
+Where it occurs (exact lines and variables)
+- At line 402: minutes_offset = hours_in_minutes - minutes_offset
+- At line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Later that result is used at line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The wrong math originates from reusing minutes_offset and combining it with hours_in_minutes incorrectly.
+
+Why this breaks (concrete example)
+- Suppose inputs are hours = -2 and minutes = -15.
+  - hours_in_minutes = hours * 60 = -120
+  - minutes_offset initially = -15
+- The code does:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+    -> minutes_offset = -120 - (-15) = -105
+    (this is already wrong; expected -135)
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+    -> minutes_offset = -120 + (-105) = -225
+    (now you have -225 minutes, which is the wrong magnitude; correct is -135)
+- That -225 is multiplied by MILLIS_PER_MINUTE producing a much larger absolute millisecond offset, which may exceed allowed bounds and causes a ValueError at line 407 or yields an incorrect zone id/value.
+
+Root cause (short)
+- The algorithm mixes up the signs and reuses the minutes_offset variable so hours_in_minutes is effectively applied twice. The intended formula is a single sum of hour-minutes in minutes (hours*60 + minutes) taking sign into account; the code does two operations that distort the result.
+
+How to fix (clear step-by-step)
+1. Do not reuse minutes_offset to hold intermediate combined values. Compute a separate variable for the total minutes.
+2. Ensure minute sign is treated correctly relative to hours. The simplest correct expression is:
+   - total_minutes = hours * 60 + minutes
+   This requires minutes already being signed correctly for the intended semantics. If the implementation intends special sign handling (e.g., negative hours should make minutes negative), make that explicit before summing.
+3. Replace the two faulty lines with a single deterministic computation and use that for offset calculation.
+
+Concrete replacement (what to change)
+- Remove lines 402 and 404 and instead do something like:
+
+  original_minutes = minutes_offset  # keep original minute argument
+  total_minutes = hours_in_minutes + original_minutes
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- Or, if you want to enforce that minute sign matches hour sign for negative hours (based on your docstring/desired behavior), do:
+
+  if hours < 0 and original_minutes > 0:
+      original_minutes = -original_minutes
+  total_minutes = hours_in_minutes + original_minutes
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+What to test after fix
+- Re-run the test cases you included:
+  - (-2, -15) should produce -135 minutes -> -8,100,000 ms, id "-02:15"
+  - (-2, 15) should behave per your desired docstring (if intended to be negative, convert minutes sign) — otherwise decide and document the rule and test accordingly
+  - (2, -15) should raise ValueError if that's the chosen rule
+  - Edge cases (±23:59, out of range) to ensure bounds checks still fire correctly
+
+Why this explanation is sufficient
+- It pinpoints the exact lines (402, 404, 405, 407), shows the incorrect intermediate values with a concrete example, identifies the faulty reuse of minutes_offset and the incorrect double application of hours_in_minutes, and gives a clear code-level replacement and test checklist so you can fix and verify behavior.

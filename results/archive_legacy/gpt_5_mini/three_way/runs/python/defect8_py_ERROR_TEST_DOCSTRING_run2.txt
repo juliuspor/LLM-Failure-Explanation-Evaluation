@@ -1,0 +1,53 @@
+What happened
+- The failure occurs inside LocaleUtils.to_locale when it validates the input string locale_str.
+- The code assumes that when there is an underscore after the two-letter language (i.e. at index 2) the next character (locale_str[3]) must be an uppercase country letter. For input "fr__POSIX" locale_str[3] is '_' (the second underscore), so that check fails and the method raises ValueError("Invalid locale format: fr__POSIX").
+
+Why that is wrong (root cause)
+- "fr__POSIX" is a legitimate format: language = "fr", empty country = "", variant = "POSIX". The Java behaviour and the tests expect LocaleUtils.to_locale to accept a double underscore as "empty country, variant present".
+- The current validation does not handle the empty-country case. It only handles either:
+  - language only ("fr"), or
+  - language + underscore + two-letter country ("fr_FR"), or
+  - language + underscore + country + underscore + variant ("fr_FR_POSIX").
+- It never checks for the language + double-underscore + variant pattern, so the specific check that inspects locale_str[3] incorrectly treats the second underscore as an invalid character.
+
+Where in the code this happens
+- In LocaleUtils.to_locale, the input string variable is locale_str.
+- The failing check is the branch that runs when locale_str[2] == '_' (an underscore after the two-letter language). That branch expects locale_str[3] to be an uppercase letter for the country and raises the ValueError when it is not (which is what happens for "fr__POSIX").
+
+Exact, concrete fixes (step-by-step)
+1. Recognize the double-underscore case before you assume a 2-letter country:
+   - If locale_str starts with a two-letter lowercase language and locale_str[2:4] == "__":
+       - set language = locale_str[0:2]
+       - set country = "" (empty)
+       - set variant = locale_str[4:] (may be empty or non-empty—validate non-empty if you require)
+2. Otherwise continue with the existing parsing:
+   - If there's a single underscore at index 2 and characters 3–4 are uppercase letters, parse country = locale_str[3:5], variant = rest if present.
+   - Preserve the other validations (language must be lowercase two letters; country, if present, must be two uppercase letters; separator must be '_').
+3. Alternatively (cleaner), split with a limit of 2 and handle empty country:
+   - parts = locale_str.split('_', 2)
+   - len(parts) == 1 -> language only
+   - len(parts) == 2 -> language + country (country may be empty string -> treat as "")
+   - len(parts) == 3 -> language, country (may be empty), variant
+   - then validate language and country (country can be empty) and variant accordingly
+
+Minimal example patch (pseudo-Python)
+- Before:
+    if locale_str[2] == '_':
+        # assumes locale_str[3] is uppercase country letter -> raises if it's '_'
+- After:
+    if locale_str[2:4] == "__":
+        language = locale_str[0:2]
+        country = ""
+        variant = locale_str[4:]  # handle/validate empty variant if required
+        return Locale(language, country, variant)  # or continue validations
+    elif locale_str[2] == '_':
+        # existing country parsing and checks
+
+What to validate after the fix
+- language must still be 2 lowercase letters
+- if country is non-empty it must be 2 uppercase letters
+- variant may be any non-empty string (depending on your rules)
+- preserve raising ValueError for other malformed inputs shown in your tests
+
+Why this will make the test pass
+- The new branch explicitly recognizes "fr__POSIX" as language "fr", empty country "", and variant "POSIX" and will return Locale("fr", "", "POSIX") instead of raising ValueError when it sees '_' at index 3.

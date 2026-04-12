@@ -1,0 +1,53 @@
+What happens
+- The code intends to build a total offset in minutes from hours_offset and minutes_offset, then convert that to milliseconds.
+- The bug is in these lines:
+
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+
+  and the subsequent multiply:
+
+      offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code reuses the parameter minutes_offset to hold the computed total minutes, and the negative-case arithmetic is wrong/unclear.
+- For negative hour offsets the code does hours_in_minutes - minutes_offset. That produces the correct numeric total only by accident; reusing the input variable minutes_offset and subtracting makes the intent hard to see and is fragile.
+- The real failure mode you will see in practice is wrong sign/incorrect total when you expected a straightforward sum/subtraction rule, and it makes reasoning/error-catching harder. If someone later changes the code or the parameter semantics, the reuse will cause a subtle bug.
+- Concretely: the code should compute a separate total_minutes value using the sign of hours_offset, rather than overwrite minutes_offset. Overwriting the input variable hides the intent and leads to mistakes. (In short: mixing input parameter and accumulator and doing conditional subtraction produces incorrect/unclear behavior.)
+
+Exactly where it occurs
+- The problem is at the three lines that compute and assign minutes_offset (the two lines with hours_in_minutes and the if/else).
+- The wrong value is then passed to FieldUtils.safe_multiply(...) on the next line, so the incorrect total_minutes flows into the offset calculation and final return.
+
+How to fix it — exact steps
+1. Stop reusing the parameter minutes_offset. Introduce a new local variable total_minutes.
+2. Compute total_minutes explicitly and clearly using the sign of hours_offset:
+   - If hours_offset is negative, total_minutes = hours_in_minutes - minutes_offset
+   - Otherwise total_minutes = hours_in_minutes + minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE and pass that to for_offset_millis.
+
+Suggested replacement for the problematic block (exact lines to change)
+Replace:
+
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+With:
+
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes - minutes_offset if hours_in_minutes < 0 else hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix solves it
+- It separates input parameters from computed state so there is no accidental reuse/shadowing.
+- The arithmetic is explicit and easy to audit: total_minutes is the single source of truth passed to safe_multiply.
+- It prevents subtle sign/logic errors and makes future maintenance straightforward.
+
+If you want, I can also show a tiny unit-test example (input -> expected millis) that demonstrates the incorrect result from the original code and the correct result after the change.

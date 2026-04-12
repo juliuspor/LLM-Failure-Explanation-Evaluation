@@ -1,0 +1,64 @@
+What went wrong (short answer)
+- The code assumes translate_codepoint(...) returns a count of code points consumed, but the implementation actually returns a count of UTF‑16 code units (or otherwise mismatches that contract). Because of that mismatch the pos index is advanced the wrong number of times and code_point_at(...) is eventually called with pos past the end of code_units, raising IndexError.
+
+Where it happens (exact locations / lines)
+- Right after computing consumed:
+    consumed = self.translate_codepoint(code_units, pos, out)
+- The loop that advances pos when consumed > 0:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The exception occurs inside code_point_at(code_units, pos) when pos is already past length (IndexError).
+
+Why that causes the failure (step‑by‑step)
+1. The contract (comment) says translators deal in code points:
+   "# Contract with translators is that they have to understand codepoints
+    # and they just took care of a surrogate pair"
+   That means translate_codepoint must return the number of code points it consumed (1 for a surrogate pair representing a single code point).
+2. The loop uses consumed as a count of code points and advances pos by the number of UTF‑16 code units for each code point via:
+   pos += char_count(code_point_at(code_units, pos))
+3. If translate_codepoint instead returns the number of UTF‑16 code units (for example 2 for a surrogate pair) or otherwise returns an incorrect value, the loop runs too many iterations:
+   - Example: translate_codepoint returns 2 (units) for a single code point (surrogate pair).
+   - for pt in range(2) runs two iterations:
+       - First iteration increments pos by 2 (skips the surrogate pair), now pos points to the next character (or equals length).
+       - Second iteration calls code_point_at(code_units, pos) but pos is already past the surrogate pair; if pos == length or points to a low/high surrogate without its pair, code_point_at will raise IndexError.
+4. Thus the root cause is a mismatch between what translate_codepoint returns and what this loop expects.
+
+How to fix it (clear step‑by‑step options)
+Option A — Fix translate_codepoint to follow the contract (recommended if you control translators)
+1. Ensure translate_codepoint returns the number of code points consumed, not number of UTF‑16 code units.
+   - For a surrogate pair (one code point represented by two code units) return 1.
+   - For a single BMP character return 1.
+2. Leave the pos‑advancing loop as is:
+   for pt in range(consumed):
+       pos += char_count(code_point_at(code_units, pos))
+
+Option B — Make the loop advance by code units when translate_codepoint returns units (alternate)
+1. If translate_codepoint actually returns number of UTF‑16 code units consumed, change the loop to advance pos by that many units directly:
+   pos += consumed
+   (Replace the for loop entirely; do not call code_point_at inside it.)
+2. Update the comment to reflect that the translator contract reports code units (so future readers are not confused).
+
+Option C — Make the contract explicit and defensive
+1. Update the comment and add an assertion or validation after translate_codepoint:
+   if consumed < 0: raise ValueError(...)
+   # If you expect code points:
+   assert consumed <= remaining_code_points
+2. If you cannot change translate_codepoint implementations, add a sanity check before calling code_point_at:
+   if pos >= length: break or raise a clearer error with variable values.
+
+Which you should pick
+- If translators are meant to work in code points (the comment says so), use Option A: change translate_codepoint to return code point count (1 for a surrogate pair). This is the simplest and matches the existing loop logic.
+- If translators were designed to return code unit counts instead, use Option B and update the comment.
+
+What exactly to change in your code (concrete line edits)
+- If Option A:
+  - Locate translate_codepoint and modify it so that when it handles a surrogate pair it returns 1 (not 2).
+- If Option B:
+  - Replace the block
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+    with
+    pos += consumed
+
+Final note
+- The actual runtime error (IndexError) is just the symptom; the root cause is the contract mismatch between translate_codepoint's return value and the loop that advances pos. Fix the contract or the loop so both sides agree whether consumed is "code points" or "code units."

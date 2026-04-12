@@ -1,0 +1,52 @@
+What happened (what failed)
+- The test calls LocaleUtils.to_locale('fr__POSIX') and expects Locale('fr', '', 'POSIX').
+- The code in to_locale contains wrong length checks and index use, so it either raises IndexError or rejects the format incorrectly instead of returning language='fr', country='' and variant='POSIX'.
+
+Where it happened (exact lines)
+- The bad logic starts at line 236: the method checks "if length == 2:" then immediately accesses indices 3 and 4 (lines 242–244) and later index 5 (line 250). Those index accesses assume the string is at least 6 characters long, but the code only entered that block when length == 2 — a contradictory condition.
+- Lines referenced:
+  - 236: if length == 2:
+  - 242: ch3 = locale_str[3]
+  - 243: ch4 = locale_str[4]
+  - 244: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+  - 248: return Locale(locale_str[0:2], locale_str[3:5])
+  - 250: if locale_str[5] != '_':
+  - 252: return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why it failed (root cause)
+- The conditionals are wrong: checking length == 2 should be used for a two-letter language-only locale, not a branch that then inspects characters at positions 3,4,5. That mismatch makes the parser never correctly handle:
+  - language + empty country + variant (the 'fr__POSIX' case), because the code never treats the double-underscore variant form specially, and the index logic is inconsistent with the length checks.
+- Concretely, the code either:
+  - accesses out-of-range indices when the length check doesn't reflect the later index use, or
+  - never takes the branch that would parse country/variant correctly because the length comparisons are wrong.
+
+How to fix it (clear steps)
+1. Separate parsing cases explicitly and correctly:
+   - If length == 2 -> return Locale(language=locale_str[0:2]) (language-only)
+   - Else require locale_str[2] == '_' for any country/variant form.
+2. Handle empty country (double underscore) explicitly:
+   - If locale_str[2] == '_' and locale_str[3] == '_' -> country = '' and variant = locale_str[4:] (ensure length >= 4 for a variant).
+3. Handle non-empty country:
+   - If locale_str[2] == '_' and there are at least 5 chars, read country = locale_str[3:5]; validate they are A–Z.
+   - If after country there is no more -> return Locale(language, country).
+   - If there is an underscore after country (locale_str[5] == '_') -> variant = locale_str[6:]; return Locale(language, country, variant).
+4. Replace the incorrect "if length == 2:" block and the index checks at lines 242–252 with the explicit logic above.
+
+Example corrected logic (pseudocode you can paste)
+- if len(locale_str) == 2:
+    return Locale(locale_str[0:2])
+- if len(locale_str) >= 3 and locale_str[2] == '_':
+    if len(locale_str) >= 4 and locale_str[3] == '_':  # empty country
+        return Locale(locale_str[0:2], '', locale_str[4:] or '')
+    else:
+        if len(locale_str) < 5:
+            raise ValueError("Invalid locale format")
+        country = locale_str[3:5]
+        validate country letters A-Z
+        if len(locale_str) == 5:
+            return Locale(locale_str[0:2], country)
+        if locale_str[5] != '_':
+            raise ValueError("Invalid locale format")
+        return Locale(locale_str[0:2], country, locale_str[6:])
+
+This change fixes the double-underscore variant case ('fr__POSIX') and removes the incorrect index/length mismatch at lines 236 and 242–252.

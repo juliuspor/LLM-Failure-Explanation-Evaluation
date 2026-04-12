@@ -1,0 +1,61 @@
+What happened (where it failed)
+- The exception was raised at to_locale(...) in your class, specifically at lines 237–240:
+  - Line 237: ch3 = locale_str[3]
+  - Line 238: ch4 = locale_str[4]
+  - Line 239–240: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(f"Invalid locale format: {locale_str}")
+- The test passed the string "fr__POSIX". At indices:
+  - 0='f', 1='r', 2='_', 3='_' , 4='P'
+- ch3 becomes '_' (locale_str[3]) which is not an uppercase A–Z, so the condition is true and the ValueError "Invalid locale format: fr__POSIX" is thrown.
+
+Why it happened (root cause)
+- The code assumes that for multi-part locales you will always have an uppercase 2-letter country at positions 3 and 4 (pattern like "fr_FR").
+- It directly indexes locale_str[3] and [4] without handling other valid forms such as:
+  - A language with an empty country but a variant suffix: "fr__POSIX" (double underscore; empty country, variant "POSIX")
+  - Longer or differently-structured locale strings where the country portion is absent or not exactly two uppercase letters
+- Because the code does a strict character-range check (A–Z) at fixed indices, any legal locale that does not exactly match that 5-character pattern will be rejected.
+
+What to change (concrete steps, line-level guidance)
+- Do not assume fixed-position country letters at indices 3 and 4. Replace the fixed-index check with parsing that splits the locale into components and validates each component explicitly.
+- At/around lines 237–240, remove the direct indexing and use one of these options:
+
+Option A — split and handle empty country + variant (recommended)
+1. Split on '_' once or twice:
+   - parts = locale_str.split('_')
+2. Then:
+   - language = parts[0]
+   - if len(parts) == 1: no country or variant
+   - if len(parts) >= 2: country = parts[1]  (may be empty)
+   - if len(parts) == 3: variant = parts[2]
+3. Validate:
+   - language length and letters
+   - if country is non-empty, require length==2 and uppercase A–Z
+   - if variant exists, accept (or validate variant rules) — do not treat an empty country as invalid
+4. Replace lines 237–240 with that logic.
+
+Option B — regex-based validation
+1. Use a regex that allows:
+   - language (2 letters), optional "_XX", optional "_VARIANT" or variant after double underscore:
+   - Example pattern: r'^[a-z]{2}(?:_[A-Z]{2})?(?:_.+)?$' (tune to your exact rules)
+2. Reject only if the whole string fails the regex.
+
+Concrete minimal code change example (conceptual — insert near lines 237–240)
+- Replace:
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+- With:
+  parts = locale_str.split('_')
+  # parts[0] is language
+  if len(parts) >= 2 and parts[1]:
+      country = parts[1]
+      if len(country) != 2 or not country.isupper() or not country.isalpha():
+          raise ValueError(f"Invalid locale format: {locale_str}")
+  # if parts[1] is empty (e.g. "fr__POSIX") that's fine — treat as language + variant
+
+Why this fix will work
+- It stops indexing fixed positions that don't exist for strings like "fr__POSIX".
+- It explicitly allows an empty country (the double underscore case) and still accepts a variant ("POSIX"), which is exactly the input that caused the failure.
+- It keeps the original strictness for valid two-letter country codes while not rejecting valid locale forms.
+
+If you want, I can produce a small patch for to_locale showing the exact replacement lines and unit tests for "fr__POSIX", "fr_FR", and "fr".

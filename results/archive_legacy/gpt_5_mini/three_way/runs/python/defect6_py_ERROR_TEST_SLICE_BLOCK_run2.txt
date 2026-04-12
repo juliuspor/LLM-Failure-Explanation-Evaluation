@@ -1,0 +1,46 @@
+What happened (where and why)
+- The failure happens inside the integer-valued branch at lines 176–193 (the slice you provided).
+- The branch is chosen when the code tests x == int(x) (line 176). For -0.0 this test is True because -0.0 == 0.0 in Python.
+- The code then does value = int(x) (line 177). int(-0.0) produces 0 and loses the sign bit.
+- Later the code calls self.add(str(value)) (line 192). That emits "0".
+- So negative zero is treated as an integer 0 early and its sign is lost before any code that might preserve the negative sign can run. The result is "0" instead of the expected "-0.0".
+
+Why this is the root cause (concrete variable/method references)
+- The check x == int(x) at line 176 collapses -0.0 to 0.0 for the branch decision.
+- value = int(x) at line 177 removes the negative-zero sign bit (value becomes integer 0).
+- The code path ends up at self.add(str(value)) on line 192, which prints "0".
+- Note: the fallback else on line 194 would have called self.add(str(x)), and str(-0.0) in Python yields "-0.0". So preserving the float-string path would have kept the negative sign. The bug is that the integer branch is entered too early for negative zero.
+
+Concrete fixes (step-by-step)
+Option A — Short, minimal patch (recommended)
+1. At the top of the integer branch (immediately before line 176 or as the first statement inside that branch), detect negative zero and handle it specially:
+   - if CodeConsumer.is_negative_zero(x):
+       self.add("-0.0")
+       return
+2. This uses the existing CodeConsumer.is_negative_zero utility (the tests include it), keeps the rest of the integer branch unchanged, and ensures -0.0 is emitted correctly.
+
+Option B — Explicit signed-zero check during integer handling
+1. Change the integer branch condition to avoid treating -0.0 as integer zero:
+   - if x == int(x) and not CodeConsumer.is_negative_zero(x) and not math.isinf(x) and not math.isnan(x):
+2. Then add the special-case handling right after the condition (same as Option A) so negative zero falls through to the float string path or is handled explicitly.
+
+Option C — Inspect sign when value == 0
+1. After value = int(x) (line 177) and before self.add(str(value)) (line 192), check:
+   - if value == 0 and math.copysign(1.0, x) < 0:
+       self.add("-0.0")
+       return
+2. This directly detects that the original float was negative zero and prints "-0.0".
+
+Which to pick and why
+- Option A is simplest and clear: call the existing is_negative_zero utility and return the correct string immediately. It requires the least change and follows the intent of the tests.
+- Option B also works and prevents entering the integer branch, but requires modifying the condition expression.
+- Option C is fine if you prefer handling the sign after conversion to int, but it's slightly less clear than checking is_negative_zero up front.
+
+Exact place to change (line references)
+- Add the negative-zero check either:
+  - As the first statements inside the block that starts at line 176, or
+  - Modify the condition on line 176 to exclude negative zero.
+- Ensure the handler does self.add("-0.0") and returns so subsequent integer formatting does not run.
+
+Summary
+The code converts -0.0 to int( -0.0 ) == 0 and then prints that integer, which loses the negative sign. Detect negative zero (using CodeConsumer.is_negative_zero, math.copysign, or equivalent) before converting to int and print "-0.0" explicitly. This fixes the failing test.

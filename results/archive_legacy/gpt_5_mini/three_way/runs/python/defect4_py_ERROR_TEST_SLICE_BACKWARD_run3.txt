@@ -1,0 +1,44 @@
+What happened
+- The failure (Expected max_middle_index=1, got 3) is caused inside TimePeriodValues._update_bounds: after comparing a new period value to the current saved bound, the method unconditionally assigns the current index to the bound variable, clobbering the result of the comparison. In short: the code always sets the bound to the just-added index instead of only when the comparison says it should.
+
+Where it occurs (precise lines & variables)
+- Look at the _update_bounds implementation slice you gave. For the min-start logic you can see the pattern at lines 340–349:
+  - line 340: if self._min_start_index >= 0:
+  - lines 341–346: it computes min_start and compares if start < min_start: self._min_start_index = index
+  - line 349: self._min_start_index = index   <-- unconditional assignment that always executes and overwrites any earlier decision
+
+- This same type of bug appears elsewhere in _update_bounds for other bounds (max_middle, min_middle, max_start, etc.). The test failure (max_middle_index expected 1 but got 3) is symptomatic: the last-added item (index 3) overwrote the previously correct max_middle_index (1) because the code assigns the bound variable unconditionally instead of only when the new period is more extreme.
+
+Why that produces the test failure
+- In the test sequence the correct max_middle index should be 1 (midpoint 150). But when the 4th item is added, the unconditional assignment sets self._max_middle_index (or whichever bound variable is used in that block) to 3 regardless of the midpoint comparison. The stored bound therefore ends up pointing at the last added index (3) instead of the actual max (1).
+
+How to fix it (concrete steps)
+1. Open TimePeriodValues._update_bounds.
+2. For each bound block (min_start, max_start, min_end, max_end, min_middle, max_middle):
+   - Remove any unconditional assignment that sets the bound variable to index outside the comparison branch.
+   - Only assign the bound variable when the comparison indicates the new period is more extreme (e.g., if start < min_start then self._min_start_index = index).
+   - Ensure you are comparing the new metric (start, end, middle) against the appropriate saved metric derived from self.get_data_item(self._X_index).get_period() — and that you use the correct bound variable name (e.g., do not accidentally compare to or assign the wrong bound variable).
+3. Run the tests.
+
+Example correction pattern (pseudo-patch)
+- Replace this pattern:
+    if self._min_start_index >= 0:
+        ...compute min_start...
+        if start < min_start:
+            self._min_start_index = index
+    self._min_start_index = index
+- With:
+    if self._min_start_index >= 0:
+        ...compute min_start...
+        if start < min_start:
+            self._min_start_index = index
+    else:
+        # first item becomes the min
+        self._min_start_index = index
+
+Notes and extra checks
+- Verify the same unconditional-assignment bug is not present in the other bound blocks (max_middle in particular).
+- Also check you are using index consistently (the variable passed into _update_bounds) and not some other loop variable by mistake.
+- After fixing, run the full test suite — this change should make get_max_middle_index() return 1 for the failing test.
+
+This explains where the wrong value (3) came from: an unconditional overwrite (line 349 in the slice) that sets the bound to the latest index regardless of the comparison result. Removing that unconditional assignment (and only assigning in the correct branches) fixes the bug.

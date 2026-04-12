@@ -1,0 +1,64 @@
+What happened (root cause)
+- The method LocaleUtils.to_locale takes the input parameter locale_str and applies strict checks on its format: it requires the language part to be lowercase, the country part to be uppercase, and separators to be underscores. If any of those checks fail, the method raises ValueError.
+- Typical inputs that people pass (for example "en-GB", "EN", "en_gb", "en_gb_xxx" with wrong case, or "en") do not meet those exact checks and so the method rejects them. The failure happens in the validation block inside LocaleUtils.to_locale that examines locale_str and then raises ValueError when a check fails.
+
+Where it happens
+- In LocaleUtils.to_locale (parameter locale_str) during the input-validation branch that inspects:
+  - the separator characters (expects '_' characters),
+  - the language token (expects lowercase letters of the expected length),
+  - the country token (expects uppercase letters of the expected length),
+  - total length/structure checks (number of parts and part lengths).
+- Because the code enforces case and separator exactly, passing a valid locale in other common notations (for example RFC 5646 "en-GB" or mixed-case input) triggers the validation and causes the method to raise ValueError.
+
+Why it happened (specific examples)
+- Input "en-GB": fails because the separator is '-' not '_' (the code checks for '_' and raises).
+- Input "EN": fails because language must be lowercase; the code checks something like locale_str[0:2].islower() and raises.
+- Input "en_gb": fails because country must be uppercase; the code checks locale_str[3:5].isupper() and raises.
+- Input "en_GB_xxx" may be accepted in JDK1.3 vs JDK1.4 differences for variant normalization, but that is a separate difference in the JDK constructors — the to_locale checks still reject badly cased or wrongly-separated inputs.
+
+Concrete fixes (exact steps to apply in LocaleUtils.to_locale)
+1. Decide what inputs you want to accept:
+   - Strict (current): only lowercase language, underscore separator, uppercase country, specific lengths.
+   - Lenient (recommended): accept hyphen or underscore, accept case-insensitively, normalize parts before constructing Locale.
+
+2. Replace the strict validation with a normalization + construction sequence. Example algorithm to accept common forms:
+   - If locale_str is None: return None.
+   - Replace '-' with '_' so both "en-GB" and "en_GB" are handled: normalized = locale_str.replace('-', '_')
+   - Split parts = normalized.split('_')
+   - For parts[0] (language): validate length 2 or 3; normalize to lower() before use.
+   - For parts[1] if present (country): validate length 2 or 0; normalize to upper() before use.
+   - For variant (remaining parts joined by '_'): keep as-is or .replace('_',' ') if you want different behavior.
+   - Construct Locale(language, country, variant) using the normalized values.
+
+3. Example replacement code (conceptual — adapt to your language): 
+   - In to_locale(locale_str):
+       if locale_str is None: return None
+       normalized = locale_str.replace('-', '_')
+       parts = normalized.split('_')
+       if len(parts) == 0: raise ValueError("Invalid locale: empty")
+       language = parts[0].lower()
+       if not (2 <= len(language) <= 3 and language.isalpha()):
+           raise ValueError("Invalid language in locale_str: " + locale_str)
+       country = ""
+       variant = ""
+       if len(parts) >= 2 and parts[1] != "":
+           country = parts[1].upper()
+           if not (len(country) == 2 and country.isalpha()):
+               raise ValueError("Invalid country in locale_str: " + locale_str)
+       if len(parts) >= 3:
+           variant = "_".join(parts[2:])
+       return Locale(language, country, variant)
+
+4. If you want to preserve strictness but give clearer errors, change the ValueError messages in the validation block to mention exactly which check failed (e.g., "Expected '_' separator at index 2", "Expected lowercase language at locale_str[0:2]", "Expected uppercase country at locale_str[3:5]").
+
+What to change in your code (file/line hints)
+- Edit LocaleUtils.to_locale (the validation section that inspects locale_str). Specifically:
+  - Remove or relax the checks that demand '_' only in both positions.
+  - Replace case-sensitive checks on locale_str[0:2] and locale_str[3:5] with normalization (.lower()/.upper()) plus validation of length and isalpha() on the normalized substrings.
+  - If you use explicit index checks (e.g., locale_str[2] == '_'), update them to operate on normalized string and accept either '-' or '_'.
+
+Why this will fix it
+- Normalizing separators and case eliminates false negatives from common, valid locale representations while still allowing you to validate malformed inputs.
+- Improving error messages points you to the exact failing check (language, country, separator, length) instead of a generic "invalid format" which causes guessing.
+
+If you want, paste the current implementation of LocaleUtils.to_locale (the code around the validation checks) and I will mark the exact lines to change and provide a ready-to-paste corrected implementation.

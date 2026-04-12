@@ -1,0 +1,42 @@
+What happened (root cause)
+- The failing case is x == -0.0.
+- On line `if x == int(x) and not math.isinf(x) and not math.isnan(x):` the comparison succeeds because -0.0 == 0 is True.
+- On `value = int(x)` (same block) `value` becomes 0 — converting -0.0 to int loses the sign bit.
+- Later the code does `self.add(str(value))`, which produces `"0"`. The negative sign is already lost, so you get 0 instead of -0.0.
+- The earlier guard `if x < 0 and prev == '-': self.add(" ")` does not help because `-0.0 < 0` is False in IEEE-754, so it never runs for -0.0.
+
+Where it occurs (line references)
+- The problem starts at the `if x == int(x)` line (the integer-valued branch).
+- Sign loss happens at `value = int(x)`.
+- Wrong output happens at `self.add(str(value))`.
+
+How to fix it (concrete steps)
+Option A — preserve sign for zero explicitly (recommended minimal change)
+1. Before converting to int, detect negative zero with math.copysign:
+   - Add `is_neg_zero = (x == 0.0 and math.copysign(1.0, x) < 0)`
+2. If `is_neg_zero` is True, skip the int conversion and output the string form that preserves the sign:
+   - `if is_neg_zero: self.add(str(x)); return` (or handle in the integer block)
+3. Otherwise proceed with the existing integer-handling logic.
+
+Example patch (insert near start of method):
+    is_neg_zero = (x == 0.0 and math.copysign(1.0, x) < 0)
+    if is_neg_zero:
+        # preserve the negative zero sign
+        self.add(str(x))
+        return
+
+Option B — keep integer optimization but special-case sign before writing
+- After computing `value = int(x)` and before `self.add(str(value))`, do:
+    if value == 0 and math.copysign(1.0, x) < 0:
+        self.add(str(x))   # "-0.0"
+    else:
+        self.add(str(value))
+
+Option C — avoid int conversion for any zero
+- Add `if x == 0.0: self.add(str(x)); return` near the top.
+
+Why these fixes work
+- math.copysign(1.0, x) < 0 reliably detects the negative sign bit for -0.0 without changing magnitude.
+- Using `str(x)` for negative zero preserves the sign ("-0.0"). Converting to int discards it.
+
+Pick the option that fits your formatting goals; if you must print integer-valued floats as integers but still preserve sign for -0.0, use Option B.

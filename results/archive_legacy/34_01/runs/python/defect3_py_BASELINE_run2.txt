@@ -1,0 +1,41 @@
+What happened (root cause)
+- In translate(), when a translator handled a codepoint it returned consumed == 2 (it consumed the two UTF-16 code units that make the surrogate pair).
+- The code then runs this loop (your lines shown):
+
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+  On the first iteration (pos == 0) this does:
+  - code_point_at(code_units, 0) → OK (reads the high surrogate and the low surrogate)
+  - char_count(...) → returns 2
+  - pos += 2 → pos becomes 2
+
+  On the second iteration (pt == 1) the loop calls:
+  - code_point_at(code_units, pos) with pos == 2 (equal to len(code_units))
+  - code_point_at checks index >= len(code_units) and raises IndexError "String index out of range: 2"
+
+So the loop is incorrectly advancing pos and then asking code_point_at to read at an index that is already past the end. In short: you mixed up units. translate_codepoint returned the number of UTF-16 code units consumed (2), but the loop treats that as a count of codepoints to iterate and inside each iteration calls code_point_at(pos) again — causing a second, out‑of‑bounds read.
+
+Where it occurs
+- translate(): the for pt in range(consumed): ... block (the code that updates pos after consumed > 0) — that block is the direct cause.
+- The IndexError is raised by code_point_at when called with pos == len(code_units) (see your Slice Block lines 35–36).
+
+Exact fix (step‑by‑step)
+1. Replace the entire for-loop that advances pos with a single addition by the number of code units consumed. Example replacement:
+
+    # Replace this block:
+    # for pt in range(consumed):
+    #     pos += char_count(code_point_at(code_units, pos))
+    # With this:
+    pos += consumed
+
+2. If translate_codepoint's contract is actually "number of codepoints consumed" instead of code units, change the contract or call appropriately:
+   - If consumed is number of codepoints: advance by the sum of char_count(codepoint) for each codepoint consumed, but do not re-read past the end. Simpler is to make translate_codepoint return code unit count (1 or 2) and use pos += consumed.
+
+3. Add a unit test to assert behavior with supplementary characters (you already have one). After the change the test escaper.translate_string('\U0001F630') should pass without IndexError.
+
+Why this fix works
+- The translator already told you how many UTF-16 code units it consumed. Advancing pos by that number is correct and avoids re-reading code_point_at at an index that may be out of bounds.
+
+Small note
+- Do not call code_point_at(code_units, pos) after you have already advanced pos beyond the end. If you ever need to examine codepoints in a loop, compute them before moving pos or guard against pos >= len(code_units).

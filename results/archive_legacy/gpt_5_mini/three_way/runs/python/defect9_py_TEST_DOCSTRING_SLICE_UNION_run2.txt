@@ -1,0 +1,32 @@
+What happened (where)
+- The failure happens in hit09_stringutils.py inside replace_each(), specifically around the block that estimates buffer growth (lines shown in the slice):
+  - Lines 82–85 compute: greater = len(replacement_list[i]) - len(search_list[i]) and then increase += 3 * greater.
+- If either replacement_list[i] or search_list[i] is None, calling len(...) raises a TypeError. That is exactly what your tests hit when you pass None in replacement_list (tests call replace_each(..., ["a"], [None]) and replace_each(..., ["a","b"], ["c", None])).
+
+Why it fails (root cause)
+- The code uses len(replacement_list[i]) and len(search_list[i]) without checking for None first. The function later (lines 102–105) does have checks that treat None entries as “ignore this pair” when it scans the text:
+  - Line 102–105 include "or search_list[i] is None ... or replacement_list[i] is None", so those None entries are excluded from searching/replacement during the main replacement loop.
+- But the length-based precomputation (lines 82–85) runs before those None checks and thus attempts to call len() on None, causing the crash. In short: the function checks for None too late — after it already used len() on possibly-None values.
+
+What else to watch for
+- Even if you avoid the TypeError, you must ensure the semantics match the tests: a None replacement should be treated as “ignore this pair” (do not replace), so the code should not append None into the output (parts.append(replacement_list[replace_index]) at line 92 must only append actual replacement strings).
+- The current code's later checks (lines 102–105) already avoid searching for a pair if replacement_list[i] is None, which is correct. The bug is solely that the precomputation accesses lengths before those guards.
+
+Precise fixes (step-by-step)
+1. Protect the precomputation that uses len(...):
+   - At the loop around line 59–85, skip any i where search_list[i] is None or replacement_list[i] is None or search_list[i] == "" before calling len(). For example:
+     - if search_list[i] is None or replacement_list[i] is None or len(search_list[i]) == 0: continue
+     - then compute greater = len(replacement_list[i]) - len(search_list[i])
+2. Ensure replacements never append None:
+   - At the append site (line 92), ensure replacement_list[replace_index] is not None before appending. Since your later search logic already prevents selecting indices with replacement_list[i] is None, this should hold; but it’s safe to check:
+     - add an assertion or conditional: if replacement_list[replace_index] is None: parts.append(search_list[replace_index]) or skip (depending on desired behavior). The tests expect "ignore" (i.e., no change), so you should not append None.
+3. (Optional, cleaner) Pre-filter the search/replacement arrays at function start:
+   - Build new arrays that include only pairs where search is not None, search != "", and replacement is not None. Use those filtered arrays for all subsequent processing. This keeps the rest of the function unchanged and is simplest to reason about.
+
+Where to change (exact lines referenced)
+- Fix the loop that computes increase (around lines 59–85) so it checks for None/empty before calling len() (line 82).
+- Optionally guard append at line 92 so you never append a None replacement.
+
+Summary
+- Root cause: calling len(...) on None at line 82 (precomputation phase) before the code’s later checks exclude None entries.
+- Fix: skip None/empty entries before calling len(), or filter out None pairs up front. This makes the function behave like the tests expect (ignore None replacements) and prevents the TypeError.

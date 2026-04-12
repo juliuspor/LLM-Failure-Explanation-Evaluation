@@ -1,0 +1,44 @@
+What happened (where it fails)
+- The call to to_locale("fr__POSIX") fails at the country-letter check:
+  - The code reads ch3 = locale_str[3] and ch4 = locale_str[4] and then runs
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(...)
+  - For "fr__POSIX" the characters are:
+    index 0='f', 1='r', 2='_', 3='_', 4='P', ...
+  - ch3 is '_' which is not in 'A'..'Z', so the check fails and you get ValueError: Invalid locale format: fr__POSIX.
+
+Why it fails (root cause)
+- The code assumes that when length > 2 and locale_str[2] is '_' the country subtag must always be two uppercase letters at indices 3 and 4.
+- "fr__POSIX" is a valid-style string where the country is empty and a variant follows (language '_' '' '_' variant). In that case index 3 is '_' (empty country) and the variant starts at index 4.
+- The code does not allow an empty country subtag, so it rejects strings with the form language + '_' + '' + '_' + variant (like "fr__POSIX").
+
+Exactly where in the code
+- The failing check is the ch3/ch4 uppercase validation (the lines with ch3 = locale_str[3]; ch4 = locale_str[4]; if ch3 < 'A' ...).
+- Later code also assumes country occupies indices 3..4 and the next underscore is at index 5, which is not true for "fr__POSIX".
+
+Concrete fixes (step-by-step)
+1. Allow the country subtag to be empty when a variant follows. Replace the rigid uppercase check with logic that accepts either:
+   - two uppercase letters for country (indices 3..4), or
+   - an empty country indicated by locale_str[3] == '_', in which case the variant starts immediately at index 4.
+2. Adjust the later index checks accordingly:
+   - If country is present (2 uppercase letters), expect the next underscore at index 5 and variant at index 6 onward.
+   - If country is empty (locale_str[3] == '_'), expect the variant to start at index 4 (no second underscore at index 5).
+
+Minimal patch example (pseudocode you can drop into to_locale)
+- After verifying locale_str[2] == '_':
+  - if locale_str[3] == '_':
+      # empty country, variant starts at index 4
+      if length < 4 + 1:
+          raise ValueError(...)
+      return Locale(locale_str[0:2], "", locale_str[4:])
+  - else:
+      # require two uppercase letters for country
+      if not (A-Z check on [3] and [4]):
+          raise ValueError(...)
+      if length == 5:
+          return Locale(locale_str[0:2], locale_str[3:5])
+      if locale_str[5] != '_':
+          raise ValueError(...)
+      return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+This change directly addresses the failing case "fr__POSIX" by recognizing the empty country at index 3 and correctly extracting the variant from index 4 onward.

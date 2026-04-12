@@ -1,0 +1,57 @@
+What goes wrong (short answer)
+- The IndexError happens inside the block starting at
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  because code_point_at(code_units, pos) is sometimes called with a position that points into the middle of a surrogate pair or beyond the end of the code_units array. That causes code_point_at to read a missing partner surrogate and raise an error.
+
+Why that happens (step-by-step, with variable names and lines)
+1. At the top of the loop you call
+      consumed = self.translate_codepoint(code_units, pos, out)
+   The meaning of consumed is the key: the translator returns how many code points (not UTF‑16 code units) it consumed at the current position.
+2. Immediately after, when consumed > 0, the code tries to advance pos to skip the items the translator handled by running:
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+   This recomputes the code point at the current pos on every iteration and advances pos by the code unit width (1 or 2) of that code point.
+3. The bug occurs when the first iteration advances pos into the second code unit of a surrogate pair (the low surrogate). On the next iteration the loop calls code_point_at(code_units, pos) with pos pointing at the low surrogate. code_point_at expects either:
+   - a high surrogate followed by a low surrogate (to produce a supplementary code point), or
+   - a single BMP code unit.
+   But when pos is at a low surrogate there is no valid high surrogate at pos, so code_point_at either misinterprets the low surrogate or tries to read pos+1 (which can be out of bounds) and raises IndexError.
+4. In the failing test input "\U0001F630A" the emoji is encoded as two UTF-16 code units followed by 'A'. The loop logic ends up calling code_point_at on the low surrogate (or beyond the end) and fails while trying to advance.
+
+Where it occurs (exact lines)
+- The failure is in the for pt in range(consumed): block (the three lines shown above). The problematic call is code_point_at(code_units, pos) inside that loop.
+
+Root cause summary
+- The code advances pos by recomputing code points at positions that can point into the middle of a surrogate pair. In other words, it uses the updated pos to compute the next increment, which can make code_point_at see invalid/start-in-mid surrogate data. The advancement logic is therefore incorrect for surrogate pairs.
+
+How to fix it (clear actionable steps)
+First decide what translate_codepoint(consumed) is supposed to return:
+- If consumed is meant to be "number of code points" consumed:
+  Replace the loop with code that reads the code point at the current pos once per code point, using that pos for the code_point_at call before pos is changed. Concretely:
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+  That guarantees code_point_at is called only at valid code point starts (it uses the current pos before increment).
+- If consumed is meant to be "number of UTF-16 code units" consumed:
+  Then you should simply advance pos by that many code units without re-reading code points:
+    pos += consumed
+  (no loop, no code_point_at calls)
+
+Either way, do not call code_point_at on a pos that might point to a low surrogate or beyond the end.
+
+Minimal safe replacement (recommended)
+- If the translator contract is that consumed is number of code points, replace the problematic block with:
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)   # use pos before changing it
+        pos += char_count(cp)
+- If the contract is number of code units, replace the whole for-loop with:
+    pos += consumed
+
+Why this fix works
+- Calling code_point_at before you change pos ensures you always call it at the start of a codepoint (so it can correctly see a high surrogate followed by a low surrogate when present).
+- Or, if consumed already counts code units, directly adding consumed avoids re-parsing surrogate pairs entirely.
+
+One-line checklist for you to apply
+1. Confirm the semantic meaning of translate_codepoint's return value (code points vs code units).
+2. Apply the corresponding replacement above to the for-loop that updates pos.
+3. Run the provided tests — they will pass once pos is advanced in the correct units and code_point_at is never called on a low surrogate or out-of-bounds index.

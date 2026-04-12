@@ -1,0 +1,55 @@
+What happens (where it fails)
+- The code raises the ValueError on these lines:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check fires before the code on lines 402 and 404 modifies minutes_offset:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- In other words, the variable minutes_offset is being used for two different things:
+  1. first as the minute component passed in (should be in 0..59)
+  2. later as the combined minute total (hours_in_minutes ± minutes_offset)
+- The immediate cause of the failure is that the range check on line 396 is applied to the raw minutes value in all call patterns where that raw value can legitimately be negative or otherwise handled by the sign of the hours. Because the code validates too early/incorrectly it rejects inputs that should be allowed or misinterprets the meaning of minutes_offset.
+
+Why that is the root cause (plain language)
+- The check on line 396 assumes minutes_offset is a minute-of-hour value between 0 and 59. But later code treats minutes_offset as a partial or total number of minutes when it adds/subtracts hours_in_minutes. The variable is reused and the check runs at the wrong time or against the wrong notion of "minutes".
+- Reusing minutes_offset for two different quantities (input minute component versus computed total minutes) makes the validation wrong for some valid inputs and causes the ValueError to be thrown in the wrong place.
+
+Concrete examples that show the failure
+- Suppose caller passes minutes_offset = -30 because the sign is represented on the input minutes. Line 396 rejects that (-30 < 0) even if the intended total offset could be valid once hours_in_minutes is applied.
+- Suppose the API expects a minute component in range 0..59 but the sign should depend on the hour parameter; if the sign logic is applied only after this check, valid combinations (like hour = -1, minute_component = 30) may be mishandled or incorrectly rejected because the code uses the wrong variable names and order.
+
+Exact fixes (step-by-step)
+1. Stop reusing minutes_offset for two meanings. Introduce a separate variable name for the input minute component and for the computed total minutes.
+   - e.g. minute_component = minutes_offset_input
+2. Validate the minute_component correctly:
+   - If minute_component must be in 0..59 regardless of sign on the hour, check: if minute_component < 0 or minute_component > 59: raise ValueError(...)
+   - If sign can be on the minute component, validate based on the API contract (see step 3).
+3. Apply sign and combine hours and minutes after validation, storing the result in a new variable:
+   - hours_in_minutes = abs(hours) * 60
+   - if hours < 0: total_minutes = -(hours_in_minutes + minute_component)
+     else: total_minutes = hours_in_minutes + minute_component
+4. Convert total_minutes to milliseconds and use FieldUtils.safe_multiply on total_minutes (not the original minute_component), then continue with offset bound checks and cls.for_offset_millis(offset).
+5. Update any error messages or variable names so they reference the right quantity (minute_component vs total_minutes) to avoid confusion.
+
+Minimal code sketch (to implement the above)
+- Replace occurrences like:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(...)
+  with:
+    minute_component = minutes_offset_input  # keep original input value
+    if minute_component < 0 or minute_component > 59:
+        raise ValueError(f"Minutes out of range: {minute_component}")
+    hours_in_minutes = abs(hours) * 60
+    if hours < 0:
+        total_minutes = -(hours_in_minutes + minute_component)
+    else:
+        total_minutes = hours_in_minutes + minute_component
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    ...
+
+Why this will fix it
+- You validate exactly the input minute value you intended to validate.
+- You build the final total_minutes only after validation and with the correct sign.
+- You avoid throwing ValueError wrongly because of variable reuse or ordering errors.
+
+If you want, paste the surrounding function signature and a couple of example inputs that are failing and I’ll give an exact corrected patch for those lines.

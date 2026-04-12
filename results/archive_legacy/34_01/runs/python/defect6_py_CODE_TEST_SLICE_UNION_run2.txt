@@ -1,0 +1,37 @@
+What happened (root cause)
+- At the check on line with "if x == int(x) and not math.isinf(x) and not math.isnan(x):" the value -0.0 compares equal to int(-0.0) (which is 0). So the code treats -0.0 as an integer-zero and goes into the integer branch.
+- Inside that branch you do "value = int(x)" (losing the negative sign because int(-0.0) == 0) and then call self.add(str(value)) — which emits "0" (or "0" formatted by the rest of the branch) instead of the expected "-0.0".
+- The initial sign-handling check "if x < 0 and prev == '-':" also fails to detect the minus for -0.0 because -0.0 < 0 is False in Python. So you neither preserve the minus nor format as "-0.0".
+
+Where it occurs (lines / variables)
+- The branch decision happens at the "if x == int(x) ..." line (the integer-formatting branch).
+- The sign is lost at "value = int(x)".
+- The missing leading minus is due to "if x < 0 and prev == '-':" not treating -0.0 as negative.
+- The final addition that produces the wrong output is "self.add(str(value))" inside the integer branch.
+
+Why this is the problem
+- Floating -0.0 compares equal to 0.0, but it still has a sign bit; Python's float preserves sign for formatting (str(-0.0) -> "-0.0") but converting to int and treating equality x == int(x) discards that sign and makes you output the wrong string.
+
+Concrete fixes (exact steps and code changes)
+Option A — preserve negative-zero detection and avoid integer branch for -0.0
+1. Add a negative-zero test using math.copysign (detect sign bit):
+   - Replace the integer-branch condition with:
+     if x == int(x) and not math.isinf(x) and not math.isnan(x) and not (x == 0.0 and math.copysign(1.0, x) < 0):
+   - This prevents -0.0 from being treated as the integer case, so the else branch will run and self.add(str(x)) will produce "-0.0".
+
+Option B — detect sign before converting to int and preserve it
+1. Before "value = int(x)" record whether x is negative-zero or negative:
+   neg = (x < 0) or (x == 0.0 and math.copysign(1.0, x) < 0)
+2. After you compute value = int(x), when you produce the string use the recorded sign for zero:
+   if value == 0 and neg:
+       self.add("-0.0")    # or format exactly how you want the zero printed
+   else:
+       self.add(str(value))
+This keeps your integer-compression logic but ensures you don't lose the negative-zero sign.
+
+Which to pick
+- Option A is simplest and correct if you only need to ensure "-0.0" prints as such: it just keeps -0.0 out of the integer branch so Python's str(x) preserves the sign.
+- Option B is appropriate if you want to continue applying your integer-shortening logic to other integers but still must preserve the negative-zero semantics.
+
+Summary
+- The test fails because -0.0 satisfies x == int(x) and you convert it to int (0), discarding its negative sign. Also x < 0 is False for -0.0 so you don't detect the minus earlier. Fix by detecting negative zero with math.copysign(1.0, x) < 0 and either skip the integer branch for negative zero (recommended) or preserve the sign separately before int().

@@ -1,0 +1,64 @@
+What happened
+- The assertion failed because get_max_middle_index() returned 3 while the test expected 1. That means self._max_middle_index holds the wrong value (3) at the moment the test checks it.
+- The code shown at lines 449 and 451 only reads that variable:
+  - 449: def get_max_middle_index(self) -> int:
+  - 451:     return self._max_middle_index
+  So the bug is not in get_max_middle_index() itself; it’s where self._max_middle_index is set or mutated elsewhere.
+
+Why it happened (root cause)
+- Somewhere earlier you compute or update self._max_middle_index incorrectly. The most common concrete causes that produce a value of 3 instead of 1 are:
+  - Off-by-one: you used an inclusive end index instead of an exclusive end, or you used length/count where you should use index (for example using slice_end instead of slice_end - 1).
+  - Wrong variable used: you assigned a different variable (e.g. using total_slices or a different index variable) to self._max_middle_index by mistake.
+  - Incorrect aggregation: when combining multiple slices (union/merge) you took the maximum from the wrong set (e.g. took max of end positions instead of middle indexes), so self._max_middle_index becomes the max of a different value (3).
+- The concrete symptom (expected 1 but got 3) tells you the setter logic produced a value greater than intended. That means either the calculation that assigns self._max_middle_index is too large, or it’s being updated multiple times and a later update overwrote the intended value.
+
+Exactly where to look
+- Search for every assignment and update to _max_middle_index. For example run:
+  - grep -n "_max_middle_index" -n in the repository, or search in your editor for "self._max_middle_index".
+- Inspect the method(s) that perform slice union/merge or any method that computes middle indexes. Likely candidates:
+  - The method that builds the slice union results (the code path labeled [SLICE_UNION] in your output).
+  - Any initializer that sets _max_middle_index when the object is constructed.
+- Check the code that computes "middle index" values and any code that converts between inclusive/exclusive index conventions.
+
+Concrete diagnostic steps to run now
+1. Find every assignment:
+   - grep -n "self._max_middle_index" .
+   - Note the file paths and line numbers where it’s set, incremented, or reset.
+2. Reproduce the failing test and add temporary logging right before the assertion (or in get_max_middle_index):
+   - print("debug: _max_middle_index=", self._max_middle_index, "source_state=", <relevant variables>)
+3. In the method(s) that compute indexes, print the inputs used to compute the middle index (slice start, slice end, slice length).
+4. If you suspect off-by-one, add quick checks:
+   - assert computed_middle_index == expected_formula (e.g. (start + end) // 2 for inclusive middle, or start + length//2 if using length)
+5. Run the test and follow the prints to see which assignment produced 3.
+
+Concrete fixes (pick the one that matches what you find)
+- If you find off-by-one (using inclusive end where exclusive is intended):
+  - Change the computation from using end to end - 1 (or change how length is derived). Example correction:
+    - Wrong: self._max_middle_index = max(self._max_middle_index, slice_end)
+    - Right:  self._max_middle_index = max(self._max_middle_index, slice_end - 1)
+- If you assigned the wrong variable:
+  - Replace the assignment with the intended variable. Example:
+    - Wrong: self._max_middle_index = max(self._max_middle_index, slice_end_index)
+    - Right:  self._max_middle_index = max(self._max_middle_index, slice_middle_index)
+- If the value is overwritten later by a merge step:
+  - Ensure you compute the middle index once and propagate that, or update merges to recompute correct middle (use min/max only on the correct field).
+- Add defensive checks to catch this quickly:
+  - Add an assertion at the point of assignment, e.g.
+    - assert 0 <= new_max_middle_index < some_upper_bound, "new_max_middle_index out of expected range"
+  - Add a unit test that exercises the problematic union case and asserts the expected invariant for _max_middle_index.
+
+Minimal example change to add immediate protection (apply near where you assign _max_middle_index)
+- After computing candidate = <your formula>, add:
+  - assert isinstance(candidate, int)
+  - assert candidate >= 0
+  - assert candidate <= expected_max_allowed  # replace expected_max_allowed with your known upper bound
+  - self._max_middle_index = candidate
+
+What I would do next (ordered steps)
+1. grep for and open the methods that set self._max_middle_index.
+2. Add a quick print/trace right after every assignment to self._max_middle_index so you can see which assignment yields 3 and what its inputs were.
+3. Once located, check whether you used inclusive/exclusive bounds or the wrong variable. Correct the formula as shown above.
+4. Add an assertion at assignment to prevent a regression and a unit test for this case.
+5. Re-run the failing test to confirm it now gets 1.
+
+If you paste the function(s) where you set or update _max_middle_index (the code that does the union/merge), I will point to the exact line and give the specific one-line code change to fix it.

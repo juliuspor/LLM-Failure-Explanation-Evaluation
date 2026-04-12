@@ -1,0 +1,36 @@
+What happened
+- The test calls cc.add_number(-0.0) and then expects get_code() to return the string "-0.0".
+- The failure is caused in MockCodeConsumer.add (defined at line 126) which ultimately executes self.append(newcode) (line 138). That code appends the raw float -0.0 into whatever container append is targeting.
+- Later get_code() formats/joins the stored value(s) using a float-formatting path that converts negative zero to a non‑signed representation (e.g. "0.0" or "0"), so the leading minus is lost. In other words, add stored a float, but the later formatting does not preserve the negative-zero sign.
+
+Why this happens (root cause)
+- The add method is adding the numeric value itself (newcode is a float -0.0) rather than a string representation that preserves the sign. The code path that turns stored values into the final string uses float-formatting that does not preserve the negative zero sign. That loss of sign occurs before or inside get_code(), because the stored value is a numeric -0.0 and standard float formatting (the code’s formatter) produces "0.0"/"0" instead of "-0.0".
+- Concretely: at line 126 add(self, newcode) calls self.append(newcode) on line 138. That appends the raw float. get_code() later converts that float for output using a formatter that produces a non-signed representation.
+
+Where it happened
+- add method: MockCodeConsumer.add at line 126.
+- The append call: line 138 (self.append(newcode)) — this is where the float is stored unconverted.
+- get_code() (where stored entries are converted to the final string) is where the sign is lost when formatting the stored float.
+
+How to fix it (concrete steps)
+Pick one of these fixes, depending on intended design:
+
+1) Store a sign‑preserving string at add time
+   - Edit MockCodeConsumer.add (around line 126) so it converts newcode to a string that preserves the negative-zero sign before appending:
+     - Replace self.append(newcode) with self.append(repr(newcode))  (repr(-0.0) yields "-0.0")
+     - Or self.append(format(newcode, ".17g")) if you want specific numeric formatting that preserves sign (test locally to confirm).
+   - This guarantees get_code() will join/return "-0.0".
+
+2) Keep storing numeric values but change get_code()’s formatter
+   - Locate the code in get_code() that converts floats to text and change it to use repr() (or otherwise use a formatter that preserves negative zero) instead of the current format that strips the sign.
+   - Example change: when building the output, use repr(value) for floats instead of format(value, "g") or str(value).
+
+3) If append was supposed to target an internal list attribute
+   - If the intention was to append into an internal list like self._parts or self._code, change line 138 from self.append(newcode) to self._code.append(newcode) (or the correct attribute name). Then choose fix (1) or (2) above depending on whether you want to store strings or numbers.
+
+Which to choose
+- If MockCodeConsumer is meant to collect code fragments as strings, use fix (1): convert to string at add time with repr(newcode).
+- If it should accumulate numeric tokens and defer formatting, use fix (2): ensure get_code() uses repr() when rendering floats.
+
+Summary
+- Root cause: add (line 126) appends the raw float (-0.0) via self.append(newcode) (line 138), and the later formatting in get_code() does not preserve the negative-zero sign. Fix by storing a sign-preserving string (repr) on add, or by changing get_code() to use a sign-preserving formatter.

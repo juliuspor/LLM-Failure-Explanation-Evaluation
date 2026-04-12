@@ -1,0 +1,39 @@
+What happened (what failed)
+- The failure is an IndexError raised in code_point_at (the check at lines 35–36: "if index < 0 or index >= len(code_units): raise IndexError(...)").
+- That IndexError happens when translate_string calls code_point_at with index equal to len(code_units) (one past the last UTF‑16 code unit).
+
+Why it happened (root cause)
+- to_utf16_code_units(s) produces a list of UTF‑16 code units (variable name code_units).
+- code_point_at expects an index into that list and checks that index < len(code_units) (lines 35–36).
+- The translator loop that walks the string advances the index incorrectly when it encounters a surrogate pair (a high surrogate followed by a low surrogate). After processing a surrogate pair the loop logic advances the index too far, so the next call to code_point_at receives index == len(code_units) and triggers the check at line 36, raising IndexError.
+- In short: the code is mixing code‑unit indexing with loop increment logic for surrogate pairs and ends up passing an out‑of‑range index into code_point_at.
+
+Where in the code this happens
+- The failing check is in to_utf16_code_units / code_point_at at lines 35–36 (slice shows the IndexError being raised there).
+- The incorrect index advancement is in the caller that iterates over code_units / code points inside CsvEscaper.translate_string (the loop that reads code_point_at and then moves the index forward). That caller increments the index incorrectly when it sees a surrogate pair so that the next call uses index == len(code_units).
+
+How to fix it (concrete steps)
+1. Make the index progression explicit and correct:
+   - Use a while-loop over an index variable i (not a for-loop that also moves i), so you control exactly how much i advances after each character.
+   - When code_point_at returns a code point that came from a surrogate pair, advance i by 2 (to skip the two UTF‑16 code units); otherwise advance i by 1.
+   - Example pattern:
+     - i = 0
+     - while i < len(code_units):
+         cp = code_point_at(code_units, i)
+         if cp is from surrogate pair:
+             process cp
+             i += 2
+         else:
+             process cp
+             i += 1
+
+2. Alternatively, before calling code_point_at(index) ensure index < len(code_units). If you need to handle a partial/truncated surrogate at end, handle that case gracefully instead of letting code_point_at raise.
+
+3. (Optional) Add unit tests that assert translate_string on strings like "\U0001F630A" (your existing test) and confirm the loop index never equals len(code_units) when calling code_point_at.
+
+Why these steps fix it
+- They guarantee the index passed into code_point_at is always a valid position in code_units (satisfies the check at lines 35–36).
+- They stop double/incorrect increments over surrogate pairs so you don't call code_point_at with a position past the end.
+
+Summary (short)
+- The translator advances the index incorrectly when it encounters UTF‑16 surrogate pairs, so the next call to code_point_at uses index == len(code_units) and triggers the bounds check at lines 35–36. Fix by explicitly controlling index increments (advance by 1 for BMP code points, by 2 for surrogate pairs) or switch to a while-loop that updates i only once per iteration.

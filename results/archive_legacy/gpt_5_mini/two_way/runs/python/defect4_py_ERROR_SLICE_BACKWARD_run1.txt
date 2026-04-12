@@ -1,0 +1,48 @@
+What happened (root cause)
+- At line 340 the code checks whether self._min_start_index >= 0 and, if so, reads min_start from self.get_data_item(self._min_start_index) (lines 341–346) and compares start < min_start (line 346).
+- If start < min_start the code correctly sets self._min_start_index = index at line 347.
+- But then line 349 unconditionally does self._min_start_index = index, regardless of the comparison result. That overwrites the previously-computed minimum start index even when start >= min_start.
+- Because of that unconditional assignment (line 349) the value of self._min_start_index becomes the current index instead of remaining the index of the true minimum start. The test expected max_middle_index (which depends on _min_start_index) to be 1, but the code set it to 3.
+
+Where this occurs (specific lines)
+- start is computed at lines 331–335 (two code paths depending on SimpleTimePeriod) and again at 340–346 min_start is computed when _min_start_index >= 0.
+- The incorrect unconditional overwrite is at line 349: self._min_start_index = index.
+- The relevant initialization is at line 253 where self._min_start_index = -1.
+
+Why that causes the test failure
+- The logic intends to keep _min_start_index pointing to the data item with the smallest start time seen so far. With the unconditional assignment at line 349, _min_start_index ends up pointing to the most recently-seen index instead of the smallest-start index. That produces the wrong max_middle_index (3 instead of expected 1).
+
+How to fix it (exact steps)
+1. Remove or re-indent the unconditional assignment at line 349 so it executes only in the correct case. Two correct fixes depending on intended logic:
+
+   Option A — If the unconditional assignment was meant to be the else branch for when _min_start_index was negative, change the structure to:
+
+   - Replace the block starting at line 340 with:
+     if self._min_start_index >= 0:
+         min_start_period = self.get_data_item(self._min_start_index).get_period()
+         if isinstance(min_start_period, SimpleTimePeriod):
+             min_start = min_start_period.get_start_millis()
+         else:
+             min_start = int(min_start_period.get_start().timestamp() * 1000)
+         if start < min_start:
+             self._min_start_index = index
+     else:
+         # first seen item becomes the min
+         self._min_start_index = index
+
+   Option B — If the unconditional assignment was accidental (most likely), simply remove line 349. Keep only the assignment inside the if start < min_start branch and set _min_start_index in the case where _min_start_index was -1 (first item). For example:
+     if self._min_start_index >= 0:
+         ...  # compute min_start
+         if start < min_start:
+             self._min_start_index = index
+     else:
+         self._min_start_index = index
+
+2. Add unit tests covering:
+   - adding multiple items with different start times where the minimum occurs before, after, and in the middle of additions to assert _min_start_index does not change incorrectly.
+   - the SimpleTimePeriod and other-period code paths (the code has two start extraction methods at lines 331–335 and 344–345).
+
+3. (Optional) Add logging or an assertion after updating _min_start_index to make unintended overwrites visible during development.
+
+Summary
+The bug is a stray unconditional assignment at line 349 that overwrites the correct minimum-start index. Fix it by making that assignment conditional (move it into the else branch for the first item) or removing it if accidental, and add tests to prevent regression.

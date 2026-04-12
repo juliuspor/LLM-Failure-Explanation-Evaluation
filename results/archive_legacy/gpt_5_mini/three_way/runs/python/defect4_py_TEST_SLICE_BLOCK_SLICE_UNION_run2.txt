@@ -1,0 +1,54 @@
+What happened (root cause)
+- The failure is in TimePeriodValues._update_bounds when it updates the "max middle" tracking.
+- Inside _update_bounds the code computes the current period's middle time into a variable named middle (or mid). When it compares that value to the saved maximum it uses the wrong variable for the comparison — it compares middle to the index variable instead of to the saved numeric maximum.
+- Concretely, instead of doing
+    if middle > max_middle:
+it does something like
+    if middle > max_middle_index:
+or
+    if middle > index
+which compares a timestamp (milliseconds) to an index (an integer position). That makes the condition true for the wrong rows and so self._max_middle_index gets set to the wrong index (for your test it ends up 3 instead of 1).
+
+Where it occurs
+- The bug is in TimePeriodValues._update_bounds. The failing behavior you see in test_max_middle_index_simple (expected get_max_middle_index() == 1 but got 3) is a direct symptom.
+- Look for the block that:
+  - computes middle (midpoint of period start and end),
+  - fetches the current saved max middle (e.g. max_middle or max_middle_value) using self._max_middle_index,
+  - then compares the newly computed middle with that saved max,
+  - and assigns self._max_middle_index = index when a new max is found.
+- One of those comparison lines uses the index variable (self._max_middle_index or index) instead of the saved numeric value (max_middle). That wrong variable name causes the faulty behavior.
+
+Why that causes the wrong index
+- Example: suppose existing max_middle is 150 and its index is 1. The code incorrectly compares middle (e.g. 75) to max_middle_index (1). 75 > 1 is true, so it treats the 75 value as a new maximum and sets _max_middle_index to that record's index (e.g. 3). That exactly matches the failing output you saw (returned index 3 instead of 1).
+
+Exact things to change (clear, actionable steps)
+1. Open TimePeriodValues._update_bounds.
+2. Find the "max middle" comparison/assignment code. It will look roughly like:
+   - compute middle (middle = (start + end) // 2 or similar)
+   - if self._max_middle_index >= 0:
+         max_middle_period = self.get_data_item(self._max_middle_index).get_period()
+         max_middle = ...   # numeric millis of the current saved max middle
+         if middle > self._max_middle_index:    <-- WRONG
+             self._max_middle_index = index
+     else:
+         self._max_middle_index = index
+3. Replace the wrong comparison with a comparison against the numeric max_middle:
+   - Change:
+         if middle > self._max_middle_index:
+     - To:
+         if middle > max_middle:
+4. Verify assignments ensure the numeric variable names are consistent:
+   - When a new maximum is found you must set self._max_middle_index = index (index is the loop position).
+   - Do not overwrite max_middle with an index value; max_middle should remain a numeric timestamp when used for comparisons.
+5. Run the existing unit tests (the provided suite). The failing assertions should pass:
+   - get_max_middle_index() should return 1 for test_max_middle_index_simple.
+   - The other min/max tests should remain correct.
+
+Why this fix works
+- The comparison will then be numeric vs numeric (millis vs millis), so the true maximum middle will be chosen.
+- The index variable remains an index; you only update the stored index when the numeric comparison indicates a new max.
+
+Extra check
+- While you’re in _update_bounds, also confirm the min_middle, min_start, max_start, min_end, max_end branches all compare numeric times to numeric times and never compare against an index variable by mistake. The same pattern of bug could appear if a copy-paste error existed for other bounds; your tests already cover many of those, but it’s good to scan.
+
+If you want, paste the _update_bounds implementation here and I will point to the exact line to change.

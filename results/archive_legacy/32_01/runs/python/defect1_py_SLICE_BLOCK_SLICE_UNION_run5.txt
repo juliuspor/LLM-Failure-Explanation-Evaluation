@@ -1,0 +1,38 @@
+What failed
+- The code raises ValueError at lines 400–401 because the variable minutes_offset is being validated as if it were "minutes within an hour" (must be 0–59), but later in the same method minutes_offset is reused to mean "total minutes" (hours * 60 ± minutes) at lines 406 and 408. The early validation and the later reuse are inconsistent and lead to wrong behavior or unexpected exceptions.
+
+Where it happens (exact places)
+- The check that throws is here:
+  - line 400–401: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later the same variable is reassigned to represent total minutes:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- The method then multiplies minutes_offset by MILLIS_PER_MINUTE and continues (line 409 and onward), eventually calling cls.for_offset_millis(offset).
+
+Why it fails (root cause, plain language)
+- The code treats minutes_offset as two different things at different times:
+  1. At lines 400–401 it expects minutes_offset to be the minute component of a clock offset (0–59).
+  2. After line 406/408 it overwrites minutes_offset with a combined "total minutes" value (hours*60 ± minutes), which can be outside 0–59.
+- If the caller actually passed a value that is already "total minutes" (or if sign handling requires converting minutes into a negative total), the early range check will incorrectly reject valid inputs or throw when minutes_offset is later intentionally larger/smaller.
+- Reusing the same variable name and validating it against a range that only applies to the minute component is the direct cause of the exception and makes the code fragile and confusing.
+
+Concrete example
+- Suppose the API user expects to pass (hours=2, minutes=30) as a total-minute representation or the method internally needs to build a signed total. The code checks minutes_offset against 0–59 (good for a minute component), but then turns it into total minutes by doing hours_in_minutes ± minutes_offset. That reuse makes the earlier check meaningless and can cause ValueError to be thrown even though the combined offset is valid.
+
+How to fix it (clear steps)
+1. Keep the two concepts separate: "minute component" and "total minutes".
+   - Rename the variable holding the minute component to minute_component (or minute_of_hour).
+   - Compute total_minutes in a separate variable, e.g. total_minutes = hours_in_minutes ± minute_component.
+2. Validate only the minute component against 0–59:
+   - if minute_component < 0 or minute_component > 59: raise ValueError(...)
+3. After computing total_minutes, validate the combined offset against the allowed total range (if such a check belongs here), then convert to milliseconds and call cls.for_offset_millis.
+4. Ensure sign handling is explicit when hours are negative (subtract minute_component when hour is negative).
+5. Replace any reuse of minutes_offset for different meanings with distinct names to avoid accidental re-checks and confusion.
+
+What to change in code (minimum edits)
+- At lines 400–401: use a different variable name for the incoming minute field (minute_component) and validate that.
+- At lines 406/408: write total_minutes = hours_in_minutes - minute_component (or + minute_component).
+- Use total_minutes for the multiply at line 409 and the rest of the computation.
+- Do not revalidate total_minutes with the 0–59 rule.
+
+This fixes the bug because the minute-of-hour constraint is applied only to the minute component, and the combination into total minutes is done and validated separately, avoiding the mismatched meaning that caused the ValueError.

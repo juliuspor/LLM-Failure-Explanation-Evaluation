@@ -1,0 +1,67 @@
+What happened (where): At line 176 your code calls
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+This fails because the variable x is not a single Python number (a scalar) at that moment — it is an array-like or another non-scalar object (for example a numpy.ndarray or a pandas.Series). The failure happens on the int(x) conversion. Python raises a TypeError like:
+  TypeError: only size-1 arrays can be converted to Python scalars
+or a similar message, and math.isinf(x)/math.isnan(x) also fail or behave unexpectedly when x is not a float.
+
+Why it fails (root cause): 
+- int(x) requires x to be a single numeric value (an object that implements __int__ returning an int). If x is a numpy array, pandas Series, list, or other collection, int(x) is not defined and Python raises an error. 
+- Likewise math.isinf(x) and math.isnan(x) expect real-number scalars (floats or ints). Passing an array-like causes TypeError or returns element-wise arrays you did not expect.
+- The code assumes x is a scalar but upstream code passed a vector/sequence instead.
+
+How to confirm (exact steps you can run at or before line 176):
+1. Add diagnostic logging just before line 176:
+   print("DEBUG: at line 176, type(x)=", type(x), "repr(x)=", repr(x))
+   This will show whether x is a numpy.ndarray, pandas.Series, list, Decimal, etc.
+2. Reproduce the failing input and inspect the traceback to confirm the TypeError message references int(x) or math.isinf.
+
+Concrete fixes (pick one based on intent) — include exact code snippets and where to change:
+
+A. If you intended to handle a scalar only: enforce or check scalar before the line
+   Replace the line with:
+     if not isinstance(x, (int, float)):
+         raise TypeError(f"expected scalar int/float at line 176, got {type(x).__name__}")
+     if x == int(x) and not math.isinf(x) and not math.isnan(x):
+         ...
+   This stops the error and makes the precondition explicit.
+
+B. If x can be a numpy array and you want elementwise behavior:
+   - import numpy as np
+   - replace the single-line check by numpy-safe operations:
+       mask = np.isfinite(x) & (x == np.floor(x))
+     mask will be a boolean array marking elements that are finite integers.
+   - Then use mask to index or process elements:
+       integers = x[mask]
+
+C. If x can be a pandas Series and you want elementwise behavior:
+   - Use pandas methods:
+       mask = x.notna() & np.isfinite(x) & (x == x.astype(int))
+     or better:
+       mask = x.dropna().apply(lambda v: v == int(v))
+     (But the numpy approach with Series.to_numpy() is faster:
+       arr = x.to_numpy()
+       mask = np.isfinite(arr) & (arr == np.floor(arr))
+     )
+
+D. If x could be a Decimal or Fraction and you want to allow those:
+   - Don't call math.isinf/isnan (they only accept floats). Use Decimal.is_nan(), Decimal.is_infinite(), or explicitly convert to float only after checking range and precision:
+       from decimal import Decimal
+       if isinstance(x, Decimal):
+           if x == x.to_integral_value() and not x.is_infinite() and not x.is_nan():
+               ...
+   - Or coerce to float after validating it is safe:
+       xf = float(x)
+       if xf == int(xf) and not math.isinf(xf) and not math.isnan(xf):
+
+Which to choose:
+- If upstream should only pass scalars, use A and fix the caller.
+- If you intentionally want to accept arrays/Series and test elementwise, use B or C.
+- If you need to support Decimal/Fraction, handle those types explicitly (D).
+
+Summary of steps to fix now:
+1. Add the debug print at line 176 to confirm x's runtime type.
+2. Decide intended input (scalar vs array-like).
+3. Apply the matching fix from A/B/C/D above.
+4. Add a unit test covering the failing input (e.g., pass a numpy array and confirm behavior) so the error does not recur.
+
+This explains exactly what failed (int(x) on a non-scalar at line 176), why it failed (int and math.* expect scalars), and gives concrete replacement code for each intended behavior.

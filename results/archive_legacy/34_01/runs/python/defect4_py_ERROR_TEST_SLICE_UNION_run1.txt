@@ -1,0 +1,65 @@
+What happened (root cause, short)
+- get_max_middle_index() simply returns the stored attribute self._max_middle_index (lines 449–451).
+- That attribute is maintained in the add(...) code when you append items, but the add logic assumes items are appended in chronological order.
+- In the failing test you add two periods, then add two earlier periods (out of chronological order). The add method increments/sets _max_middle_index as if every add is an append at the end, so after four adds _max_middle_index is 3. The test expects 1 for the effective ordering/merging logic, so the assertion fails.
+
+Why it failed (exact variables / methods / place)
+- Method: get_max_middle_index() (slice shown) just returns self._max_middle_index.
+- Variable: self._max_middle_index is updated when new entries are added (inside add(...)), but that update uses the insertion/append behavior incorrectly.
+- Operation that goes wrong: adding SimpleTimePeriod(0, 50) and SimpleTimePeriod(50, 100) after already adding (0,100) and (100,200) inserts items at indices 2 and 3 while the code treats them as if they were appended in chronological sequence. The stored _max_middle_index ends up equal to the last insertion index (3), not the logical "max middle index" the test expects (1).
+
+Concrete reproduction (your test)
+- After these operations:
+  1) add (0,100) -> index 0
+  2) add (100,200) -> index 1
+  3) add (0,50) -> index 2 (out-of-order relative to start time)
+  4) add (50,100) -> index 3 (out-of-order)
+- add(...) does not recompute/adjust _max_middle_index for these out-of-order inserts; it leaves _max_middle_index == 3. get_max_middle_index() therefore returns 3 and the assert fails.
+
+Two clear ways to fix it (pick one)
+
+Option A — enforce ordered inserts (simple)
+- If your class expects time periods added in non-decreasing start-time order, validate and raise early:
+  1) In add(...), before inserting, check the new period's start against the last stored period start/end (e.g. if self._items and new.start < self._items[-1][0].start: raise ValueError("TimePeriodValues.add requires non-decreasing start times")).
+  2) This prevents out-of-order inserts and keeps the existing _max_middle_index logic correct.
+
+Option B — make add(...) robust (recommended)
+- Recompute _max_middle_index after any insertion so out-of-order adds produce the same logical result as ordered adds.
+- Steps:
+  1) When you insert or append, capture the insertion index (call it idx).
+  2) Replace the naive update of self._max_middle_index with a recomputation that derives the correct value from self._items, e.g. add a private method _recompute_max_middle_index().
+  3) Call self._recompute_max_middle_index() at the end of add(...).
+
+Example pattern for _recompute_max_middle_index (implementation sketch)
+- Add to your class:
+  def _recompute_max_middle_index(self):
+      # Walk the stored intervals in their logical order (sort by start if needed),
+      # apply whatever "middle index" rule your class uses and set the attribute.
+      # Concrete steps depend on your intended semantics; simplest general approach:
+      items = sorted(self._items, key=lambda it: it[0].start)
+      m = -1
+      for i, (period, value) in enumerate(items):
+          # apply the same decision logic that determined _max_middle_index originally,
+          # e.g. detection of "middle" boundaries, overlaps, or sequence breaks
+          if <period qualifies as a "middle" for your algorithm>:
+              m = max(m, i)
+      self._max_middle_index = m
+
+- If you don't want to sort, use the actual insertion index to update correctly:
+  - If current logic only ever increases _max_middle_index, make the update use the insertion index:
+      self._max_middle_index = max(self._max_middle_index, insertion_index)
+  - But beware: if later logic requires the "max" computed from the logical order rather than raw insertion order, you must recompute from the logical order (the sorted approach).
+
+What to change, exactly (line-level guidance)
+- Find the code in add(...) that currently modifies self._max_middle_index (the line that sets or increments it).
+- Replace that single-line update with a call to a new helper:
+    # old: self._max_middle_index = len(self._items) - 1   (or similar)
+    # new:
+    insertion_index = <the index where you inserted the new item>
+    self._recompute_max_middle_index()   # or at least:
+    # self._max_middle_index = max(self._max_middle_index, insertion_index)
+- Ensure get_max_middle_index() (lines 449–451) continues to return self._max_middle_index after you maintain it correctly.
+
+Summary
+- Root cause: _max_middle_index is maintained based on insertion order, not the logical/chronological order the class expects. Out-of-order adds leave _max_middle_index incorrect (3).
+- Fix by: (A) enforcing ordered inserts, or (B) recomputing/updating _max_middle_index correctly after each add (recommended).

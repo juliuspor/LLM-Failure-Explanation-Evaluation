@@ -1,0 +1,62 @@
+What happened (symptom)
+- The test created s and called s.add(...) four times in this order:
+  1. SimpleTimePeriod(0,100)
+  2. SimpleTimePeriod(100,200)
+  3. SimpleTimePeriod(0,50)
+  4. SimpleTimePeriod(50,100)
+- It then asserted s.get_max_middle_index() == 1, but the method returned 3 (AssertionError: Expected max_middle_index=1, got 3).
+
+Root cause (exact and concrete)
+- get_max_middle_index assumes the internal list of periods is in chronological order (sorted by period.start). It finds the “max middle index” by scanning the list and returning the matching index as if the list order equals chronological order.
+- TimePeriodValues.add, as used here, appends new entries to the end of the internal storage (so the third and fourth periods with starts 0 and 50 were appended after the periods with starts 0 and 100). Because add does not maintain chronological ordering, the index values returned by get_max_middle_index no longer match the chronological positions the method expects.
+- In this test, that mismatch causes get_max_middle_index to pick index 3 (the last element appended) instead of index 1 (the chronological interval the test expects). In short: add mutates the list order; get_max_middle_index relies on a different order — they disagree.
+
+Where it occurs (methods/variables)
+- Method: TimePeriodValues.add(...) — this is where the list is mutated/ordered.
+- Method: TimePeriodValues.get_max_middle_index(...) — this is where the order is assumed and the wrong index is returned.
+- The test variable s holds the TimePeriodValues instance; the failing assertion compares get_max_middle_index() to 1.
+- The error message names max_middle_index and the returned value 3, showing the index mismatch.
+
+Why the current behavior is wrong
+- Either add must guarantee the internal list is kept in the order get_max_middle_index expects, or get_max_middle_index must not rely on insertion order. Right now neither is true, so index-based results are unreliable when add is called with out-of-order periods.
+
+Concrete fixes (step-by-step)
+Choose one of these two fixes depending on intended semantics:
+
+A) Keep the internal list sorted at insertion time (recommended if other code expects chronological order)
+1. In TimePeriodValues.add(SimpleTimePeriod p, double v):
+   - Compute insertion position by comparing p.getStart() (and break ties with p.getEnd() if needed).
+   - Insert the new (period, value) pair at that position instead of appending.
+   - Example approach:
+     - Use binary search on the internal list keyed by period.getStart() to find the correct index.
+     - Call list.add(index, newEntry).
+2. After this change, existing code that depends on chronological order (including get_max_middle_index) will see a consistent order and the test will pass.
+
+B) Make get_max_middle_index order-insensitive (if insertion order must be preserved)
+1. Change get_max_middle_index() to compute the desired index independent of insertion order:
+   - Iterate over all stored entries, compute the metric you need (e.g., the period middle or the stored value at that middle), track the entry that gives the maximum metric, and return its actual index in the internal list (not some assumed chronological index).
+   - That sounds like what get_max_middle_index already does, but the bug is the assumption about which index is “correct” for test expectations. If test expects the chronological index, prefer option A.
+2. Make the method comment explicit about what index it returns (chronological vs insertion order) so callers aren’t surprised.
+
+Minimal code hints (pseudocode)
+- For insertion-sorting add():
+  idx = Collections.binarySearch(list, p, comparatorByStartThenEnd)
+  if idx < 0: idx = -(idx + 1)
+  list.add(idx, newEntry)
+
+- For defensive get_max_middle_index():
+  double bestMetric = -INF
+  int bestIndex = -1
+  for (int i = 0; i < list.size(); i++) {
+    metric = computeMetric(list.get(i))   // middle or whatever is intended
+    if (metric > bestMetric) { bestMetric = metric; bestIndex = i; }
+  }
+  return bestIndex
+
+How to verify after the fix
+- Run the given test: it should now return 1.
+- Add tests that insert in different orders (chronological, reverse, shuffled) and assert get_max_middle_index behaves consistently with your intended semantics.
+- If you chose option A, add a unit test that checks the internal order after several adds (e.g., assert list.get(0).getStart() <= list.get(1).getStart() ...).
+
+Summary
+- The failure is caused by a mismatch between add (which appends out-of-order periods) and get_max_middle_index (which assumes chronological order). Fix by either keeping the internal list sorted on insert or by making get_max_middle_index explicitly compute the correct index regardless of insertion order.

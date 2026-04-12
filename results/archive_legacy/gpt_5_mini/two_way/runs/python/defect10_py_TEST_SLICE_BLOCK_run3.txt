@@ -1,0 +1,57 @@
+What happened
+- The test fails because code in hit10_numberutils.py raises an IndexError from the index bounds check at lines 30–31:
+  ```
+  30 |     if index < 0 or index >= len(s):
+  31 |         raise IndexError(f"String index out of range: {index}")
+  ```
+- That IndexError is bubbling up into the unit test (TestNumberUtilsCreateNumber.test_create_number_numeric_string and the bad-input subtests). The tests expect either a successful parse (for "123") or a ValueError for invalid numeric inputs; they do not expect IndexError.
+
+Why it happened (root cause)
+- The parser calls into a function that checks a character position using the variable index. The check forces index to be strictly less than len(s) (index >= len(s) triggers an exception).
+- One or more code paths pass an index equal to len(s) (for example, when scanning past the last character while looking for a suffix or when handling an empty remainder). When that happens, the check raises IndexError instead of handling end-of-string as a normal non-number condition or raising a ValueError.
+- In short: the code treats an out-of-range parsing position as a Python IndexError rather than handling end-of-string as a parsing failure (ValueError) or preventing the out-of-range access before it happens.
+
+Where exactly it occurs
+- File: hit10_numberutils.py
+- Lines: 30–31 (the bounds check and raise)
+- Variables involved: index and s (the input string)
+- Effect: IndexError(f"String index out of range: {index}") is raised for inputs that the parser should either accept ("123") or treat as invalid (the bad_inputs list), causing the tests to fail.
+
+How to fix it (concrete steps)
+1. Decide intended behavior for end-of-string:
+   - If index == len(s) is a valid state for the parser (e.g., one routine uses index == len(s) to indicate "we reached the end"), then the check should allow index == len(s) instead of raising. Change the condition to:
+     ```
+     if index < 0 or index > len(s):
+         raise IndexError(...)
+     ```
+     or better, avoid using IndexError at all (see step 3).
+   - If index >= len(s) is always an error in your parsing logic, then the callers must ensure they never call with index == len(s). Add guard checks in the caller before calling the function that indexes into s.
+
+2. Prefer raising the correct exception for parsing problems:
+   - The test suite expects ValueError for bad numeric input. Replace the IndexError with ValueError (or translate IndexError to ValueError at the call site). Example:
+     ```
+     if index < 0 or index >= len(s):
+         raise ValueError(f"String index out of range while parsing number: {index}")
+     ```
+   - That gives the test the right exception class and more meaningful error context.
+
+3. Add safe-guards before accessing s[index]:
+   - Wherever the code reads s[index] (or slices with index), check that index < len(s) first:
+     ```
+     if index >= len(s):
+         # handle end-of-string: treat as end of token / parsing complete / invalid input
+     ch = s[index]
+     ```
+   - This prevents unexpected IndexError from being raised by Python string indexing.
+
+4. Add unit tests for edge cases:
+   - Test empty string, single-character strings, and strings where parsing logic might consume exactly the last character and then check the next position. That will verify the fix.
+
+Minimal change suggestion
+- If you want the quickest fix consistent with the existing tests: change the raise at lines 30–31 to raise ValueError instead of IndexError, and ensure the code that calls this routine does not rely on IndexError specifically.
+
+Why this will fix the tests
+- Replacing IndexError with ValueError or preventing out-of-range access makes the function either:
+  - successfully parse "123" (no exception), or
+  - raise ValueError for the bad inputs (matching the test expectations).
+- The current IndexError leaks an internal indexing issue to the test and is not the semantically correct exception for parse failures.

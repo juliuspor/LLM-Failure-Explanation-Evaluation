@@ -1,0 +1,72 @@
+What went wrong (short):
+
+- The code reuses the parameter minutes_offset to hold the total minutes (hours converted to minutes ± minutes). That reuse and the sign handling are incorrect, so for some sign combinations the calculation becomes wrong (wrong sign or wrong magnitude). The broken lines are 402–405:
+
+  - Line 402 (hours_in_minutes < 0 branch):
+    minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404 (else branch):
+    minutes_offset = hours_in_minutes + minutes_offset
+  - Line 405:
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+What actually happens (concrete example):
+
+- Example 1: hours_offset = -2, minutes_offset = -15 (allowed by doc: (-2,-15) -> -02:15)
+  - hours_in_minutes = -120
+  - Code does: minutes_offset = -120 - (-15) => -105
+  - total minutes should be -135, but the code produces -105 (wrong: -01:45 instead of -02:15).
+  - This is because the code subtracts the minutes parameter even when it already carries a negative sign.
+
+- Example 2: hours_offset = 2, minutes_offset = -15 (per doc should be invalid)
+  - The code does not explicitly reject this case, so it proceeds and computes 120 + (-15) => 105 => +01:45, silently producing a wrong/undocumented result instead of raising ValueError.
+
+Why that happens (root cause):
+
+- The code treats minutes_offset inconsistently: sometimes as a signed minute-offset parameter and sometimes as the total minutes value. The branches assume the minutes parameter is always positive magnitude when hours are positive/negative, but the function's doc shows negative minutes are valid for some combinations. There is no check enforcing the allowed sign combinations (for example, positive hours with negative minutes must be rejected), so the arithmetic is applied to the raw signed minutes parameter producing incorrect totals.
+- Overwriting minutes_offset is confusing and error-prone. The wrong arithmetic occurs at lines 402–404 where sign logic is wrong for negative minutes and mixed-sign inputs.
+
+Where to fix (specific lines and steps):
+
+1. Add explicit validation for illegal sign combinations before computing totals:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (per doc).
+2. Compute a separate total_minutes variable instead of reusing minutes_offset:
+   - hours_in_minutes = hours_offset * 60
+   - If hours_offset < 0:
+       total_minutes = hours_in_minutes - abs(minutes_offset)
+     else:
+       total_minutes = hours_in_minutes + abs(minutes_offset)
+   - (Special-case hours_offset == 0: total_minutes should be minutes_offset as-is, including negative minutes.)
+3. Use total_minutes in the multiply:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+4. Keep the early return for (0,0) if desired, but ensure zero-hour mixed-sign cases are handled as doc says (zero + negative allowed -> negative offset).
+
+Minimal corrected logic sketch (pseudocode for exact replacement around lines 400–406):
+
+    if hours_offset == 0 and minutes_offset == 0:
+        return cls.UTC
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError(...)
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(...)
+    # disallow positive hours with negative minutes per doc
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours is positive")
+    try:
+        hours_in_minutes = hours_offset * 60
+        if hours_offset < 0:
+            total_minutes = hours_in_minutes - abs(minutes_offset)
+        else:
+            total_minutes = hours_in_minutes + abs(minutes_offset)
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+    return cls.for_offset_millis(offset)
+
+Why this fixes it:
+
+- It keeps parameter semantics separate from computed totals, so you can't accidentally subtract a negative minute value.
+- It enforces the documented sign rules so invalid combinations are rejected instead of producing wrong results.
+- It produces the correct total minute values for all documented combinations, e.g. (-2,-15) => -120 - 15 = -135, (2,15) => 120 + 15 = 135, (0,-15) => hours_offset == 0 branch should let you treat minutes_offset as -15 (handle zero-hour as special case if needed).
+
+That pinpoints the root cause (reusing minutes_offset + incorrect sign logic at lines 402–405) and gives exact steps and code to fix it.

@@ -1,0 +1,52 @@
+What failed
+- Root cause: the minutes range check rejects negative minutes. At lines 396–397 the code does:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  That condition treats any negative minutes as out of range. Several tests (e.g. test_negative_hours_negative_minutes, test_zero_hours_negative_minutes, test_mixed_signs_invalid) call DateTimeZone.for_offset_hours_minutes with negative minutes like -15, expecting those to be accepted (or handled specially). The call therefore raises a ValueError immediately at that check and the tests fail.
+
+Where it happens
+- Method: DateTimeZone.for_offset_hours_minutes
+- Lines: 396–397 (the minutes bounds check)
+- Variable: minutes_offset is the one being validated and is incorrectly rejected when negative.
+
+Why that check is incorrect
+- The intended minute range is -59 .. +59, not 0 .. 59. The current code enforces 0 .. 59.
+- Later code (lines ~402–405) already contains logic to combine hours and minutes (including handling when hours or minutes are negative), so the initial rejection of negative minutes prevents that logic from ever running for negative minute inputs.
+
+Concrete fix (step-by-step)
+1. Accept negative minutes in the allowed range. Change the check to:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce mixed-sign rules described in tests/doc:
+   - If hours > 0 and minutes < 0: raise ValueError (test expects this).
+   - If hours < 0 and minutes > 0: treat the minutes as negative when forming the total offset (the doc/test expect (-2, 15) -> -02:15).
+   - If hours == 0: sign of minutes determines sign (0, -15) -> -00:15, (0, 15) -> +00:15.
+
+3. Compute total offset in minutes and then convert to millis:
+   total_minutes = hours * 60 + minutes  # after applying the sign rule above
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   return cls.for_offset_millis(offset)
+
+Example patch (minimal, shows exact changes around the failing lines)
+- Replace:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  With:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Then, after any existing normalization, add checks such as:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes is not allowed")
+    if hours_offset < 0 and minutes_offset > 0:
+        minutes_offset = -minutes_offset
+
+- Finally compute offset using (hours_offset * 60 + minutes_offset) * MILLIS_PER_MINUTE.
+
+Why this fixes the tests
+- Negative minutes are no longer rejected at lines 396–397, allowing the later logic to run.
+- Handling the mixed-sign cases per the tests/docstring ensures cases like (-2, 15) and (-2, -15) both become -02:15, (2, -15) raises ValueError, and (0, -15) yields -00:15.
+
+If you want, I can produce a ready-to-drop-in patch showing exact line numbers and the small block to insert.

@@ -1,0 +1,25 @@
+The code fails because it returns 'high' even when 'high' is a high surrogate (0xD800–0xDBFF) but the following code unit is out of range or missing, causing an invalid Unicode scalar to be treated as a complete code point. Specifically:
+
+- What happened (where): At line 39 the code checks if 'high' is a high surrogate and that index+1 < len(code_units). If the condition is true, it reads 'low' at line 40 and checks at line 41 whether 'low' is a low surrogate (0xDC00–0xDFFF). If 'low' is a valid low surrogate, the function returns the combined code point at line 43 using the surrogate-pair formula. Otherwise, execution falls through to line 44 and returns 'high' unchanged.
+
+- Why it failed (root cause): Returning 'high' at line 44 is incorrect when 'high' is a high surrogate but not followed by a valid low surrogate. A high surrogate alone does not represent a valid Unicode scalar value. By returning the surrogate code unit value (e.g., 0xD800–0xDBFF) the caller receives an invalid/isolated surrogate instead of signaling an error or handling replacement. This can cause invalid Unicode code points, downstream encoding errors, or security bugs.
+
+- Where exactly: The incorrect behavior occurs when the condition at line 39 is true for 'high' being a high surrogate but the inner condition at line 41 fails (the next unit is missing or not a low surrogate). The fall-through return on line 44 returns the invalid 'high' value.
+
+- How to fix (concrete steps):
+ 1) Decide on desired handling for an isolated high surrogate: either return a replacement code point (U+FFFD), raise/propagate an exception, or treat it as the numeric code unit but documented as invalid.  
+ 2) Modify the code so that when a high surrogate is not followed by a valid low surrogate it does not return 'high' unchanged. For example, after the inner 'if 0xDC00 <= low <= 0xDFFF:' add an 'else:' branch that returns 0xFFFD or raises an error.  
+ 3) If index+1 >= len(code_units) (i.e., missing low surrogate), ensure the initial check at line 39 does not silently accept the high surrogate: either change the condition to require a valid low surrogate before treating as a pair, or handle the missing low surrogate case similarly.
+
+- Example code change (concept):
+ 39 |     if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+ 40 |         low = code_units[index + 1]
+ 41 |         if 0xDC00 <= low <= 0xDFFF:
+ 43 |             return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+ 42 |         else:
+ 44 |             return 0xFFFD  # replacement for an unpaired high surrogate
+ 45 |     if 0xDC00 <= high <= 0xDFFF:
+ 46 |         return 0xFFFD  # unpaired low surrogate
+ 47 |     return high
+
+This ensures isolated surrogates are handled explicitly instead of returning invalid code units.

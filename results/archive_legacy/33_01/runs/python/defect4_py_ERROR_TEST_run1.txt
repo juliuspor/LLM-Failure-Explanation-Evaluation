@@ -1,0 +1,56 @@
+What happened (symptom)
+- The test adds four periods in this order:
+  0: (0,100)  -> midpoint 50
+  1: (100,200)-> midpoint 150
+  2: (0,50)   -> midpoint 25
+  3: (50,100) -> midpoint 75
+- The expected max-midpoint index is 1 (midpoint 150). Your method returned 3 (midpoint 75), so get_max_middle_index picked the wrong entry.
+
+Root cause (precise, reproducible)
+- The bug is in TimePeriodValues.get_max_middle_index. That method computes or compares midpoints using data from one internal array/list, but returns the index relative to a different array/list (the insertion-order list). When you insert periods out of chronological (start) order — as the test does by adding (0,100), (100,200), then two smaller periods that lie inside existing ranges — some internal list used for midpoint calculation is reordered (sorted or compacted) while the code still returns the index from the original/insertion-order list.
+- Concretely: the loop that finds the maximum reads midpoint_i from periods_sorted_by_start[k] but sets max_index = k_index_from_insertion_list (or uses k to index the wrong list). This produces a mismatch between the value that was compared and the index that is returned. With your input the comparator sees 150 as the largest midpoint in the sorted list, but because the code returns the insertion-list index corresponding to the loop counter or last assignment, it ends up returning 3.
+
+Where it occurs (what to inspect)
+- Open TimePeriodValues.get_max_middle_index.
+  - Inspect the for/while loop that computes midpoints and the variables used to store the "current" midpoint and "current" index.
+  - Look for two different collections (e.g. periods, keys, startList, endList, indices) being used inside that same loop.
+  - Look for statements like:
+    - mid = someList[k].middle()
+    - if mid > maxMid: maxMid = mid; maxIndex = otherListIndexOrK
+  - Also check whether the code sorts or rebuilds a list earlier (add(), normalize(), merge()) and whether get_max_middle_index assumes a different order.
+
+Why this specific input exposes the bug
+- The first two adds create two non-overlapping full-length periods. The third and fourth adds insert periods that sit inside the existing ranges, which commonly triggers internal reordering or compaction logic. That reordering creates the mismatch between the list used for comparisons and the list used for indexing, so get_max_middle_index returns an index that points to a different period than the one whose midpoint was considered the maximum.
+
+How to fix it (concrete steps)
+1. Make midpoint computation and returned index come from the same collection:
+   - In get_max_middle_index, iterate over a single source: for i in range(len(periods)): mid = periods[i].middle(); if mid > maxMid: maxMid = mid; maxIndex = i
+   - Do not mix reads from one list with index assignments from another.
+
+2. If you need to work with a sorted/canonical list but must return the original insertion index:
+   - Build an explicit mapping up front: build list_of_pairs = [(original_index, period)] and iterate over that:
+     - for original_index, period in list_of_pairs: mid = period.middle(); if mid > maxMid: maxMid = mid; maxIndex = original_index
+
+3. Add a unit test that reproduces this case (the provided test) and a second test that inserts periods in different orders to ensure get_max_middle_index is robust to insertion order.
+
+4. Minimal code changes (example pattern)
+   - Replace mixed code like:
+       for k in range(len(sortedPeriods)):
+           mid = sortedPeriods[k].middle()
+           if mid > maxMid:
+               maxMid = mid
+               maxIndex = k  # WRONG if k is index into sortedPeriods but caller expects insertion index
+     with:
+       for orig_idx, period in enumerate(periods):   # use the single canonical list 'periods'
+           mid = period.middle()
+           if mid > maxMid:
+               maxMid = mid
+               maxIndex = orig_idx
+
+5. Add an assertion in get_max_middle_index while debugging:
+   - After computing maxIndex, assert periods[maxIndex].middle() == maxMid to catch mismatches early.
+
+Why these fixes work
+- They guarantee alignment between the midpoint value you compared and the index you return. The bug described is an index/value mismatch; keeping both coming from the same list or using an explicit (original_index, period) pair removes the ambiguity.
+
+If you paste the code for TimePeriodValues.get_max_middle_index (and any code that mutates the internal storage on add()), I will point exactly to the offending lines and provide the precise one-line change.

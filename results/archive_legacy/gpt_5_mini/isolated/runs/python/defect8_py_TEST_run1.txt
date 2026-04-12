@@ -1,0 +1,60 @@
+What happened
+- The failing test calls LocaleUtils.to_locale("fr__POSIX") (see test_locale_with_empty_country_variant). The input is language + empty country + variant (language__variant), i.e. "fr" + "_" + "" + "_" + "POSIX".
+- Your to_locale implementation rejects that input because it expects a two-letter country at a fixed index instead of allowing an empty country. Concretely, the parser performs an index-based validation that requires an uppercase letter at position 3 (s[3]) when an underscore exists at position 2 (s[2]). For "fr__POSIX" s[3] == '_' so the validation fails and ValueError (or "Invalid locale format") is raised.
+
+Why that check is wrong
+- The method assumes the only valid forms with underscores are:
+  - language_country   (e.g. en_US) — underscores at index 2 only
+  - language_country_variant (e.g. en_US_WIN) — underscores and country present
+- It does not consider the acceptable Java-style form language__variant (empty country), which has a double underscore where the country substring is empty. Valid inputs include "fr__POSIX" and "en__UNIX".
+- The incorrect logic tests s[3] for being an uppercase letter (or similar) and treats anything else (including another underscore) as a format error. That is exactly why "fr__POSIX" is rejected: position 3 is '_' instead of an uppercase country letter.
+
+Where it occurs (what to look for)
+- In LocaleUtils.to_locale you will find code that inspects character positions directly (s[2], s[3], maybe s[4]) and rejects the input when s[3] is not an uppercase letter.
+- Example of the problematic pattern you likely have:
+  - if len(s) == 5:
+      if s[2] != '_' or not s[3].isupper() or not s[4].isupper():
+          raise ValueError("Invalid locale format")
+  - Or a branch that checks s[3].isalpha() and s[3].isupper() unconditionally when an underscore exists at s[2].
+
+What to change (concrete steps)
+1. Parse by splitting on '_' with at most 2 splits instead of fixed-position checks:
+   - parts = s.split('_', 2)  # gives up to 3 parts: language, country (may be ''), variant (optional)
+2. Validate the language part:
+   - length 2, all lowercase letters (language.isalpha() and language == language.lower()).
+3. Validate the country part only if it's non-empty:
+   - if country != "": ensure length 2 and uppercase letters (country.isalpha() and country == country.upper()).
+4. Validate the variant only if present:
+   - variant can be any non-empty string; optionally enforce characters allowed by your spec.
+5. Construct Locale(language, country, variant) where country may be "" and variant may be absent or "".
+
+Minimal example fix (replace index checks)
+- Replace the index-based validation with something like:
+
+    def to_locale(s):
+        if s is None:
+            return None
+        parts = s.split('_', 2)  # language, country (may be ''), variant (optional)
+        if len(parts) == 0 or parts[0] == "":
+            raise ValueError("Invalid locale format: missing language")
+        language = parts[0]
+        if len(language) != 2 or not language.isalpha() or language != language.lower():
+            raise ValueError("Invalid language: must be two lowercase letters")
+        country = ""
+        variant = ""
+        if len(parts) >= 2:
+            country = parts[1]
+            if country != "" and (len(country) != 2 or not country.isalpha() or country != country.upper()):
+                raise ValueError("Invalid country: must be two uppercase letters or empty")
+        if len(parts) == 3:
+            variant = parts[2]
+            if variant == "":
+                raise ValueError("Invalid variant: empty")
+        return Locale(language, country, variant)  # variant may be omitted if empty
+
+Why this fixes the failing test
+- For "fr__POSIX", parts == ["fr", "", "POSIX"]. country == "" passes the "country may be empty" rule, and variant == "POSIX" is accepted. The Locale("fr", "", "POSIX") is returned and the test will pass.
+
+Summary
+- Root cause: index-based validation incorrectly demands a non-empty uppercase country at a fixed index and therefore rejects language__variant (double underscore) cases.
+- Fix: split on '_' and validate parts individually, allowing an empty country string when a variant is present. This will make the tests (including "fr__POSIX" and other language__variant cases) pass.

@@ -1,0 +1,84 @@
+What happens
+- The method to_locale (shown above) is rejecting some valid inputs and/or raising ValueError at the check on ch3/ch4 (lines 244–245).
+- There are two concrete bugs that explain the failure: a wrong boolean expression for allowed lengths and an overly strict character check for the country part.
+
+Where it occurs
+- Method: to_locale
+- Lines referenced in your slice: 244–245 (the raise when ch3 or ch4 are outside 'A'..'Z').
+
+Why it fails (root causes)
+1) Wrong length check (logic bug)
+- This line is intended to allow only lengths 2, 5, or >= 7:
+  if length != 2 and length != 5 and length < 7:
+- But that expression is confusing and error-prone. The intended condition is: "if length is not 2, and is not 5, and is less than 7, then reject" — which is equivalent to "reject if length is < 7 and length is not 2 and length is not 5".
+- It’s easy to misread and it makes maintenance fragile. The clearer and correct check is:
+  if not (length == 2 or length == 5 or length >= 7):
+    raise ValueError(...)
+- As written, it will incorrectly accept or reject some lengths (for example it's hard to reason about and likely rejects/accepts edge cases unexpectedly).
+
+2) Overly strict country-letter check (functional bug causing the raise at lines 244–245)
+- After the underscore the code requires ch3 and ch4 be between 'A' and 'Z':
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+    raise ValueError(...)
+- That rejects inputs like "en_us" where the country part is lowercase. Real-world locale inputs often use lowercase country codes, so this check is too strict.
+- It also fails to handle non-ASCII letters properly and is less clear than using str.isalpha()/.isupper() or normalizing the case first.
+
+What happened in practice
+- If you pass "en_us" you hit the else branch, get to the ch3/ch4 check, and get ValueError at lines 244–245 because 'u' and 's' are not between 'A' and 'Z'.
+- If the length check was incorrectly written for some variant inputs, you could also get a premature ValueError or unexpected branch behavior.
+
+Concrete fixes (step-by-step)
+1) Replace the confusing length check with a clear condition:
+  if not (length == 2 or length == 5 or length >= 7):
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+2) Normalize and validate letters more robustly. Two options:
+- Normalize the country code to uppercase before validating:
+  country = locale_str[3:5]
+  if not (country.isalpha() and len(country) == 2):
+      raise ValueError(...)
+  country = country.upper()
+  return Locale(locale_str[0:2], country, ...)
+
+- Or validate with case-insensitive checks and accept either case:
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if not (ch3.isalpha() and ch4.isalpha()):
+      raise ValueError(...)
+  # then use .upper() when constructing the Locale
+
+3) Also normalize/validate the language part:
+  lang = locale_str[0:2]
+  if not (len(lang) == 2 and lang.isalpha()):
+      raise ValueError(...)
+  lang = lang.lower()
+
+Example corrected sketch:
+  def to_locale(cls, locale_str: str) -> Optional[Locale]:
+      if locale_str is None:
+          return None
+      length = len(locale_str)
+      if not (length == 2 or length == 5 or length >= 7):
+          raise ValueError(f"Invalid locale format: {locale_str}")
+      lang = locale_str[0:2]
+      if not (len(lang) == 2 and lang.isalpha()):
+          raise ValueError(f"Invalid locale format: {locale_str}")
+      lang = lang.lower()
+      if length == 2:
+          return Locale(lang, "")
+      if locale_str[2] != '_':
+          raise ValueError(...)
+      country = locale_str[3:5]
+      if not (len(country) == 2 and country.isalpha()):
+          raise ValueError(...)
+      country = country.upper()
+      if length == 5:
+          return Locale(lang, country)
+      if locale_str[5] != '_':
+          raise ValueError(...)
+      variant = locale_str[6:]
+      return Locale(lang, country, variant)
+
+Summary
+- The immediate failure at lines 244–245 is caused by requiring uppercase A–Z for the country code (rejecting inputs like "en_us").
+- Fix the confusing length check using a clear boolean, and normalize/validate language and country segments (use isalpha() and lower()/upper() as appropriate).

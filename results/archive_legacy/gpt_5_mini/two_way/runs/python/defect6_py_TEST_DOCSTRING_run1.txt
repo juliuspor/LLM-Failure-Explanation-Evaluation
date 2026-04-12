@@ -1,0 +1,52 @@
+What happened
+- The test failed because CodeConsumer.add_number treats any zero value as the same and prints "0" (or "0.0") without preserving the sign bit for negative zero.
+- In Python (and IEEE-754 floats generally) -0.0 == 0.0, so a simple equality check like value == 0.0 loses the distinction. The add_number implementation is doing that exact check and therefore converts -0.0 to the unsigned representation.
+
+Where it occurs (what to look for)
+- In CodeConsumer.add_number you will find a branch that detects zero with something like:
+  if value == 0.0:
+      self.append("0")
+  (or similar logic that collapses zero values to a single "0" string).
+- Because that branch runs for both 0.0 and -0.0, the sign is lost before any special-case handling for negative zero is applied.
+- The test suite also defines CodeConsumer.is_negative_zero(...) to detect negative zero, but add_number does not call it (or calls it too late), so the negative-zero-specific path is never used.
+
+Why exactly that loses the sign
+- Python compares -0.0 == 0.0 as True. If code uses equality to detect zero and then formats the number based only on that equality path, there is no way to tell whether the original float carried a negative sign bit. The sign bit must be inspected explicitly (e.g. via math.copysign or bit inspection) rather than by numeric equality.
+
+Concrete fix (step-by-step)
+1. In add_number, check for negative zero explicitly before the plain equality zero check. For example, at the start of the zero-handling section:
+   - Use the existing utility or a direct test:
+     if CodeConsumer.is_negative_zero(value):
+         self.append("-0.0")   # preserve sign, decide exact format you expect
+         return
+2. Only after the negative-zero check, handle positive zero with the existing logic:
+     if value == 0.0:
+         self.append("0")
+         return
+3. If you don't want to use the utility, use math.copysign to detect the sign bit:
+     import math
+     def is_negative_zero(v):
+         return v == 0.0 and math.copysign(1.0, v) < 0.0
+   Then use that in step 1.
+
+Example patch (replace the zero branch in add_number)
+- Current (problematic) code pattern:
+    if value == 0.0:
+        self.append("0")
+        return
+- Change to:
+    if CodeConsumer.is_negative_zero(value):
+        self.append("-0.0")
+        return
+    if value == 0.0:
+        self.append("0")
+        return
+
+Why this resolves the failing test
+- The test expects "-0.0" when add_number(-0.0) is called. By checking for negative zero specifically first, you preserve the sign bit and append "-0.0" instead of collapsing to "0". The equality check value == 0.0 only handles the positive-zero case after the negative-zero case has already been handled.
+
+Notes
+- Decide the precise string format you want for negative zero: the test wants "-0.0". If add_number normally strips trailing ".0" for integers, avoid converting -0.0 to "-0" (that would be wrong for preserving sign in this test).
+- Keep the negative-zero check early (before any integer/rounded formatting or sign-stripping), because later formatting often treats 0 and -0.0 identically.
+
+If you paste the current add_number implementation here I can point to the exact line(s) to change and provide a ready-to-apply diff.

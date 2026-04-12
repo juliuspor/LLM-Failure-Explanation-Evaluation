@@ -1,0 +1,52 @@
+What happened (where): At lines 346–351 your code raises a TypeError whenever inferred_type == object and expected_type != object:
+
+- inferred_type is the variable you computed for the list contents (line 346).
+- expected_type is the type you want the list to have (lines 346–351).
+- The code unconditionally raises a TypeError with a message built from expected_type.__name__ (lines 348–350).
+
+Why it fails (root cause):
+
+1. inferred_type == object is too coarse. You set inferred_type to object whenever you could not infer a more specific common type (for example: an empty list, a list with mixed types, or a list whose elements you treated as “unknown”). Treating that as a hard failure is wrong because:
+   - The list might actually contain elements that are all instances of expected_type even though your inference fell back to object.
+   - An empty list is a valid instance of any List[T], but inferred_type will often be object for empty lists.
+
+2. The test and message assume expected_type.__name__ exists. If expected_type is a typing construct (for example typing.List[str], typing.Any, or a typing.Union), expected_type may not have a __name__ attribute and building the error message will itself raise AttributeError before or instead of your intended TypeError.
+
+Consequence: You incorrectly reject valid lists (empty lists or lists where inference failed) and you can raise a secondary error when expected_type lacks __name__.
+
+Exact fixes (clear step-by-step):
+
+1. Don’t treat inferred_type == object as an immediate failure. Replace the single equality check with a per-element validation or a special-case for empty lists:
+   - If the list is empty: accept it for any expected_type.
+   - Otherwise: iterate elements and check whether each element is an instance of expected_type (or can be converted), instead of relying on a single inferred_type value.
+
+2. Use safe name rendering for expected_type in the error message. Replace expected_type.__name__ with a helper that handles typing objects:
+   - name = getattr(expected_type, "__name__", repr(expected_type))
+
+3. If you need to support typing generics (List[str], Optional[int], etc.), use typing.get_origin and typing.get_args to interpret expected_type rather than relying on __name__.
+
+Concrete replacement sketch (pseudo-Python you can paste into the file):
+
+- Replace lines 346–351 with:
+
+  # safe_name avoids AttributeError if expected_type is a typing object
+  safe_name = getattr(expected_type, "__name__", repr(expected_type))
+
+  # If the list is empty, accept it
+  if len(my_list) == 0:
+      pass  # empty list is fine for any expected_type
+
+  else:
+      # Check each element rather than relying on inferred_type
+      for i, item in enumerate(my_list):
+          if not isinstance(item, expected_type):
+              raise TypeError(
+                  f"Cannot cast element at index {i} of type {type(item).__name__} "
+                  f"to {safe_name} (ClassCastException)"
+              )
+
+Replace my_list with the actual variable name used where this code runs.
+
+4. (Optional) If you intended to reject lists whose element types are unknown, narrow the inference step rather than using object as a final guard: compute a common base type from non-None elements, treat None specially (Optional), etc.
+
+Summary in one line: The code fails because it treats a fallback inference of inferred_type == object as an unconditional casting error and also assumes expected_type.__name__ exists; instead validate elements individually (and accept empty lists) and build the error message using getattr(expected_type, "__name__", repr(expected_type)).

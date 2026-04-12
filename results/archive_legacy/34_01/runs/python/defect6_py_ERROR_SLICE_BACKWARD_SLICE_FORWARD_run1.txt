@@ -1,0 +1,47 @@
+What happened (where it failed)
+- The test failed in add(self, newcode) at line 126 when that method called self.append(newcode) at line 138.
+- The assertion message says "Expected -0.0, got 0". That means the code returned a numeric zero that has lost the negative sign. The test expected a float with a negative zero sign bit (repr or formatting "-0.0"), but the value your code returned was the plain positive-zero representation "0" (or 0.0 shown as "0").
+
+Why it happened (root cause)
+- Python treats -0.0 and 0.0 as equal numerically, so many operations and conversions will normalize the sign away. The most common ways your append/newcode handling can drop the negative sign are:
+  1. Converting the float to an integer (int(-0.0) → 0), or otherwise casting/normalizing (e.g., using int(), round(..., 0), or storing as an integer).
+  2. Explicitly assigning a literal 0 when normalizing or when an empty/zero case is handled (e.g., `if value == 0: value = 0`), which produces a positive zero.
+  3. Formatting or using str() / f-string with default formatting that outputs "0" instead of "-0.0" (e.g., printing an int, or using format codes that omit the sign).
+- Because the sign bit of IEEE-754 zero is not preserved by those conversions, append(newcode) is returning a value whose sign bit is lost. The test is comparing the representation or sign-aware expectation, so it fails.
+
+Where in your code to inspect (concrete)
+- Open the add method at line 126 and the append implementation at line 138.
+- Look inside append(...) for any of these patterns:
+  - int(newcode) or other numeric casts (float(...) then int(...))
+  - explicit normalization like `if value == 0: value = 0`
+  - use of format/str or printing that is then parsed back
+  - any function that maps the float to an integer index or a canonical 0
+
+How to fix it (clear steps)
+1. Reproduce quickly to confirm the sign was lost:
+   - Before the call to append at line 138, log repr(newcode) and type(newcode).
+   - After append returns, log repr(result). If you see "-0.0" before and "0" after, you’ve confirmed sign loss in append.
+
+2. Change append to preserve the float sign:
+   - If you are accidentally converting to int, stop converting zeros to int. Keep the value as a float:
+     - Replace `value = int(newcode)` (or similar) with `value = float(newcode)` if you need a numeric float.
+   - If you have code like `if value == 0: value = 0`, remove that or replace with no-op so the negative sign remains.
+   - If you need to force a signed zero for some reason, use math.copysign:
+     - e.g., `import math` then `value = math.copysign(0.0, newcode)` sets value to -0.0 when newcode is negative.
+
+3. If the test is comparing textual output or representation, decide what the correct behavior should be:
+   - If you need to preserve the negative-zero textually, make append return a float that still has the negative sign bit and make sure you don’t stringify it prematurely.
+   - If the negative zero is semantically important and your data path may normalize it, change the test to check the sign bit explicitly instead of plain equality. To check sign bit in Python:
+     - Use struct: `struct.pack('>d', value)` and inspect the sign bit, or use `math.copysign(1.0, value) == -1.0`.
+     - Example: `math.copysign(1.0, result) == -1.0` will be True for -0.0.
+
+4. Add a unit test that guards against regression:
+   - Add a small test that calls append(-0.0) and asserts math.copysign(1.0, returned_value) == -1.0 (if preserving sign is required).
+
+Concise example fixes you can apply inside append (replace according to what you find):
+- If you find `value = int(newcode)` → change to `value = float(newcode)` (do not cast to int).
+- If you find `if value == 0: value = 0` → remove that branch.
+- If you must canonicalize but want to keep negative zero when input is negative: `value = math.copysign(0.0, newcode)`.
+
+Summary
+- The failure is because append(newcode) turned an input that printed as "-0.0" into a value that prints as "0", removing the negative sign bit (most likely by converting to int or explicit normalization). Inspect append at line 138 for casts or zero-normalizing code, preserve float sign (or use math.copysign), and add a targeted test to prevent regression.

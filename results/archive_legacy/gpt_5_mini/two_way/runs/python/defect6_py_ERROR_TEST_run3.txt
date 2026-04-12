@@ -1,0 +1,66 @@
+What happened
+- The test failed because CodeConsumer.add_number turned the float -0.0 into the integer 0 before converting to text. That removed the negative sign, so the consumer appended "0" instead of "-0.0".
+
+Why it happened (root cause)
+- In add_number the code detects integral values and casts them to an int (or otherwise formats them as an integral string) to avoid printing a trailing ".0". For example the code likely does something like:
+  - if number.is_integer(): s = str(int(number))
+  - append(s)
+- For -0.0, float.is_integer() is True and int(-0.0) yields 0. Casting to int (or formatting as an integer) loses the IEEE-754 negative-zero sign bit. Converting that 0 to string produces "0", not "-0.0".
+- The sign-of-zero check (the tests expect CodeConsumer.is_negative_zero to exist) is not consulted before the integer-cast path, so negative zero is not handled specially.
+
+Where it occurs (what to look for)
+- In the add_number method:
+  - the parameter name is probably number (or value). Look for a branch that checks number.is_integer() or compares float == int(float) and then uses int(number) or formats with "%d" or similar.
+  - the integer-formatting branch is the offending code path that runs for -0.0.
+- There may also be a helper is_negative_zero() defined on CodeConsumer (the tests call CodeConsumer.is_negative_zero). The code does not call that helper before producing the integer text.
+
+Exact, actionable fixes (pick one)
+
+1) Handle negative zero first (recommended minimal change)
+- At the top of add_number, before any integer-cast or trimming logic, check negative-zero and print "-0.0":
+  - if CodeConsumer.is_negative_zero(number): append("-0.0"); return
+- This guarantees -0.0 is preserved and everything else is unchanged.
+
+2) Use a float-to-string formatting that preserves sign for -0.0
+- Instead of casting to int for integral values unconditionally, use repr(number) (or format(number, "g")/"{!r}".format(number)) which will preserve "-0.0". Example:
+  - s = repr(number)
+  - Optionally post-process repr for other formatting rules
+- Note: repr(-0.0) -> "-0.0", repr(42.0) -> "42.0" (so you would still need to strip trailing ".0" for integers unless you accept the .0).
+
+3) Conditional integer formatting that preserves negative zero
+- Only convert to int when number is integral and not negative zero:
+  - if number.is_integer() and not CodeConsumer.is_negative_zero(number):
+      append(str(int(number)))
+    else:
+      append(repr(number))   # or format(number, "g"))
+- This preserves "-0.0" while still printing 42 as "42".
+
+Concrete code snippets you can apply (replace the problematic branch)
+
+Option A (explicit negative-zero check first):
+- Add near the top of add_number:
+  if CodeConsumer.is_negative_zero(number):
+      self.append("-0.0")
+      return
+
+- Then keep the existing integer branch unchanged.
+
+Option B (only cast to int when safe):
+  if number.is_integer() and not CodeConsumer.is_negative_zero(number):
+      self.append(str(int(number)))
+  else:
+      # existing float formatting path (use repr/format that preserves sign)
+      self.append(repr(number))
+
+Why these fixes work
+- They prevent turning -0.0 into an integer 0 before stringification, so the negative sign carried in the float's sign bit is preserved and the append call emits "-0.0".
+
+Extra note
+- Do not rely on == or numeric comparisons to detect negative zero. Use a dedicated test like CodeConsumer.is_negative_zero (the tests expect it) or math.copysign(1.0, number) < 0 to detect sign bit for zero. Example implementation of is_negative_zero:
+  @staticmethod
+  def is_negative_zero(x):
+      return x == 0.0 and math.copysign(1.0, x) < 0
+
+Summary
+- Root cause: integer-casting path runs for -0.0 and loses the sign.
+- Fix: detect negative zero before casting to int (or avoid casting to int for negative zero). Implement one of the concrete code changes above.

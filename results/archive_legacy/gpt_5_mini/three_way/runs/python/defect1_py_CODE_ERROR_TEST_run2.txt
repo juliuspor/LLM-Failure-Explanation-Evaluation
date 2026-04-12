@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The failure occurs at the minutes-range check:
+  if minutes_offset < 0 or minutes_offset > 59:
+This rejects any negative minutes immediately. In your test test_zero_hours_negative_minutes you call DateTimeZone.for_offset_hours_minutes(0, -15). Because minutes_offset == -15 < 0 the method raises ValueError: "Minutes out of range: -15" (this matches the error you saw).
+
+Why that check is wrong (root cause)
+- The minutes are allowed to be negative (range should be -59 .. +59). The code uses minutes_offset < 0 when it should use minutes_offset < -59. So the condition incorrectly forbids valid negative minute offsets.
+
+Other bug you will hit after fixing that (exact lines)
+- The code that combines hours and minutes is also wrong:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+This mutates minutes_offset and uses subtraction with the signed minutes_offset in a way that flips the sign when both hour and minute are negative. Example: (-2, -15)
+  hours_in_minutes = -120
+  current code computes minutes_offset = -120 - (-15) = -105
+but the correct total minutes is -135 (-(2*60 + 15)). The code should subtract the absolute minutes when hours are negative so that both (-2, 15) and (-2, -15) produce -135.
+
+What to change (concrete fixes, lines and code)
+1) Fix the minutes-range check (line with ValueError):
+Replace
+  if minutes_offset < 0 or minutes_offset > 59:
+with
+  if minutes_offset < -59 or minutes_offset > 59:
+
+2) Fix the combination logic (lines that set minutes_offset after hours_in_minutes):
+Replace that block with a clear total_minutes calculation. For example:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      total_minutes = hours_in_minutes - abs(minutes_offset)
+  else:
+      total_minutes = hours_in_minutes + minutes_offset
+
+Then compute offset as:
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Notes on correctness with tests
+- With the above changes:
+  - (0, -15) will pass (total_minutes = 0 + (-15) -> -15).
+  - (-2, -15) and (-2, 15) both give total_minutes = -120 - 15 = -135 -> -02:15 (matches the test/docstring).
+  - (2, -15) will still be allowed by the range check, but if you want (2, -15) to raise you need an additional rule forbidding mixed-sign inputs for positive hours; current tests expect (2, -15) to raise, so add a specific check if you want that behavior:
+      if hours_offset > 0 and minutes_offset < 0:
+          raise ValueError("Minutes must be positive when hours are positive")
+
+Summary
+- Primary bug: minutes range check uses <0 instead of <-59, causing rejection of valid negative minutes.
+- Secondary bug: combination arithmetic uses the signed minutes incorrectly when hours are negative; use abs(minutes_offset) when hours are negative and compute a separate total_minutes variable before converting to milliseconds.

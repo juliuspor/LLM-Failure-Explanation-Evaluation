@@ -1,0 +1,56 @@
+What happened (root cause)
+- The code can set upper to a value greater than len(text) because of the order of the checks. That causes substring_java(text, 0, upper) to be called with end > len(text), and substring_java raises IndexError when end > len(s).
+- The specific sequence that produces the bad value:
+  1. You first clamp upper down if it's -1 or > len(text):
+     if upper == -1 or upper > len(text):
+         upper = len(text)
+  2. Then you do:
+     if upper < lower:
+         upper = lower
+     If lower > len(text), this assignment makes upper > len(text) again.
+  3. Later you call substring_java(text, 0, upper). substring_java checks:
+     if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):
+         raise IndexError(...)
+     Since end == upper > len(text), it raises IndexError (this is the exception shown in the slice snippet).
+
+Where it occurs in the code
+- The problematic path is when lower > len(text). The problematic lines are:
+  - the "if upper < lower: upper = lower" line (it can push upper past len(text)),
+  - any subsequent call to substring_java(text, 0, upper), e.g. in the "if index == -1" branch or the other branches that build the result.
+- The raised error originates inside substring_java (the slice showing lines 32–34 is its bounds check and return), because it rejects end > len(s).
+
+Why this is the bug (plain language)
+- You clamp upper down first, then possibly push it back up to a value bigger than the string length by comparing to lower. There is no corresponding clamp on lower or a second clamp on upper after that, so substring_java gets an out-of-range end and throws.
+
+Exact, actionable fixes (choose one)
+1) Clamp lower to the string length before comparing to upper:
+   - After the len(text) == 0 check, add:
+       if lower > len(text):
+           lower = len(text)
+   - This prevents upper from being set above len(text) later.
+
+2) Or, clamp upper again after you set it to lower:
+   - Replace:
+       if upper < lower:
+           upper = lower
+     with:
+       if upper < lower:
+           upper = lower
+       if upper > len(text):
+           upper = len(text)
+   - This ensures upper never exceeds len(text) before substring_java is called.
+
+3) Or validate and raise early when lower > len(text) (if that should be an error in your API):
+   - After len(text) == 0, add:
+       if lower > len(text):
+           raise ValueError(f"lower index out of range: {lower}")
+
+Recommended: option 1 (clamp lower) is simplest and keeps current behavior while preventing the IndexError.
+
+Reproduce steps
+- Call abbreviate("hello", lower=10, upper=5, append_to_end="..."):
+  - initial clamp sets upper = 5 (<= len(text) 5),
+  - then upper < lower → upper = 10,
+  - substring_java("hello", 0, 10) is called → IndexError.
+
+That is the complete cause and the specific lines to change.

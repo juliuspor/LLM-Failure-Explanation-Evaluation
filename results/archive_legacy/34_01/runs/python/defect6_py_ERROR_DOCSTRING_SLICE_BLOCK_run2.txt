@@ -1,0 +1,41 @@
+What happened (what failed)
+- The code at line 132–136 decides whether to insert a separating space before appending newcode:
+  - c = newcode[0] (line 132)
+  - if (self.is_word_char(c) or c == '\\') and self.is_word_char(self.get_last_char()): insert a space (lines 133–136)
+- That check only looks at the first character of newcode. When newcode is a negative numeric literal like "-0.0", newcode[0] is '-' (not a "word" char), so the code treats the token as not a word token and may insert a space incorrectly when the previous buffer ends with a word character. That can turn "-0.0" into "- 0.0" (or otherwise separate the minus from the numeric literal).
+- Downstream code that consumes the generated string interprets a separated '-' differently (as a binary minus or an operator with no left operand) and ends up producing 0 instead of the expected -0.0. That is why the test failed with AssertionError: Expected -0.0, got 0.
+
+Why it happens (root cause)
+- The condition on line 133 is too simple: it only inspects the first character c = newcode[0]. For tokens that begin with a non-word prefix character followed by word characters (common example: a leading '-' before digits), that test misclassifies the whole token.
+- The immediate symptom is that negative numeric literals are split into two tokens ('-' and '0.0'), which breaks later parsing/semantic expectations and yields 0 instead of -0.0.
+
+Where it occurs (exact lines)
+- Line 132: c = newcode[0] — only the first character is inspected.
+- Line 133: the separation condition uses that single-character test and last-buffer character.
+- Line 136–138: self.append(newcode) then adds the (now incorrectly separated) token to the buffer.
+
+Concrete fixes (step-by-step)
+1. Decide the correct token boundaries you want to preserve. For numeric literals with a leading '-', you must treat the entire "-digits..." token as a single word token.
+2. Change the test so it examines the start of newcode as a whole, not just newcode[0]. Two simple options:
+
+   Option A — Detect a leading minus followed by a word char:
+   - Replace c = newcode[0] with:
+       if len(newcode) > 1 and newcode[0] == '-' and self.is_word_char(newcode[1]):
+           leading_is_word = True
+       else:
+           leading_is_word = self.is_word_char(newcode[0])
+     Then use leading_is_word in the condition instead of self.is_word_char(c).
+
+   Option B — Use a small regex or helper to test whether newcode begins with a token that should be treated as a "word" (e.g. r'^-?\w' or an explicit numeric-literal test). Example:
+       import re
+       starts_word = bool(re.match(r'^-?\w', newcode))
+     Then use starts_word in the condition.
+
+3. Ensure get_last_char() returns a single-character string (or adjust is_word_char accordingly). If get_last_char can return an empty string, handle that case so is_word_char('') doesn't mislead the condition.
+
+4. Add a unit test that appends "-0.0" when buffer ends in a word char and asserts the output contains "-0.0" (no space between '-' and digits). That will prevent regressions.
+
+Why these fixes work
+- They prevent splitting a negative numeric literal into two tokens by recognizing that a leading '-' followed by word characters should be treated as part of the same token. That keeps "-0.0" intact, so the downstream consumer will parse it as -0.0, not 0.
+
+If you want, tell me what is_word_char and get_last_char currently return and I can give the exact one-line change to make.

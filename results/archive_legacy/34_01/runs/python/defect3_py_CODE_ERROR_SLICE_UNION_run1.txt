@@ -1,0 +1,56 @@
+What happened (what failed)
+- The exception comes from code_point_at(code_units, pos) raising IndexError("String index out of range: 2"). That check is at the top of code_point_at (line 36 in the slice) where it does:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(...)
+- The IndexError is raised inside the for loop at the end of translate:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it happened (root cause)
+- translate_codepoint returned consumed > 0 to mean it handled one or more code units at the current pos (the comment implies it may have consumed a surrogate pair).
+- After that, the code tries to advance pos by iterating consumed times and calling code_point_at(code_units, pos) each iteration.
+- When pos reaches len(code_units) (end of the array), code_point_at raises the IndexError because you're calling it with an out-of-range index.
+- In short: you are calling code_point_at(pos) after the translator already consumed code units, so pos can go past the valid last index while the loop still tries to inspect code_units[pos]. The loop therefore reads past the end of the array.
+
+Where it occurs (specific variables / lines)
+- translate: the failing call is code_point_at(code_units, pos) inside:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- code_point_at: raises the exception at
+    if index < 0 or index >= len(code_units):
+        raise IndexError(f"String index out of range: {index}")
+  (this is shown at line 36 in your slice)
+
+How to fix it (specific, step-by-step changes)
+Option A — simplest and correct fix if consumed is the number of code units consumed:
+1. Replace the whole for loop with a single increment by consumed:
+    # old:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+    # replace with:
+    pos += consumed
+2. This avoids re-reading code_point_at at positions that the translator already consumed.
+
+Option B — if consumed is the number of codepoints consumed and you actually need to advance by code unit counts for each codepoint:
+1. Before calling code_point_at, check bounds. Example:
+    for pt in range(consumed):
+        if pos >= length:
+            break
+        pos += char_count(code_point_at(code_units, pos))
+2. This prevents code_point_at from being called with pos >= len(code_units).
+
+Which option to choose
+- Use Option A if translate_codepoint's contract (as your comment suggests) returns the number of code units it consumed at pos. That is almost certainly what you meant: the translator already advanced over a surrogate pair, so just add consumed to pos.
+- Use Option B only if consumed is defined differently (e.g., number of codepoints) and you truly need to call code_point_at to compute char_count per codepoint.
+
+Why Option A is the correct fix in your code
+- The comment says "they just took care of a surrogate pair" — that tells us translate_codepoint returns how many code units it consumed. So incrementing pos by consumed is the correct, safe update and prevents any out-of-range access.
+
+Concrete patch example (replace block in translate)
+- Replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- With:
+    pos += consumed
+
+That removes the out-of-range code_point_at call and fixes the IndexError.

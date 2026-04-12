@@ -1,0 +1,48 @@
+What happened (root cause)
+- In translate(), when a translator returns consumed > 0 you run this loop (starting at the comment "Contract with translators ..."):
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- That calls code_point_at(code_units, pos) repeatedly while mutating pos inside the loop.
+- If pos is advanced by previous iterations so that pos == len(code_units) (or pos points at the trailing half of a surrogate pair and code_point_at needs the next unit but it doesn't exist), the next call to code_point_at will raise IndexError("String index out of range: {index}").
+- The exception trace shows the error coming from to_utf16_code_units's index check with index == 2, which is exactly this situation: code_point_at was called with an out-of-range index because pos was moved to the end (or past what remains) before the next call.
+
+Why it fails (concrete example of how it happens)
+- Suppose code_units length = 2 and pos starts at 0.
+- translate_codepoint(...) returns consumed = 2 (it consumed two codepoints).
+- Enter the for loop range(consumed) which iterates twice.
+  - First iteration: call code_point_at(code_units, 0) → returns cp1, char_count(cp1) returns 1 or 2, pos increases (e.g. pos becomes 1 or 2).
+  - Second iteration: you call code_point_at(code_units, pos). If pos == 2 (== len(code_units)), code_point_at checks index >= len(code_units) and raises IndexError("String index out of range: 2").
+- The code assumes it can call code_point_at at each loop start, but pos may already be at or beyond the last valid index.
+
+Where it happened (precise lines)
+- In translate(): the offending lines are the loop
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  because code_point_at(code_units, pos) can be called with pos >= len(code_units).
+- The IndexError is raised inside to_utf16_code_units (the code_point_at helper) on its bounds check:
+    if index < 0 or index >= len(code_units):
+        raise IndexError(f"String index out of range: {index}")
+
+How to fix it (explicit steps)
+1. Do not call code_point_at with pos after you have already advanced pos to the end. Compute advances from a temporary pointer instead of calling with the mutated pos inside the loop.
+2. Validate that the translator never reports consumed more than the remaining codepoints; if it can, detect and raise a clear error.
+3. Replace the loop with code that uses a local pointer p (so you only call code_point_at for valid positions) and then assign pos = p when done.
+
+Minimal safe replacement (illustrative code)
+    # After consumed = self.translate_codepoint(...)
+    if consumed > 0:
+        p = pos
+        for _ in range(consumed):
+            if p >= length:
+                raise IndexError(f"Translator consumed beyond end: pos={pos} consumed={consumed} length={length}")
+            cp = code_point_at(code_units, p)
+            p += char_count(cp)
+        pos = p
+        continue
+
+Notes and checks to add
+- Ensure translate_codepoint's consumed is a count of codepoints (not code units). If it returns code units, adapt the advancing accordingly.
+- If your codepoints may be represented by surrogate pairs, char_count must return 2 for those and code_point_at must read the pair; the small p-check (p >= length) prevents a call that would try to read the missing second unit.
+- Add unit tests covering edge cases: single BMP char at end, high surrogate at last position (invalid input), surrogate pair at the boundary, translators that consume all remaining codepoints.
+
+This explains the exact cause (calling code_point_at with pos out of range), where it happens (the for loop updating pos), and gives a concrete replacement and checks to prevent the IndexError.

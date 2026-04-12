@@ -1,0 +1,48 @@
+What happened (what failed)
+- Input "fr__POSIX" (language__variant with an empty country) causes to_locale to raise ValueError.
+- The code raises inside the branch that parses the country portion: it checks ch3 = locale_str[3] and ch4 = locale_str[4] and requires both to be uppercase letters. For "fr__POSIX" locale_str[3] is '_' not an uppercase letter, so the check at lines 237–240 fails and a ValueError is raised.
+
+Why it failed (root cause)
+- The function never handles the "language__variant" form (empty country between two underscores). It assumes that whenever the string is longer than 2 characters the substring at positions 3–4 must be a two-letter uppercase country code.
+- Specifically:
+  - After verifying locale_str[2] == '_' (line ~231), the code immediately does:
+    - ch3 = locale_str[3]
+    - ch4 = locale_str[4]
+    - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError  (lines 237–240)
+  - For "fr__POSIX" ch3 == '_' so the uppercase-letter check fails and the function raises instead of recognizing an empty country and treating the remainder as variant.
+- The earlier length check logic (line ~222) does not cause the failure — it lets "fr__POSIX" reach the country-parsing branch — but the country-parsing logic is what is incorrect.
+
+Where it occurred (specific variables/lines)
+- locale_str = "fr__POSIX"
+- At locale_str[2] the code correctly sees '_', but at lines 237–240 it inspects ch3 = locale_str[3] and ch4 = locale_str[4] and raises because ch3 == '_' is not in 'A'..'Z'.
+- The problematic checks are the ch3/ch4 uppercase validations and the assumption that country is always present when length > 2 (lines 237–243 and subsequent branch to variant handling lines 245–247).
+
+How to fix it (concrete steps)
+1. After confirming locale_str[2] == '_', first check for the empty-country pattern (double underscore):
+   - If locale_str[3] == '_' then treat country as empty and parse variant from locale_str[4:].
+   - Example patch (insert before the ch3/ch4 checks):
+     - if locale_str[3] == '_':
+         return Locale(locale_str[0:2], "", locale_str[4:])
+2. Otherwise (locale_str[3] != '_'), proceed with the existing country validation:
+   - Validate ch3 and ch4 are uppercase letters and handle length==5 (country only) or longer (country + '_' + variant).
+3. Also ensure you guard accesses by length when reading indices (e.g., check length >= 4 before reading locale_str[3]).
+
+Minimal corrected logic sketch (pseudocode showing where to change)
+- if length == 2: return Locale(lang, "")
+- else:
+    if locale_str[2] != '_': raise
+    if length >= 4 and locale_str[3] == '_':
+        # language__variant case
+        return Locale(lang, "", locale_str[4:])
+    # now expect country at 3..4:
+    validate locale_str[3..4] are uppercase
+    if length == 5: return Locale(lang, country)
+    if length > 5:
+        if locale_str[5] != '_': raise
+        return Locale(lang, country, locale_str[6:])
+
+Why this fix works
+- It explicitly recognizes the empty-country form (double underscore) and does not require two uppercase letters at positions 3–4 for that case.
+- It preserves existing validation and behavior for the language-only, language_country, and language_country_variant forms.
+
+That is the precise reason your tests fail and the exact place in the code to change.

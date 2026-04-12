@@ -1,0 +1,44 @@
+What fails: pos gets advanced incorrectly after a non‑zero return from translate_codepoint, so the loop can skip, double‑count or read invalid surrogate halves and the method eventually produces wrong output or an exception.
+
+Why it fails (root cause)
+- translate_codepoint(...) returns a value named consumed (line: consumed = self.translate_codepoint(code_units, pos, out)).
+- The code treats consumed as a count of codepoints, then tries to advance pos by the number of UTF‑16 code units used by each of those codepoints with:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (this is the block that runs when consumed != 0)
+- That logic is wrong because it mixes two different notions without a stable reference:
+  - translate_codepoint is documented (by your comment and contract) to operate in codepoints, but you do not have a single saved list of the codepoints that were consumed; instead you re-read codepoint_at(code_units, pos) while mutating pos inside the loop.
+  - If translate_codepoint consumed a codepoint that is represented by a surrogate pair (two code units), the first iteration will advance pos by 2. The next iteration of the loop then calls code_point_at(code_units, pos) at the new position, which is now pointing after the surrogate pair (or possibly into the low surrogate if the loop/consumed bookkeeping is inconsistent). That can cause you to read the wrong codepoint (or a lone low surrogate), produce an incorrect char_count, and advance pos incorrectly.
+- In short: you are recomputing code_point_at(code_units, pos) while moving pos inside the loop, but consumed was defined relative to the original starting pos. That mismatch between the meaning of consumed and how pos is advanced leads to incorrect increments and the failure.
+
+Where it fails (specific lines / variables)
+- At the call site: consumed = self.translate_codepoint(code_units, pos, out)
+- In the branch handling consumed != 0:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  The incorrect advance happens inside that for loop (the pos += ... line). The problematic variables are consumed, pos, code_units and the calls code_point_at(...) and char_count(...).
+
+What happened
+- translate_codepoint told you how many codepoints it consumed (consumed), but you tried to advance pos by re-reading codepoints at the changed pos. That produces wrong offsets when surrogate pairs (two code units) are involved, because you may read the wrong codepoint on subsequent iterations or step into a surrogate low half. The loop therefore miscounts code units and corrupts the scanning position.
+
+Concrete fixes (step‑by‑step)
+Pick one of the following consistent solutions:
+
+1) Let translate_codepoint return code units consumed (preferred if translate_codepoint works with code_units)
+   - Change translate_codepoint to return the number of UTF‑16 code units it consumed (1 or 2 per codepoint).
+   - Replace the for loop with: pos += consumed
+   - Rationale: consumed is then exactly how many elements of code_units were used, no re‑reading or per‑codepoint math needed.
+
+2) Keep translate_codepoint returning number of codepoints consumed, and advance pos based on the actual codepoints it consumed (safe if you can read those codepoints once)
+   - Immediately after translate_codepoint(...) returns, capture the sequence of codepoints it consumed starting at the original pos:
+       start = pos
+       for _ in range(consumed):
+           cp = code_point_at(code_units, pos)
+           pos += char_count(cp)
+   - Note: do not re‑read code_point_at using a changing index that might enter a surrogate pair — this code does it correctly because it reads cp then advances pos before the next iteration, but it does so relative to the original start and exact number of iterations. (This is a careful variant; implementing it exactly as shown keeps the intended semantics.)
+
+3) If translate_codepoint already advanced pos internally or modified some external pointer, reflect that in the contract
+   - Make translate_codepoint itself advance pos (return new pos or mutate an index object) so the caller does not have to recompute increments. Ensure the contract is clear and implemented consistently.
+
+Short summary of the minimal safe change
+- Simplest fix: have translate_codepoint return the number of code units consumed, then replace the for loop with pos += consumed. That removes the mismatch between codepoint vs code unit counting (and fixes the bug where you read wrong codepoint after advancing pos).

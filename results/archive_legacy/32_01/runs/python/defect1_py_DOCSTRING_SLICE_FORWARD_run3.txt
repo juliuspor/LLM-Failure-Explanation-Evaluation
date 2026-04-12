@@ -1,0 +1,48 @@
+What went wrong (root cause)
+- The code miscomputes the total offset minutes by reusing and incorrectly combining the variables hours_in_minutes and minutes_offset at lines 406–408.
+- Specifically the two assignments
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  reuse the name minutes_offset for the total, destroying the original minute input and producing the wrong sign in some cases.
+- As a result, certain valid inputs produce a total minute value that exceeds the allowed range. That triggers the "Offset is too large" path (line 411) or produces an incorrect offset value passed to FieldUtils.safe_multiply (line 409), leading to exceptions or wrong time zones.
+
+Where it happens
+- The faulty logic is in the same method where the code combines hour and minute components into a single minute count. The problematic lines are the ones you excerpted:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - line 411: raise ValueError("Offset is too large")
+- Because minutes_offset is overwritten, the branch logic that should respect the sign rules (hours positive -> minutes must be non-negative, hours negative -> minutes must be non-positive, etc.) is effectively broken.
+
+Why that produces failures (concrete example)
+- Example: hours_offset = 2, minutes_offset = -15 (which should be invalid and raise ValueError earlier).
+  - The code should check and reject this combination before combining, but because it overwrites minutes_offset incorrectly, it may compute minutes_offset = hours_in_minutes - (-15) = 120 + 15 = 135 minutes (i.e. +02:15), turning an invalid input into a large positive total and then later deciding it’s "too large" or returning a wrong zone.
+- Example: hours_offset = -2, minutes_offset = 15 (which should produce -02:15).
+  - If the code uses the wrong sign branch it may compute minutes_offset = -120 + 15 = -105 (correct), but because of swapping/overwriting logic some sign combinations can become +105 or otherwise incorrect; the code’s current structure makes it easy to get the sign wrong.
+
+How to fix it (step-by-step, exact)
+1. Do not reuse minutes_offset to hold the total. Introduce a new variable total_minutes (or similar).
+2. Validate minute sign relative to hour sign before combining:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (invalid combo).
+   - If hours_offset < 0 and minutes_offset > 0: treat minutes as negative (or require minutes <= 0 depending on your API rules); be explicit.
+3. Compute total_minutes deterministically:
+   - hours_in_minutes = hours_offset * 60
+   - total_minutes = hours_in_minutes + minutes_offset  (after you’ve normalized/validated minute sign)
+4. Check total_minutes does not exceed allowed range (±(23*60 + 59)).
+5. Compute offset millis: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+6. Return cls.for_offset_millis(offset)
+
+Concrete replacement for the problematic section (pseudocode you can drop in)
+- hours_in_minutes = hours_offset * 60
+- if hours_offset > 0 and minutes_offset < 0:
+    raise ValueError("minutes must be non-negative when hours is positive")
+- if hours_offset < 0 and minutes_offset > 0:
+    minutes_offset = -minutes_offset   # or reject, depending on spec (docstring says -2, 15 -> -02:15 so allow)
+- total_minutes = hours_in_minutes + minutes_offset
+- if abs(total_minutes) > (23*60 + 59):
+    raise ValueError("Offset is too large")
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+- return cls.for_offset_millis(offset)
+
+Why this explanation should end your guessing
+- The bug is not an obscure integer overflow nor a library bug — it’s a logic error where the minutes value is overwritten and combined incorrectly (lines 406 and 408). Fixing the combination and using a separate total_minutes variable, plus explicit validation of sign rules before combining, will remove the failures and produce correct offsets.

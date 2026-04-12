@@ -1,0 +1,57 @@
+What happened (what failed)
+- At runtime the method to_locale raises an IndexError (string index out of range).
+- This happens because the code at lines 242–244 accesses characters by fixed indices (locale_str[3], locale_str[4]) without ensuring the string is long enough first.
+
+Where it occurred (exact lines)
+- The check at line 236 is: if length == 2:
+  - but immediately after, at lines 242–244, the code does:
+    - ch3 = locale_str[3]
+    - ch4 = locale_str[4]
+  - Those accesses assume the string has at least 5 characters, which is false when length == 2 (or anything < 5). That causes the IndexError.
+
+Why it happened (root cause)
+- The boolean condition/flow is wrong. The code tests length == 2 but then proceeds to handle formats that require length >= 5. There is no early return for the length == 2 case before the code that reads indices 3 and 4, so short strings reach those index accesses.
+- Also the code path structure suggests intended handling of three formats:
+  1. language only ("aa") — length == 2
+  2. language + country ("aa_BB") — length == 5
+  3. language + country + variant ("aa_BB_variant") — length >= 7 (at least)
+  The current ordering/missing checks mix those paths and try to read country characters before confirming they exist.
+
+Concrete steps to fix (exact edits / replacements)
+1. Return immediately for the 2‑char language case:
+   - After computing length (line 227), change the flow so the length == 2 case returns before any index 3/4 access.
+   - Example replacement (pseudo-lines show intent):
+     - if length == 2:
+         return Locale(locale_str[0:2])
+2. Validate minimum length before reading indices 3 and 4:
+   - Before ch3 = locale_str[3] (line 242), ensure length >= 5. If not, raise ValueError.
+   - Example:
+     - if length < 5:
+         raise ValueError(f"Invalid locale format: {locale_str}")
+3. Ensure the separator at index 2 is '_' before interpreting characters 3 and 4 as the country:
+   - Check locale_str[2] == '_' and raise ValueError if not.
+4. Distinguish the 5‑char country-only case from the longer variant case:
+   - After validating indices 3/4, do:
+     - if length == 5:
+         return Locale(locale_str[0:2], locale_str[3:5])
+     - if length > 5:
+         if locale_str[5] != '_':
+             raise ValueError(...)
+         return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Minimal corrected control flow (line-oriented)
+- Compute length (line 227)
+- if length == 2: return Locale(locale_str[0:2])
+- if length < 5: raise ValueError(...)
+- if locale_str[2] != '_': raise ValueError(...)
+- ch3 = locale_str[3]; ch4 = locale_str[4]; validate they are A..Z
+- if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+- if locale_str[5] != '_': raise ValueError(...)
+- return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this will fix it
+- Short strings will no longer reach index 3/4 access.
+- Each access is guarded by explicit length checks, preventing IndexError and producing meaningful ValueError for bad formats.
+- The code will correctly distinguish "aa", "aa_BB", and "aa_BB_variant" formats.
+
+If you want, I can produce the exact patched code snippet replacing the current method body so you can drop it into your file.

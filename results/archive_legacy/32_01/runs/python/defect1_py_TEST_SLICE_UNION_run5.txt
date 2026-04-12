@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) throws a ValueError at the validation on line 400:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  That check sees minutes_offset == -15 and immediately raises "Minutes out of range", so execution never reaches the later code that combines hours and minutes (lines 406–409) and builds the offset.
+
+Why it failed (root cause)
+- The code treats the minutes argument as if it must be in the 0..59 range unconditionally. It does not accept a negative minutes value even when the hours argument is negative. The caller passed minutes as -15 (intending -2 hours and -15 minutes), but the guard on line 400 rejects negative minutes before any normalization or sign handling occurs.
+- In short: the validation at line 400 is too strict and runs before sign-normalization, so valid inputs like (-2, -15) are treated as invalid.
+
+Where to look in the code
+- Line 400: the minutes range check that raises the ValueError.
+- Lines 406–409: the later logic that attempts to compute minutes_offset when hours or minutes signs need adjustment (this code never runs because the earlier check already failed).
+- Line 412 and 412 return: subsequent behavior depends on a correctly computed minutes_offset, but the pre-check prevents that.
+
+Concrete fixes (step-by-step)
+Two safe options below. Pick one and apply the change at or before line 400.
+
+Option A — normalize sign first (recommended)
+1. Before validating minutes, compute a normalized minutes value:
+   - Let sign = -1 if hours < 0 else +1 (or compute based on hours and minutes combined if you must allow hours==0).
+   - Use minutes_abs = abs(minutes_offset).
+2. Validate minutes_abs instead of minutes_offset: check 0 <= minutes_abs <= 59.
+3. Compute total_minutes = sign * (abs(hours) * 60 + minutes_abs).
+4. Continue with the existing code that turns minutes into milliseconds and returns cls.for_offset_millis(total_minutes * MILLIS_PER_MINUTE).
+
+Concrete pseudocode to replace around line 400:
+  sign = -1 if hours < 0 else 1
+  minutes_abs = abs(minutes_offset)
+  if minutes_abs < 0 or minutes_abs > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  minutes_offset = sign * (abs(hours) * 60 + minutes_abs)
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  return cls.for_offset_millis(offset)
+
+Option B — accept negative minutes but adjust sign (smaller change)
+1. Change the guard to only reject minutes whose absolute value is > 59:
+   replace line 400 with:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. After that check, treat negative minutes as contributing to the sign of the resulting offset:
+   - If hours < 0 or minutes_offset < 0, compute total_minutes = hours*60 - abs(minutes_offset) (taking care with signs).
+   - Otherwise total_minutes = hours*60 + minutes_offset.
+3. Proceed to compute milliseconds and return.
+
+Why these fixes work
+- They allow minutes to be provided as negative when the caller intends a negative total offset (e.g., -2 hours and -15 minutes).
+- They preserve the sensible constraint that minutes magnitude must be within 0..59 while allowing the sign to be expressed on either hours or minutes.
+
+Which to choose
+- Option A is clearer and less error-prone: normalize the sign using the hours argument (or a combined rule if hours==0) and always validate the absolute minutes. It avoids ambiguous combinations and makes behavior consistent.
+
+Summary
+The ValueError is raised at line 400 because the code rejects negative minute values before sign normalization. Fix by validating the absolute value of minutes and combining sign and magnitude before computing the total offset (see the concrete code steps above).

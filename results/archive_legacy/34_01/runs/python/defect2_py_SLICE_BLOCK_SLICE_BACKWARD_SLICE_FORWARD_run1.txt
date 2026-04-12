@@ -1,0 +1,43 @@
+What happened (where it failed)
+- The failure happens inside get_paint at line 71 and then at lines 74–75 where you raise the ValueError.
+  - Line 71 computes g:
+    g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - Lines 74–75 check g and raise:
+    if g < 0 or g > 255:
+        raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- The ValueError is raised because g is outside 0..255. That means the fraction (value - self._lower_bound) / (self._upper_bound - self._lower_bound) produced a number < 0 or > 1, so after multiplying by 255 and converting to int you got g < 0 or g > 255.
+
+Why it happened (root cause)
+- The input value you passed into get_paint is outside the configured bounds self._lower_bound..self._upper_bound. In other words, value < self._lower_bound or value > self._upper_bound.
+- Because your code computes g directly from that fraction without clamping or validating value first, any out-of-range value produces an out-of-range g and triggers the explicit ValueError at lines 74–75.
+- (Note: if self._upper_bound == self._lower_bound you would get a ZeroDivisionError at line 71 instead; that is a separate failure mode to check for.)
+
+How to reproduce quickly
+- Call get_paint with value less than self._lower_bound or greater than self._upper_bound. Example:
+  - If self._lower_bound == 0 and self._upper_bound == 1, call get_paint(1.5) → fraction = 1.5 → g = int(1.5*255) = 382 → triggers the ValueError.
+- Or set upper_bound == lower_bound and call get_paint(x) → ZeroDivisionError.
+
+Concrete fixes (step-by-step)
+1. Decide whether callers should be allowed to pass out-of-range values or not.
+   - If callers must not pass out-of-range values: add a clearer error that includes the offending value and the bounds, and check value before computing g:
+     if not (self._lower_bound <= value <= self._upper_bound):
+         raise ValueError(f"value {value} out of bounds [{self._lower_bound}, {self._upper_bound}]")
+   - This pinpoints the problem to the caller and avoids computing g.
+2. If you want to accept values outside the bounds and clamp the color:
+   - Compute the fraction safely, then clamp it:
+     denom = self._upper_bound - self._lower_bound
+     if denom == 0:
+         fraction = 0.0  # or decide a meaningful default
+     else:
+         fraction = (value - self._lower_bound) / denom
+     fraction = max(0.0, min(1.0, fraction))
+     g = int(round(fraction * 255))
+   - This guarantees 0 <= g <= 255 and avoids the ValueError at lines 74–75.
+3. Handle the divide-by-zero case explicitly (upper == lower) to avoid a ZeroDivisionError:
+   - Either reject that configuration (raise a clear error) or choose a default fraction (0.0 or 1.0) when denom == 0.
+4. Improve the raised message if you keep the check: include value and bounds so debugging is immediate:
+   raise ValueError(f"value {value} produced g={g} outside 0..255 for bounds [{self._lower_bound}, {self._upper_bound}]")
+
+Summary
+- Root cause: value passed to get_paint is outside self._lower_bound..self._upper_bound, so the computed g falls outside 0..255 and triggers the ValueError at lines 74–75.
+- Fix by either validating (and rejecting) the input earlier, or clamping the fraction before converting to g, and handle the upper==lower case explicitly.

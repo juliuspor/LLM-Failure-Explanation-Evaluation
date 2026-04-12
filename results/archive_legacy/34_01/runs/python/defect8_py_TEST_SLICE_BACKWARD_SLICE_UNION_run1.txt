@@ -1,0 +1,31 @@
+What happened (where)
+- The bug is in to_locale at/around line 231: the code uses the condition if length == 2: yet the code inside that block immediately indexes locale_str[3] and locale_str[4] (lines 237–239) and later slices locale_str[3:5] and checks locale_str[5] (lines 243–247).
+- For the test string 'fr__POSIX' length == 9, so the if length == 2: branch is never taken and none of the parsing code inside it runs. The function therefore does not build a Locale and the test fails (result is not Locale('fr', '', 'POSIX')).
+
+Why it fails (root cause)
+- The conditional at line 231 is wrong. It should be testing for the length(s) required by the parsing logic inside the block (strings that include country and maybe variant), not equality to 2. Because of that wrong check, the parsing code that expects to find underscores and variant text is skipped for inputs like 'fr__POSIX', so the function never produces the expected Locale with an empty country and variant 'POSIX'.
+- There is a secondary parsing issue (you will need to handle this when fixing): the code inside assumes a non-empty country at locale_str[3:5]. For double-underscore forms (language + empty country + variant), the code must treat the two underscores specially so country becomes '' and variant becomes the rest.
+
+Concrete fixes (step-by-step)
+1. Change the length check at line 231 to cover strings that include a country (and possibly a variant). For example:
+   - replace if length == 2: with if length >= 5: (minimum form "ll_CC" is 5 chars).
+2. Add explicit handling for the empty-country (double underscore) case before slicing country:
+   - If locale_str[2] == '_' and locale_str[3] == '_':
+       - set country = '' and variant = locale_str[4:] (if present)
+       - return Locale(locale_str[0:2], country, variant) (or Locale(locale_str[0:2], '') if no variant)
+   - Else validate that locale_str[3] and locale_str[4] are uppercase letters, then set country = locale_str[3:5].
+3. Handle the optional variant separator correctly:
+   - If after country there is no fifth character (no variant), return Locale(language, country).
+   - If there is a fifth character and it is '_' then return Locale(language, country, locale_str[6:]) (ensure indexing is guarded by length checks).
+4. Add explicit bounds checks before every index access (e.g., ensure length >= index+1) to avoid IndexError for malformed inputs.
+
+Exactly where to change
+- Line 231: change the condition from if length == 2: to something like if length >= 5:.
+- Lines 237–247: add the double-underscore test and proper bounds checks and slicing as described above.
+
+Why this fixes it
+- Using length >= 5 ensures the parsing block runs for inputs that include a country or variant like 'fr__POSIX'.
+- Special-casing the double underscore correctly maps 'fr__POSIX' to language='fr', country='' and variant='POSIX' instead of skipping parsing or returning wrong slices.
+
+Short summary
+The code uses the wrong length test (line 231) and does not handle the double-underscore empty-country form. Fix the condition to cover strings of length >= 5 and add explicit handling for the '__' empty-country case, plus bounds checks before indexing. This will make LocaleUtils.to_locale('fr__POSIX') return Locale('fr', '', 'POSIX').

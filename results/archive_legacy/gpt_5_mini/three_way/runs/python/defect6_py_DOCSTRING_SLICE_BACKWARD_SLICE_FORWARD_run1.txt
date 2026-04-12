@@ -1,0 +1,67 @@
+What happens
+- At runtime this code raises an exception when execution reaches line 182 (and again would at line 190) because the variable exp is never defined before it is used.
+- The first place exp is used is line 182:
+  check_val = (mantissa // 10) * (10 ** (exp + 1))
+  Python will raise NameError (or UnboundLocalError inside a function) with a message such as: "name 'exp' is not defined".
+- That happens only when the code enters the abs(x) >= 100 branch and the while mantissa % 10 == 0 loop body executes.
+
+Why this causes the failure
+- The code intends to compute a scaled mantissa/exponent representation (e.g. convert 1000 -> 1E3) but never sets exp beforehand. Using exp in the exponent expression (10 ** (exp + 1)) requires exp to exist.
+- Because exp is referenced before any assignment, Python fails immediately at the first use.
+
+Where the bug is
+- Line 181 starts the while loop; the problematic line is 182 (first use of exp) and line 190 (building the "E" string uses exp again).
+- The variables involved: exp, mantissa, value, x.
+- The code defines value = int(x) (line 177) and mantissa = value (line 178) but never defines exp anywhere in the shown snippet.
+
+How to reproduce
+- Call this code path with any float x such that:
+  - x == int(x) is True
+  - not math.isinf(x) and not math.isnan(x)
+  - abs(x) >= 100
+  - mantissa % 10 == 0 (i.e., value ends with at least one zero)
+  Example: x = 100.0 will hit the while and then try to evaluate line 182 and raise NameError.
+
+Concrete fixes (step-by-step)
+1. Decide what exp should represent. From the code intent it looks like exp is the decimal exponent (number of trailing zeros removed).
+2. Initialize and maintain exp while reducing mantissa. Two possible straightforward fixes:
+
+Fix A — track exp in the loop (minimal change)
+- Before the while, add exp = 0.
+- In the while loop, when you remove a trailing zero from mantissa (divide by 10), increment exp by 1.
+- Replace check_val calculation with the updated exp usage (or re-evaluate if check_val logic expects exp+1).
+Example:
+  exp = 0
+  while mantissa % 10 == 0:
+      # remove one trailing zero
+      mantissa = mantissa // 10
+      exp += 1
+      check_val = mantissa * (10 ** exp)
+      if check_val == value:
+          ...
+- This keeps exp defined and consistent with mantissa.
+
+Fix B — compute exponent in one step (alternate approach)
+- If you want the canonical scientific integer mantissa and exponent for a positive integer value:
+  exp = 0
+  while value % (10 ** (exp + 1)) == 0:
+      exp += 1
+  mantissa = value // (10 ** exp)
+- Then check equivalence and build strings using mantissa and exp.
+
+3. Verify string outputs:
+- Line 190 self.add(str(mantissa) + "E" + str(exp)) will then be correct: mantissa * 10**exp == value.
+- Ensure you still handle negative numbers and zero as needed (zero is a special case: no meaningful exponent; handle separately).
+
+Example minimal patch (insert before the while at line 181):
+  exp = 0
+  while mantissa % 10 == 0:
+      check_val = (mantissa // 10) * (10 ** (exp + 1))  # original intent
+      if check_val == value:
+          # if you rely on this check, you must decide whether to update mantissa and exp or break
+      mantissa = mantissa // 10
+      exp += 1
+
+Summary
+- Root cause: exp is referenced before assignment (NameError/UnboundLocalError) at line 182 (and used again at 190).
+- Fix by defining and updating exp consistently (examples above) so the while-loop and the later string construction have a valid exponent value.

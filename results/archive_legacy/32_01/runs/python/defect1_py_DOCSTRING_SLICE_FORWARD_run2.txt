@@ -1,0 +1,48 @@
+What happened (root cause)
+- In the method that builds a DateTimeZone from hours_offset and minutes_offset you mutate the minutes_offset variable twice in the same code path, producing a wrong total minutes value. Specifically:
+  - Line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Because the second assignment (line 408) overwrites the first, the computed minutes_offset ends up incorrect — often much larger than intended. That wrong value, when multiplied by MILLIS_PER_MINUTE at line 409, produces an offset outside the allowed range and triggers the "Offset is too large" ValueError at line 411.
+
+Why that causes the failure
+- The code is supposed to compute total minutes = hours_in_minutes +/- minutes_offset depending on the sign rules described in the docstring. Instead, the variable minutes_offset is reused and both addition and subtraction assignments appear in the same flow, so you don't get a correct signed sum. The final offset passed to for_offset_millis() is therefore wrong, so the bounds check fails and you get the ValueError.
+
+Where it occurs
+- In the factory method that converts hours_offset and minutes_offset into milliseconds:
+  - Incorrect assignments at lines 406 and 408
+  - Milliseconds multiplication at line 409
+  - Exception raised at line 411
+
+Concrete fix (step-by-step)
+1. Stop reusing minutes_offset for intermediate results. Introduce a new variable like total_minutes.
+2. Decide sign correctly:
+   - If hours_offset > 0: total_minutes = hours_in_minutes + minutes_offset (but the doc forbids minutes negative when hours positive — validate and raise if violated).
+   - If hours_offset < 0: total_minutes = hours_in_minutes - minutes_offset (or equivalently total_minutes = hours_in_minutes - abs(minutes_offset); ensure minutes is non-negative or use sign of hours to apply).
+   - If hours_offset == 0: sign of minutes_offset determines the result (total_minutes = minutes_offset).
+3. Validate ranges after computing total_minutes (absolute value must not exceed 23*60 + 59).
+4. Multiply total_minutes by MILLIS_PER_MINUTE and call for_offset_millis(total_minutes * MILLIS_PER_MINUTE).
+
+Minimal corrected code sketch
+- Replace the conflicting lines with something like:
+
+    hours_in_minutes = hours_offset * 60
+    # use a new variable
+    if hours_offset > 0:
+        if minutes_offset < 0:
+            raise ValueError("minutes must not be negative when hours is positive")
+        total_minutes = hours_in_minutes + minutes_offset
+    elif hours_offset < 0:
+        if minutes_offset < 0:
+            # if minutes were given negative with negative hours, use absolute minutes
+            minutes_offset = -minutes_offset
+        total_minutes = hours_in_minutes - minutes_offset
+    else:  # hours_offset == 0
+        total_minutes = minutes_offset
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    # then existing bounds check and return cls.for_offset_millis(offset)
+
+Why this is safe and clear
+- It keeps the signed logic explicit, avoids overwriting inputs, and enforces the documented sign rules so you won't accidentally compute a huge offset and trigger the "Offset is too large" error.
+
+If you want, paste the surrounding function and I will produce a full patch replacing the problematic lines.

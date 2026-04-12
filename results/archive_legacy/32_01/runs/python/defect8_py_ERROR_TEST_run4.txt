@@ -1,0 +1,45 @@
+What happened
+- The test calls LocaleUtils.to_locale("fr__POSIX").
+- LocaleUtils.to_locale parses the string and validates it against the expected locale format.
+- The parser rejects "fr__POSIX" and raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it fails (root cause)
+- Your parser treats the locale syntax as language[_country][_variant] and requires that any underscore-delimited component that exists is non-empty. The input "fr__POSIX" has an empty country component (there are two underscores in a row), i.e. language = "fr", country = "" (empty), variant = "POSIX".
+- The code never allows the explicit empty country case — it only accepts either:
+  - "language" (no underscores),
+  - "language_country" (one underscore and a non-empty country),
+  - "language_country_variant" (two underscores with a non-empty country between them),
+  - maybe other strict forms — but not "language__variant".
+- As a result the pattern match or validation check in LocaleUtils.to_locale fails and the method reaches the line that raises the ValueError. That is the exact line doing:
+  raise ValueError(f"Invalid locale format: {s}")
+  (this is where the exception originates in LocaleUtils.to_locale).
+
+Why "fr__POSIX" is a valid locale in your test
+- The expected Locale('fr', '', 'POSIX') means language = "fr", country = "" (empty), variant = "POSIX". The double-underscore form is a common representation for that exact situation and should be accepted by to_locale if you want to support empty country with a variant.
+
+Where to change the code (concrete steps)
+1. Locate the failing code in LocaleUtils.to_locale. Find the place that matches/validates the input and the raise ValueError(...) line. (This is the line currently throwing the exception for "fr__POSIX".)
+2. Add explicit handling for the "language__variant" form before the strict validation/regex. For example (pseudocode you can paste into the method):
+   - if s matches r'^([a-zA-Z]{2,3})__(.+)$':
+       language = group(1)
+       country = ""           # explicit empty country
+       variant = group(2)
+       return Locale(language, country, variant)
+   This check should be placed before the existing regex/test that rejects empty components.
+3. Alternatively, if your method uses a single regex, modify it to allow an empty country when a variant follows. For example change a strict three-part regex to accept an empty middle group, or add an alternative branch permitting '^([a-z]{2,3})__(.+)$'.
+4. Add a unit test for this case (your existing test) and run the suite.
+
+Example concrete change (minimal)
+- Before validation:
+  if re.match(r'^([a-zA-Z]{2,3})__(.+)$', s):
+      m = re.match(r'^([a-zA-Z]{2,3})__(.+)$', s)
+      return Locale(m.group(1), '', m.group(2))
+- Then keep the existing parsing/validation logic for other forms.
+
+Why this fix is safe and what to watch for
+- This only accepts an explicit empty country only when there is a variant following (the double-underscore form). It does not allow malformed inputs like "fr_" (single underscore with empty country) unless you decide to accept that too.
+- Update any other code that consumes Locale strings to expect country == "" for that case.
+- Add tests for edge cases: "fr", "fr_FR", "fr_FR_POSIX", "fr__POSIX", and invalid inputs you want to reject.
+
+Summary
+The parser rejects "fr__POSIX" because it treats the empty country field between two underscores as invalid. Fix by adding a branch in LocaleUtils.to_locale that recognizes the "language__variant" pattern and constructs Locale(language, "", variant) before the existing validation that raises the ValueError.

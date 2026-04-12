@@ -1,0 +1,62 @@
+What happened (short)
+- The translator iterates over UTF-16 code units (the list returned by to_utf16_code_units) using an index variable i.
+- When it encounters a surrogate pair (a non-BMP code point), it reads the pair with code_point_at(utf16_units, i) but then advances the index incorrectly.
+- Because the index is advanced by 1 instead of 2, the next loop iteration tries to start at the low surrogate. code_point_at then tries to read the next unit (i+1) looking for a low surrogate or pair and that i+1 is past the end of the array, producing IndexError: String index out of range: 2.
+
+Why this triggers on your failing test
+- Input: "\U0001F630A" (emoji as a surrogate pair, then 'A')
+- to_utf16_code_units should produce three 16-bit units: [high-surrogate, low-surrogate, 'A'].
+- The loop sees the high-surrogate at i=0, reads the pair successfully, but then does i += 1 (wrong). Next iteration i == 1, so code_point_at(utf16_units, 1) expects to examine units[1] and units[2]. If some path shortened the list length or the code incorrectly handles boundary checks, units[2] becomes out of range and you get IndexError: 2.
+- Even if the exact index numbers can vary, the root cause is always the same: the loop treats a surrogate pair as length 1 when it is two UTF-16 code units, causing subsequent reads to go out of bounds.
+
+Where the bug is (names and locations)
+- In CsvEscaper.translate_string (the loop using variable i over the array produced by to_utf16_code_units).
+- In code_point_at(utf16_units, i) which accesses utf16_units[i+1] without ensuring i+1 < len(utf16_units).
+- The index advancement logic in translate_string is wrong: after processing a code point that came from a surrogate pair you must increase i by 2, not by 1.
+
+Precise fixes (step-by-step)
+1. Ensure code_point_at guards the lookahead:
+   - In code_point_at(units, index) do:
+     - if index >= len(units): raise IndexError or return -1/None (your API choice).
+     - read u = units[index].
+     - if u is a high surrogate (0xD800 <= u <= 0xDBFF):
+         - if index + 1 >= len(units): handle this as an error or treat the high surrogate as invalid/standalone rather than accessing units[index+1].
+         - else read low = units[index+1] and combine.
+   - This prevents an unconditional units[index+1] access that can raise IndexError.
+
+2. Fix index advancement in CsvEscaper.translate_string:
+   - After you get the code point from code_point_at, determine how many UTF-16 code units it consumed:
+     - if code_point > 0xFFFF (non-BMP), consumed_units = 2
+     - else consumed_units = 1
+   - Advance i by consumed_units (i += consumed_units) instead of always i += 1 or letting the loop increment by 1.
+   - Concretely:
+       code_point = code_point_at(units, i)
+       if code_point == SOME_ESCAPE_CONDITION:
+           append escaped text
+       else:
+           append original code point
+       i += 2 if code_point > 0xFFFF else 1
+
+3. (Optional) Simplify: operate over Python code points (normal Python string iteration) instead of manually converting to UTF-16 units unless you specifically must emulate Java UTF-16 behavior. If you must emulate Java behavior, keep the UTF-16 unit model but apply fixes above.
+
+Why these fixes solve it
+- Guarding code_point_at prevents out-of-range read attempts (no unexpected IndexError when high surrogate happens at end).
+- Advancing i by 2 when you consumed a surrogate pair avoids re-entering the loop on the low surrogate and prevents the next code_point_at call from starting at an invalid position.
+
+Minimal example of the exact problematic lines
+- Buggy pattern that causes the error (pseudo):
+    i = 0
+    while i < len(units):
+        cp = code_point_at(units, i)   # code_point_at accesses units[i+1] without bounds check
+        ... handle cp ...
+        i += 1                         # WRONG: when cp came from a surrogate pair this should be i += 2
+
+- Corrected pattern:
+    i = 0
+    while i < len(units):
+        cp = code_point_at(units, i)   # code_point_at should check index+1 < len(units)
+        consumed = 2 if cp > 0xFFFF else 1
+        ... handle cp ...
+        i += consumed
+
+This explains where and why the IndexError occurs and gives exact code-level steps to fix it. If you paste the current translate_string and code_point_at implementations I can show the concrete patch (diff) to apply.

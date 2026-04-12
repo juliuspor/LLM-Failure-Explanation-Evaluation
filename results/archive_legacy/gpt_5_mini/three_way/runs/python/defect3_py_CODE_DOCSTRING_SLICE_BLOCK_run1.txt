@@ -1,0 +1,59 @@
+What happens
+- The code raises an IndexError from code_point_at(...) inside the for loop near the end of translate(...). The slice/block you showed (lines 35–36) is the bounds check inside code_point_at; that is where the failure occurs.
+
+Why it fails (root cause, precise)
+- translate_codepoint(...) returns consumed.
+- The method then runs:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- That loop calls code_point_at(code_units, pos) repeatedly while advancing pos inside the loop.
+- If translate_codepoint indicated it consumed more than one codepoint (consumed > 1), the loop will perform several iterations and on a later iteration pos can be equal to length (or exceed it). At that moment code_point_at(code_units, pos) is called with index == len(code_units), which triggers the IndexError you see (the "String index out of range" at lines 35–36).
+- In short: you call code_point_at(...) after you have already advanced pos to the end of the array, so you try to read past the end.
+
+Why this is easy to miss
+- The code assumes it is safe to call code_point_at on pos for each consumed count, but it never guarantees that pos is still a valid start index for another codepoint on every iteration. If translate_codepoint already consumed code units that move pos to the end, the next call to code_point_at will be out of range.
+
+Exactly where it happens
+- The failing call is code_point_at(code_units, pos) inside the for pt in range(consumed) loop (the for-loop at the bottom of translate). The bounds check raising the error is at your lines 35–36 (index check inside code_point_at).
+
+How to fix it (concrete steps)
+Pick the correct semantics for what translate_codepoint(...) returns, then change the loop accordingly:
+
+Option A — translate_codepoint returns number of code units consumed
+1. Make translate_codepoint(...) return the number of code units it consumed (1 for a BMP char, 2 for a surrogate pair).
+2. Replace the for-loop with a single advance:
+     pos += consumed
+   (Remove the for pt in range(...): and the char_count calls.)
+3. This avoids calling code_point_at after pos has reached the end.
+
+Option B — translate_codepoint returns number of codepoints consumed
+1. Keep translate_codepoint(...) returning number of codepoints.
+2. But do NOT call code_point_at(...) after you have possibly exhausted the input. Use a safe approach:
+   - Before the loop, if pos >= length: break
+   - For each iteration, compute cp = code_point_at(code_units, pos) only after verifying pos < length (or catch IndexError), then increment pos by char_count(cp).
+   - Or compute the advance amounts in a single pass over the remaining code_units without reading past length.
+3. Example safe loop:
+     for _ in range(consumed):
+         if pos >= length:
+             break   # or raise a clearer error if this is unexpected
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+
+Option C — Have translate_codepoint also advance pos (preferred clarity)
+1. Change translate_codepoint signature to accept and return the new pos, or return number of code units and let translate simply add that number.
+2. Avoid re-inspecting the input inside translate after the translator already reported consumption.
+
+Which to choose
+- Decide whether consumed is meant to be code units or codepoints. The current code treats it ambiguously (the comment says "they have to understand codepoints" but the loop treats consumed as a count of codepoints). The simplest, least error-prone change is to have translate_codepoint return the number of code units it consumed and then do pos += consumed (Option A).
+
+Small immediate patch (if you want minimal change)
+- Replace the block
+     for pt in range(consumed):
+         pos += char_count(code_point_at(code_units, pos))
+  with
+     # consumed is number of code units consumed by translator
+     pos += consumed
+  if that matches translate_codepoint's actual behavior. If it does not match, change translate_codepoint to return code-unit count.
+
+Summary
+- The IndexError occurs because you call code_point_at(code_units, pos) after advancing pos to the end inside the loop. Fix by making the meaning of consumed unambiguous (preferably number of code units) and advance pos directly without repeatedly calling code_point_at when pos is no longer guaranteed valid.

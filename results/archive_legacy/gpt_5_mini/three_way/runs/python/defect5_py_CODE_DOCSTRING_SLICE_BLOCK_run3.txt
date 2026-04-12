@@ -1,0 +1,55 @@
+What happened (root cause)
+- On entry the code tries to decide the "component type" of the array using:
+  if array is not None:
+      inferred_type = type(array)
+  This returns the runtime class of the container itself (for a Python list, <class 'list'>), not the element type stored inside the list.
+- ArrayUtils._copy_list_grow1(...) is being called with that wrong value (a container type instead of an element type). That is the wrong thing to pass and is the immediate cause of the failure you're seeing.
+- The later type check (lines 346–351) tests inferred_type == object to decide whether to raise. Because inferred_type is <class 'list'>, that test doesn't behave as intended. In short: inferred_type is the wrong concept and value from the start.
+
+Where it occurs (specific lines / variables)
+- The error originates at the top of the function where inferred_type is set from array (the code quoted above).
+- As a result, new_list = ArrayUtils._copy_list_grow1(array, inferred_type) receives <class 'list'> (variable inferred_type) instead of an element/component type.
+- The later conditional at lines 346–351 (the slice block you included) uses inferred_type to decide whether to raise a TypeError; because inferred_type is the list class that conditional never expresses the intended semantics.
+
+Why that causes failure (concrete example)
+- Example: add([1, 2], 3, expected_type=int)
+  - type(array) -> <class 'list'>, so inferred_type becomes <class 'list'>, not int.
+  - ArrayUtils._copy_list_grow1(array, inferred_type) is called with the list class where that method expects an element/component type (or at least the code that follows assumes inferred_type represents the element type).
+  - The function later compares inferred_type == object to decide casting behaviour. Because inferred_type is <class 'list'>, the comparison is wrong and the function can either skip an intended error or raise the wrong one (depending on _copy_list_grow1 implementation), producing the failure you saw.
+
+How to fix it (concrete steps and suggested code)
+1. Decide what you mean by "component type":
+   - If you want the element type based on the array's existing elements, use the type of the first non-None element in array (or object if array is empty or all None).
+   - If the array carries an explicit component type elsewhere, use that value instead.
+
+2. Replace the wrong block with code that extracts element type from the array elements. For example:
+
+    if array is not None:
+        # use the first non-None element to infer component type
+        if len(array) > 0 and array[0] is not None:
+            inferred_type = type(array[0])
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+3. Keep your later expected_type check, but ensure it compares the right things (component type vs expected_type). If expected_type is a typing.Type, use "is" or "==" appropriately (and consider using issubclass for subclass allowance).
+
+4. If you need to support lists with mixed element types, consider using object (or typing.Any) as the component type and document that behavior.
+
+Minimal concrete replacement for the three lines that are wrong:
+- Replace
+      if array is not None:
+          inferred_type = type(array)
+  with
+      if array is not None:
+          inferred_type = type(array[0]) if len(array) > 0 and array[0] is not None else object
+
+Why this fix works
+- It gives inferred_type a representative element type (or object when unknown), so ArrayUtils._copy_list_grow1 gets an element/component type as intended, and the TypeError check at lines 346–351 uses a meaningful inferred_type value.
+
+If you want, I can:
+- Propose a version that handles arrays where elements have mixed types (choose common base type or object), or
+- Show a test case that reproduces the failure and a unit test that passes after the fix.

@@ -1,0 +1,62 @@
+What happened (root cause)
+- In the code that builds the fixed-offset zone the variable minutes_offset is reused and reassigned incorrectly when combining the hour and minute parts (lines 406 and 408). That produces the wrong total minutes before it is turned into milliseconds (line 409), and can cause the function to compute an invalid offset or to trip the "Offset is too large" check (line 411) even for valid inputs.
+- Concretely, the code does this:
+  - computes hours_in_minutes (hours * 60),
+  - then one branch does minutes_offset = hours_in_minutes - minutes_offset (line 406),
+  - the other branch does minutes_offset = hours_in_minutes + minutes_offset (line 408),
+  - then multiplies minutes_offset by MILLIS_PER_MINUTE (line 409).
+  Because the original minutes_offset is overwritten and reused instead of computing a distinct total_minutes, the sign logic is easy to get wrong and leads to incorrect total minute values.
+
+Where this occurs
+- The bug is in the factory method that returns a DateTimeZone for an hours/minutes offset (the method that ends by calling cls.for_offset_millis(offset) on line 412). The erroneous lines are:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - line 411: raise ValueError("Offset is too large")
+- Because minutes_offset is reused for two different meanings (original minute component and then total minutes), the sign and bounds checks that should apply to the combined offset are applied to the wrong value or after it was corrupted.
+
+Why that causes failure (concrete example)
+- Example: hours_offset = 2, minutes_offset = 15 (should be +02:15).
+  - hours_in_minutes = 120
+  - If the code picks the subtraction branch erroneously, minutes_offset becomes 120 - 15 = 105 (OK here), but if branches are reversed for other sign combinations the result can be wrong.
+- Example that breaks: hours_offset = -2, minutes_offset = -15 (should be -02:15 per spec).
+  - Expected total minutes = - (2*60 + 15) = -135
+  - But because minutes_offset is reused and the sign handling is inverted in one branch, the code can compute  -120 - (-15) = -105 or other incorrect totals, then convert to milliseconds and either produce the wrong zone or fail the "too large" check.
+
+What to fix (step-by-step)
+1. Do not reuse minutes_offset for the combined total. Introduce a new variable total_minutes.
+2. Apply sign logic clearly and explicitly. Compute hours_in_minutes = abs(hours)*60 and minutes = abs(minutes_offset) if using absolute parts, then reconstruct total_minutes with the correct sign determined from hours and minutes as the rules require.
+3. Validate combinations before combining:
+   - hours in [-23, 23]
+   - minutes in [0, 59] when using abs(minutes) if you prefer absolute handling
+   - disallow (positive hours and negative minutes) per doc (or handle sign combination according to the table).
+4. Compute offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE) and then call cls.for_offset_millis(offset).
+
+Suggested corrected logic (pseudocode you can paste in)
+- Replace the problematic lines with this clear sequence:
+
+  hours_in_minutes = hours_offset * 60
+  # normalize minute sign according to the rules and compute total_minutes explicitly
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("minutes must be non-negative when hours is positive")
+  if hours_offset < 0 and minutes_offset < 0:
+      # e.g. (-2, -15) -> -2:15
+      total_minutes = hours_in_minutes - abs(minutes_offset)
+  elif hours_offset < 0 and minutes_offset > 0:
+      # e.g. (-2, 15) -> -2:15
+      total_minutes = hours_in_minutes - minutes_offset
+  else:
+      # hours positive or zero with positive/zero minutes, or zero with negative minutes
+      total_minutes = hours_in_minutes + minutes_offset
+
+  # final bounds: absolute total must not exceed 23:59 (i.e. 1439 minutes)
+  if abs(total_minutes) > (23 * 60 + 59):
+      raise ValueError("Offset is too large")
+
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+  return cls.for_offset_millis(offset)
+
+Why this solves it
+- total_minutes keeps the original minute component intact and separates concerns (composition vs input). The sign-handling is explicit for each combination, so you cannot accidentally use the wrong sign. The bounds check is applied to the final composed offset, avoiding spurious "Offset is too large" exceptions.
+
+If you want, I can produce a concrete patch diff against the exact file if you paste the surrounding method source (the method header and ~20 lines above and below the shown slice).

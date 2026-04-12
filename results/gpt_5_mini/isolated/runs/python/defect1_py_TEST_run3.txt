@@ -1,0 +1,21 @@
+The tests fail because hit01_timezone.DateTimeZone.for_offset_hours_minutes incorrectly handles the sign and combination validation of hours and minutes. Specifically:
+
+1) Root cause: In for_offset_hours_minutes the code calculates total_millis as hours * 3600000 + minutes * 60000 without enforcing consistent signs or treating negative hours as making minutes negative. That allows mixed-sign inputs (e.g., -2 hours and 15 minutes) to produce -2h +15m (net -1:45) instead of -2:15, or (2, -15) to produce 1:45 instead of raising ValueError.
+
+2) Where it occurs: the faulty logic is in the for_offset_hours_minutes implementation (near the lines that compute total_millis and validate ranges). The method fails to:
+   - normalize minutes sign to match hours when hours is negative,
+   - reject invalid mixed-sign combinations (positive hours with negative minutes and negative hours with positive minutes) per the expected behavior described in the tests/docstring,
+   - treat (0, negative) and (0, positive) correctly for the zero-hour edge cases.
+
+3) Symptom in tests: test_negative_hours_negative_minutes expects (-2,-15) -> -02:15 but current code likely computes -(2)h + (-15)m correctly only if both negative; test_mixed_signs_invalid expects (-2,15) -> -02:15 but code treats minutes as positive, producing -01:45 or similar. Also test expects (2,-15) to raise ValueError but code accepts it.
+
+4) Exact variables/methods: DateTimeZone.for_offset_hours_minutes, variables hours, minutes, and total_millis; DateTimeZone.get_id and get_offset return inconsistent id and offset when inputs have mixed signs.
+
+5) Concrete steps to fix:
+   - Validate ranges: hours in -23..+23, minutes in -59..+59; raise ValueError if outside.
+   - Reject mixed-sign inputs where hours>0 and minutes<0, or hours<0 and minutes>0, unless hours==0 (allow minutes sign to determine offset) or minutes==0.
+   - Compute total_millis by using sign-aware absolute values: sign = 1 if hours>0 or (hours==0 and minutes>0) else -1; total = sign*(abs(hours)*3600000 + abs(minutes)*60000).
+   - Ensure that when hours==0 the sign derives from minutes; when minutes==0 the sign derives from hours.
+   - Normalize ID string to format "+HH:MM" or "-HH:MM" with two-digit fields and leading zeros.
+
+Applying these fixes will make tests for offsets and ids pass.

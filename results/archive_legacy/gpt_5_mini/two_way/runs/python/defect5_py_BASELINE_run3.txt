@@ -1,0 +1,57 @@
+What happened (root cause)
+- At line 336 your code does inferred_type = type(array). That returns the Python list class (e.g. <class 'list'>), not the component/element type of the list. You intended to infer the element type, but you used the container's type.
+- In the case that triggered the failing test (test_add_null_to_null_with_expected_type) both array and element are None. Your code falls through to inferred_type = object at line 340, then at lines 346–351 you unconditionally raise TypeError because inferred_type == object and expected_type != object. That is why the test gets: "Cannot cast object list to str list...".
+- The real bug: when both array and element are None but an expected_type is supplied, you should use expected_type to create a list of that element type (or at least treat it as the desired component type) instead of treating the component type as object and raising.
+
+Where it occurs in code
+- Wrong source for element type: line 336 — inferred_type = type(array). This is the container type, not the element type.
+- Wrong fallback logic: lines 337–340 — when array is None and element is None you set inferred_type = object.
+- Wrong check and raise: lines 346–351 — you raise if inferred_type == object and expected_type != object, which triggers for the test case where both array and element are None but expected_type=str.
+
+Why that leads to the failing test
+- Test calls ArrayUtils.add(None, None, expected_type=str).
+- Your code sets inferred_type = object (line 340).
+- Then the check at line 346 sees inferred_type == object and expected_type != object and raises TypeError, but the test expects a [None] list (no error). So the function incorrectly refuses a valid operation when the caller provided expected_type.
+
+Exactly what to change (clear steps)
+1. Infer element/component type correctly:
+   - If array is not None:
+     - If the array has at least one element, use type(array[0]) (or a consistent mechanism to decide element type).
+     - If the array is empty, prefer expected_type if provided; otherwise fall back to object.
+2. If array is None:
+   - If element is not None, use type(element).
+   - If element is None and expected_type is provided, use expected_type (do not immediately treat it as object).
+   - Only fall back to object if array, element, and expected_type are all None.
+3. Change the TypeError logic:
+   - Only raise if you actually inferred a concrete element type that conflicts with expected_type (for example, inferred_type is not object and not equal to expected_type and element is not None and not an instance of expected_type).
+   - Do not raise merely because inferred_type == object when expected_type is provided — instead use expected_type as the component type in that case.
+
+Minimal example replacement logic (places and lines to modify)
+Replace lines 335–340 and 346–351 with something like:
+
+    if array is not None:
+        # prefer element type from first element if available
+        if len(array) > 0 and array[0] is not None:
+            inferred_type = type(array[0])
+        elif expected_type is not None:
+            inferred_type = expected_type
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+    # only raise on real type conflict, not when inferred_type is object
+    if expected_type is not None and inferred_type is not object and inferred_type is not expected_type:
+        raise TypeError(...)
+
+Why this fixes the test
+- For ArrayUtils.add(None, None, expected_type=str):
+  - array is None, element is None, expected_type=str → inferred_type becomes str (not object), so no erroneous "object -> str" exception and you can create a one-element list [None] for the expected_type.
+- For other cases, you still infer from existing elements or the provided element, and you only raise if you detect a real mismatch between an inferred concrete type and expected_type.
+
+Notes
+- If you need to handle heterogeneous arrays or multiple element types, you may need a more sophisticated inference policy (e.g., check all elements or allow subclass relationships). The above patch sticks to minimal changes to match the tests and the documented behavior.

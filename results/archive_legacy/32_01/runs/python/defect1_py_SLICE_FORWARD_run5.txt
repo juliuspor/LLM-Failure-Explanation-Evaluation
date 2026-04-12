@@ -1,0 +1,41 @@
+What happened (where it fails)
+- At line 406 the code sets minutes_offset using subtraction:
+  minutes_offset = hours_in_minutes - minutes_offset
+- Immediately after, at line 408 it unconditionally reassigns minutes_offset using addition:
+  minutes_offset = hours_in_minutes + minutes_offset
+- Because there is no else or conditional preventing both lines running, the assignment on line 406 is always overwritten by the assignment on line 408. That means the subtraction result is never used.
+- That produces a wrong minutes_offset value going into the multiplication at line 409:
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The wrong value then causes the code to fall into the error branch at line 411:
+  raise ValueError("Offset is too large")
+  (or otherwise produce an incorrect offset returned by cls.for_offset_millis at line 412).
+
+Why it fails (root cause)
+- The root cause is a missing conditional branch (an else) or incorrect control flow: the code was supposed to pick either the subtraction variant (line 406) or the addition variant (line 408) depending on some condition (sign or direction), but as written it executes both lines sequentially so line 408 always wins.
+- That makes minutes_offset incorrect (usually larger or wrong-signed), which either overflows safe_multiply or produces a value that triggers the "Offset is too large" ValueError at line 411. The error therefore originates at the reassign on line 408 overwriting the correct value set on line 406.
+
+Exactly where to change it (concrete fixes)
+1. Restore the intended conditional flow: make line 408 execute only when the subtraction on line 406 should not run. For example, if the original intent was "if negative then subtract else add", wrap line 408 in an else:
+   - After line 406 add:
+     else:
+         minutes_offset = hours_in_minutes + minutes_offset
+   (Or if the condition is the opposite, swap them accordingly.)
+
+2. If the intent was to compute different signed offsets, make the condition explicit. Example change (replace the two reassigns with):
+   if should_subtract:                         # determine sign earlier
+       minutes_offset = hours_in_minutes - minutes_offset
+   else:
+       minutes_offset = hours_in_minutes + minutes_offset
+
+3. Add unit tests to cover both branches so overwriting mistakes are caught:
+   - Test with an input that should take the subtraction branch and confirm the returned offset matches expectation.
+   - Test with an input that should take the addition branch.
+   - Test a boundary case that previously raised ValueError.
+
+How to verify the fix (steps)
+1. Edit the method so line 408 is inside the correct else-block or remove the redundant assignment.
+2. Run existing tests. If none exist, add tests that pass the values that previously caused the ValueError.
+3. Observe that minutes_offset passed to FieldUtils.safe_multiply is the expected value and that cls.for_offset_millis(offset) returns the correct result instead of raising "Offset is too large".
+
+Summary
+- The bug is a missing conditional/else: line 408 always overwrote line 406, producing an incorrect minutes_offset which then caused safe_multiply/ValueError behavior. Fix it by making the addition occur only when intended (add the appropriate else or correct condition), and add tests for both branches.

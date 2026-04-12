@@ -1,0 +1,50 @@
+What went wrong (root cause)
+- The loop that advances pos after a translator handled codepoints assumes a different meaning for consumed than the translator actually uses.
+- translate_codepoint(...) returns a count measured in UTF-16 code units (char units), but the code here treats consumed as a count of codepoints (not code units). That mismatch makes pos move by the wrong amount and leads to skipped characters, incorrect indexing, or an IndexError.
+
+Where it happens in your code
+- Line with consumed = self.translate_codepoint(code_units, pos, out) (start of the while loop).
+- The else branch that runs when consumed != 0 (the "contract" comment and following for-loop).
+- The for-loop body:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (this is the code that advances pos; location shown in your snippet just after the comment)
+
+Why that causes the failure
+- If translate_codepoint returns a number of code units (1 or 2 for BMP vs. surrogate pair), and it returns 2 for a surrogate pair, the for-loop executes twice:
+  - On the first iteration code_point_at(code_units, pos) sees the high surrogate and the following low surrogate, returns the combined supplementary codepoint, and char_count(...) returns 2. pos is increased by 2.
+  - On the second iteration pos now points after the surrogate pair, code_point_at returns the next code unit, char_count returns 1 (or 2 if it's another pair) and pos is increased again.
+  That yields a total advance of 3 (2+1) when the translator actually consumed 2 code units — you overshot the intended position.
+- If translate_codepoint instead returned the number of codepoints consumed (1 for a surrogate pair), but its implementation actually uses code units, the for-loop may still behave incorrectly in other cases. The core bug is that the code calling translate_codepoint and the translate_codepoint implementation disagree on the unit of measurement (code units vs codepoints).
+- The helper code_point_at (lines 38–44) aggravates the problem by returning a combined codepoint when a high+low surrogate pair is present; that causes char_count(code_point_at(...)) to return 2 for the whole pair. That is correct if you intended to advance by codepoints, but wrong if consumed is already in code units.
+
+Concrete ways to fix it (step-by-step)
+Choose one consistent contract and enforce it:
+
+Option A — Make translate_codepoint return code units consumed (preferred minimal change)
+1. Change the position-advancing code to add consumed directly. Replace the for-loop with:
+   pos += consumed
+   (Remove the for pt in range(consumed) loop entirely.)
+2. Ensure translate_codepoint returns 1 for a single BMP char and 2 for a surrogate pair. Verify every translator implementation follows that rule.
+
+Option B — Make translate_codepoint return codepoints consumed
+1. Change the translator implementations so they return the number of codepoints they consumed (a surrogate pair counts as 1).
+2. Keep the existing for-loop but make its logic explicit and robust:
+   for _ in range(consumed):
+       cp = code_point_at(code_units, pos)
+       pos += char_count(cp)
+3. Add an assertion or check at the start of translate_codepoint implementations (or in the caller) so a mismatch will fail fast during testing.
+
+How to verify which you have now
+- Inspect the implementation of translate_codepoint. If it ever returns 2 when it handled a surrogate pair, it uses code units. If it returns 1 for a surrogate pair, it uses codepoints.
+- Write a unit test with an input containing a supplementary character (a surrogate pair). Observe behavior:
+  - If you get an IndexError or missing/duplicated characters, the contract is inconsistent.
+  - If using Option A, the unit test should pass by advancing pos by consumed.
+  - If using Option B, the for-loop must iterate consumed times and each iteration must advance by char_count(code_point_at(...)).
+
+Summary
+- Root cause: mismatch between what translate_codepoint returns (code units) and how the caller advances pos (treats consumed as codepoints and multiplies advances).
+- Fix: pick one contract and implement the corresponding, simple position advance:
+  - If consumed is code units -> pos += consumed
+  - If consumed is codepoints -> advance by char_count(code_point_at(...)) consumed times
+- Verify translator implementations and add tests for surrogate pairs so the mismatch is caught early.

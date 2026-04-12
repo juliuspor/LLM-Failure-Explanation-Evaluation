@@ -1,0 +1,63 @@
+What happened (where it fails)
+- At line 396 the code rejects any negative minutes unconditionally:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This throws for inputs that the docstring says are allowed, e.g. hours_offset = -2, minutes_offset = -15 (line 396).
+
+- The sign arithmetic that computes a total minute offset is wrong at lines 402 and 404:
+  402: minutes_offset = hours_in_minutes - minutes_offset
+  404: minutes_offset = hours_in_minutes + minutes_offset
+  Those branches invert the sign in the wrong case. For example, for hours_offset = -2 and minutes_offset = 15:
+    hours_in_minutes = -120
+    correct total minutes = -120 + 15 = -105  (result -02:15)
+    but the code on line 402 does -120 - 15 = -135 (wrong)
+  So the code produces the wrong offset sign/value for negative hours with positive minutes.
+
+Why it fails (root cause)
+- The validation at line 396 is too strict: it forbids any negative minutes even though the docstring allows negative minutes when hours are zero or negative.
+- The sign handling (lines 402/404) is implemented incorrectly: the subtraction is used where an addition is required. In fact the correct combined minutes is simply hours_in_minutes + minutes_offset in the allowed cases; the existing code sometimes subtracts and thus flips the sign.
+
+Exactly where (lines and variables)
+- Line 396: rejects minutes_offset < 0 unconditionally — prevents valid inputs (minutes_offset) when hours_offset <= 0.
+- Line 402: minutes_offset = hours_in_minutes - minutes_offset — incorrect sign for negative hours + positive minutes.
+- Line 404: minutes_offset = hours_in_minutes + minutes_offset — used in the other branch but the branching logic makes 402/404 apply incorrectly.
+- Line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) — uses the incorrectly computed minutes_offset to produce a wrong millisecond offset (or an exception if earlier checks reject).
+
+Concrete fixes (step-by-step)
+1. Fix minutes range check (line 396):
+   - Allow minutes_offset to be negative when hours_offset <= 0.
+   - Keep mandatory 0 <= minutes_offset <= 59 only when hours_offset > 0.
+   Concretely:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes not allowed")
+
+2. Simplify the arithmetic for the combined offset (replace lines 402/404):
+   - Compute total minutes as:
+       total_minutes = hours_in_minutes + minutes_offset
+     This handles all allowed combinations:
+       - hour positive, minutes positive => add
+       - hour negative, minutes positive => adds (e.g. -120 + 15 = -105)
+       - hour negative, minutes negative => adds (e.g. -120 + -15 = -135)
+       - hour zero => total = minutes_offset
+   - Replace uses of minutes_offset after line 401 with total_minutes (or assign back minutes_offset = hours_in_minutes + minutes_offset).
+
+3. Keep the existing overall magnitude check (offset too large) but apply it to total_minutes after the fix.
+
+Minimal code patch sketch (where to edit)
+- Replace the check at line 396 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes not allowed")
+- Replace lines 402–405 with:
+    minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- It matches the docstring rules: negative minutes are allowed when hours are zero or negative; positive hours cannot have negative minutes.
+- The arithmetic becomes the simple and correct combination of hours and minutes into total minutes (no flipped signs).
+- The millisecond offset (line 405) will then be correct and will not be based on a wrongly signed minute count.
+
+If you want, I can produce a small unit test set (examples from the docstring) to verify the corrected behavior.

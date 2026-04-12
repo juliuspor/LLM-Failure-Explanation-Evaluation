@@ -1,0 +1,47 @@
+What happened (what failed)
+- The code raised ValueError("Minutes out of range: -15") at these lines:
+  - Line 396–397:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means minutes_offset was -15 when the method validated it, so the method rejected the input immediately.
+
+Why this happened (root cause)
+- The method expects minutes_offset to be a non‑negative number in 0..59 and then applies the sign coming from hours_offset when building a final offset (see the later code that combines hours and minutes).
+- A caller passed minutes_offset as a negative number (for example hours_offset = -1, minutes_offset = -15). The method does not accept negative minutes at validation time and therefore raises the error before it ever combines hours and minutes.
+- In other words, the method and the caller disagree about the sign convention for minutes:
+  - This method expects minutes_offset to be >= 0, and infers negative total minutes by looking at hours_offset.
+  - The caller supplied minutes_offset already negative, so the early check at lines 396–397 rejects it.
+
+Where it occurs in the code
+- Validation happens at lines 396–397 (minutes range check).
+- The combination/normalization logic that assumes minutes are non‑negative runs after that (the try block that computes hours_in_minutes and then does either minutes_offset = hours_in_minutes - minutes_offset or + minutes_offset).
+
+How to fix it (clear steps)
+Choose one of these two consistent behaviors and implement it:
+
+Option A — Require minutes be non‑negative (small change + clarify API)
+1. Document the method: minutes_offset must be 0..59 and its sign is taken from hours_offset.
+2. Keep the current validation (lines 396–397).
+3. Ensure callers pass minutes as a positive value when hours is negative (e.g. use hours_offset = -1, minutes_offset = 15, not -15).
+This is minimal but requires fixing all callers that currently pass negative minutes.
+
+Option B — Accept signed minutes (change code so both styles work)
+1. Change the minutes validation to allow -59..59 instead of 0..59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total minutes in a sign-consistent way. Replace the current try block with something clearer, for example:
+   try:
+       total_minutes = hours_offset * 60 + minutes_offset
+       # If hours_offset is negative but caller passed positive minutes intended as positive fraction,
+       # you might want to interpret positive minutes as a magnitude and apply the sign of hours_offset:
+       # total_minutes = hours_offset * 60 + ( -minutes_offset if hours_offset < 0 and minutes_offset > 0 else minutes_offset )
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   except ArithmeticError:
+       raise ValueError("Offset is too large")
+3. Decide and document the exact rule for mixed-sign inputs (e.g. hours=-1, minutes=15 -> total -45 minutes, or hours=-1, minutes=-15 -> total -75 minutes). The code snippet above shows two possible interpretations; pick the one that matches intended semantics.
+
+Recommended quick fix (practical)
+- If intended semantics are that minutes is always a non-negative magnitude and the sign is given by hours (common in time-zone APIs), go with Option A: change callers to pass minutes positive and add a short docstring. That directly fixes the failing test where minutes = -15.
+
+Summary
+- The failure occurred because the method rejects negative minutes (lines 396–397) but the caller passed a negative minutes_offset (-15). Fix either the callers (make minutes non-negative) or the method (allow signed minutes and normalize), and document the chosen convention so callers and this method agree.

@@ -1,0 +1,70 @@
+What happened
+- The test calls escaper.translate_string('\U0001F630') (U+1F630, a character outside the BMP).
+- Inside translate_string the code builds or treats a sequence called code_units and uses an integer index to access elements.
+- Later the code checks an index and hits lines 35–36:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  That check raised IndexError because the code tried to access an element beyond the end of code_units.
+
+Root cause (why it failed)
+- translate_string is assuming it can look ahead (or slice) using index + 1 (or otherwise move the index) without ensuring that index+1 is still inside code_units.
+- For the input '\U0001F630' the code path that handles characters outside the basic multilingual plane causes the code to increment or compute a lookahead index that equals len(code_units). When the code then performs the existing bounds check it raises IndexError.
+- In short: the code does a lookahead or consumes a second code unit for a multi-unit character but does not verify that the second unit exists before accessing it. The check on line 35 detects the out-of-range access and raises.
+
+Where it happens (which variables/methods/lines)
+- Method: translate_string (the test calls this).
+- Variables: code_units (the sequence being indexed), index (the index variable that becomes out-of-range).
+- Exact failure: lines 35–36 in the slice block perform the bounds check and raise IndexError because code attempted to use index that is >= len(code_units).
+
+Concrete ways to fix it (step-by-step)
+1) Prefer working with Unicode code points
+   - Iterate the Python string as characters and use ord(ch) to get the Unicode code point.
+   - Example change: instead of splitting into code_units and doing manual surrogate handling, do:
+     for ch in input_string:
+         cp = ord(ch)
+         ... handle cp ...
+   - Rationale: this avoids manual off-by-one errors and works correctly for characters >= U+10000.
+
+2) If you must work with code_units and do lookahead, always check the lookahead index
+   - Before accessing code_units[index+1], ensure index+1 < len(code_units).
+   - Example change around the lookahead:
+     if index + 1 >= len(code_units):
+         # handle the case where the next unit is missing (error or fallback)
+     next_unit = code_units[index + 1]
+   - Rationale: this prevents the IndexError at lines 35–36.
+
+3) Update the bounds check and consuming logic consistently
+   - If you consume two units for a single character, increment index by 2 and check bounds accordingly before consuming.
+   - Ensure every place that advances index has matching checks that prevent reading past len(code_units).
+
+4) Add tests for multi-unit characters
+   - Add tests like the failing one and some additional examples:
+     '\U0001F600' (😀), '\U00020000', etc.
+   - This will detect future regressions.
+
+Minimal concrete patch idea
+- Replace any code that does something like:
+    # pseudo-code shown to illustrate the bug
+    unit = code_units[index]
+    if is_high_surrogate(unit):
+        low = code_units[index + 1]        # <-- unsafe
+        combine...
+        index += 2
+    else:
+        index += 1
+  with safe code:
+    unit = code_units[index]
+    if is_high_surrogate(unit):
+        if index + 1 >= len(code_units):
+            raise ValueError("Truncated surrogate pair at end of input")
+        low = code_units[index + 1]
+        combine...
+        index += 2
+    else:
+        index += 1
+
+Why the suggested fixes are safe
+- Using ord() on Python str uses actual Unicode code points and removes need to reason about surrogate pairs.
+- Explicitly checking index+1 < len(code_units) prevents the out-of-range access that triggered the IndexError at line 35.
+
+If you want, paste the translate_string implementation and I will show the exact lines to change and a one-file patch.

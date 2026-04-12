@@ -1,0 +1,62 @@
+What fails
+- The tests fail because GrayPaintScale.get_paint currently:
+  1. does not clamp the incoming argument value to the configured lower/upper bounds, so negative inputs (like -0.5) or values > upper can produce wrong intermediate math or exceptions; and
+  2. converts the computed gray fraction to an 8-bit channel using rounding that maps 0.5 to 128 instead of the expected 127 (the tests expect 127 for 0.5 because they floor 127.5 → 127).
+
+Where it happens
+- In GrayPaintScale.get_paint (the failing method) the variables involved are:
+  - value (the method argument),
+  - self.lower and self.upper (the configured bounds),
+  - fraction or gray (the normalized fraction computed from value),
+  - scaled (the result of fraction * 255),
+  - rgb (the returned tuple).
+- The missing clamping is at the start of get_paint, before computing fraction:
+  fraction = (value - self.lower) / (self.upper - self.lower)
+  If value is outside [self.lower, self.upper], fraction can be <0 or >1. If the code later uses that as an index or in operations assuming 0..1, it can cause exceptions or produce negative/overflow channel values.
+- The rounding error happens when converting scaled to an integer channel. If the implementation uses round(scaled) (or int(round(scaled))) then for value=0.5 with default bounds 0.0..1.0:
+  fraction = 0.5
+  scaled = 0.5 * 255 = 127.5
+  round(127.5) => 128
+  int(128) => 128
+  That yields (128,128,128) while the test expects (127,127,127).
+
+Why that breaks the tests
+- test_lower_bound_clamping expects get_paint(-0.5) -> (0,0,0). Without clamping, fraction becomes negative and subsequent math can yield negative channel values or an exception.
+- test_mid_value_interpolation expects get_paint(0.5) -> (127,127,127). Using round() yields (128,128,128) and the assertion fails.
+
+How to fix it (step-by-step)
+1. Clamp value to the bounds at the start of get_paint:
+   - value_clamped = min(max(value, self.lower), self.upper)
+   - Use value_clamped for the rest of the computation.
+2. Compute normalized fraction using the clamped value:
+   - fraction = (value_clamped - self.lower) / (self.upper - self.lower)
+3. Convert the fraction to an 8-bit channel by multiplying by 255 and using integer truncation toward zero (floor for positive values) or explicit clamp:
+   - scaled = int(fraction * 255)   # int() on positive float truncates toward zero, matching the test expectation (127.5 -> 127)
+   - ensure scaled is in 0..255: scaled = min(max(scaled, 0), 255)
+4. Return the RGB tuple using scaled for each channel:
+   - return (scaled, scaled, scaled)
+
+Suggested replacement implementation for get_paint
+- Replace the body of GrayPaintScale.get_paint with something like:
+
+def get_paint(self, value):
+    # 1) clamp to bounds
+    v = min(max(value, self.lower), self.upper)
+    # 2) normalize to 0..1
+    denom = (self.upper - self.lower)
+    if denom == 0:
+        fraction = 0.0
+    else:
+        fraction = (v - self.lower) / denom
+    # 3) scale to 0..255 and truncate (so 127.5 -> 127)
+    gray = int(fraction * 255)
+    # 4) clamp channel to valid byte range just in case
+    gray = min(max(gray, 0), 255)
+    return (gray, gray, gray)
+
+Notes and justification
+- The explicit clamping of value prevents negative fractions and eliminates the exception for inputs like -0.5.
+- Using int(fraction * 255) (not round) produces 127 for 0.5 because int(127.5) → 127, matching the test's numeric expectation.
+- Final clamp of gray to 0..255 guards against floating-point edge cases.
+
+If you paste your current get_paint implementation here I can point to the exact line(s) to change; but the two changes above (clamp input, use int(truncation) for scaling) are the specific fixes required to make the provided tests pass.

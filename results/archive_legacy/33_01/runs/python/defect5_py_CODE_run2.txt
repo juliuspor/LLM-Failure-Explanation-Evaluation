@@ -1,0 +1,55 @@
+What happens (root cause, where it happens)
+- On this line you set inferred_type = type(array). That returns the Python type of the list object (usually list), not the element type you want:
+  - If array is not None, type(array) is list (or whatever container class), not the type of the items inside the list.
+- Because inferred_type becomes list, downstream code gets the wrong "element type":
+  - The call new_list = ArrayUtils._copy_list_grow1(array, inferred_type) receives the container class instead of the element class.
+  - The expected-type check if inferred_type == object ... will rarely be true (list != object), so the conditional logic that is supposed to detect a boxed-object-list and reject an unsafe cast never runs as intended.
+- Practically, that mismatch is the apparent cause of the failure: you try to treat a list-as-array with the wrong element class, which produces a ClassCast-like failure where the runtime tries to treat Object[] as, e.g., String[] (the error message in your code shows the Java-style symptom).
+
+Exactly where to change (line-level fixes)
+1) Determine element type from the actual elements, not from the list object:
+   - Replace:
+     inferred_type = type(array)
+   - With:
+     if array is not None and len(array) > 0:
+         inferred_type = type(array[0])
+     else:
+         # fall through to element or object logic
+
+2) Make sure array None is handled when passing into _copy_list_grow1:
+   - Replace:
+     new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+   - With:
+     new_list = ArrayUtils._copy_list_grow1(array or [], inferred_type)
+   This avoids passing None to a function that expects a list.
+
+3) Use identity/is where appropriate for object check and make sure inferred_type really represents element class:
+   - Replace:
+     if inferred_type == object and expected_type != object:
+   - With:
+     if inferred_type is object and expected_type is not object:
+
+Why these exact changes fix the failure
+- Getting the element type from array[0] gives the correct element class so the copy/grow operation and subsequent type checks are consistent with the actual data.
+- Passing array or [] prevents downstream code from receiving None and misbehaving.
+- Using is for built-in singletons (object) is the correct identity check; with a correct inferred_type you'll properly trigger the TypeError when you actually have an object-typed element list and an incompatible expected_type.
+
+Extra edge cases to cover (explicit)
+- If array is non-None but empty (len(array) == 0) and element is not None, use type(element) as the inferred type.
+- If both array is None/empty and element is None, keep inferred_type = object (your existing fallback).
+- Ensure ArrayUtils._copy_list_grow1 returns a list with length >= 1 (your code writes to new_list[len(new_list) - 1]); if that function can return an empty list, you must fix that function or check length before assignment.
+
+Minimal corrected logic outline (concrete)
+- if array is not None and len(array) > 0:
+    inferred_type = type(array[0])
+  elif element is not None:
+    inferred_type = type(element)
+  else:
+    inferred_type = object
+- new_list = ArrayUtils._copy_list_grow1(array or [], inferred_type)
+- new_list[-1] = element
+- if expected_type is not None:
+    if inferred_type is object and expected_type is not object:
+        raise TypeError(...)
+
+This change removes the wrong use of type(array) (the real bug), prevents passing None into _copy_list_grow1, and makes the expected_type comparison reliable.

@@ -1,0 +1,38 @@
+What happened (root cause)
+- The code treats any float x whose value equals int(x) as an integer and calls int(x) (lines in add_number). For the special float -0.0:
+  - -0.0 == int(-0.0) is True, so the code enters the integer branch and runs value = int(x).
+  - int(-0.0) returns 0 (Python ints have no sign bit), so value becomes 0.
+  - Later you call self.add(str(value)) and output "0" instead of the expected "-0.0".
+- The negative-sign detection earlier (x < 0 and prev == '-') does not catch -0.0 because in floating-point comparisons -0.0 < 0 is False. So the code neither preserves the sign nor prints "-0.0".
+
+Where it happens (specifics)
+- In add_number, the test if x == int(x) (start of the integer-handling branch) and the assignment value = int(x) cause loss of the negative-zero sign.
+- The final self.add(str(value)) emits "0" (line shown in the code block) which makes the test fail: "Expected -0.0, got 0."
+- The get_last_char / prev logic (used to decide adding a space) never sees the negative-zero sign because the sign is lost earlier.
+
+How to fix it (clear steps)
+1. Detect negative zero before converting x to int. Use math.copysign to check sign bit:
+   - is_neg = math.copysign(1.0, x) < 0.0
+2. If x is zero but has negative sign (is_neg and x == 0.0), output the negative-zero representation directly (e.g. "-0.0") and return, instead of converting to int.
+3. Otherwise proceed with the existing integer-special-case logic.
+
+Concrete patch (where to insert and what to change)
+- Immediately after entering add_number, add:
+    is_neg = math.copysign(1.0, x) < 0.0
+- Then replace or augment the integer branch with something like:
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        # special-case negative zero: preserve sign
+        if x == 0.0 and is_neg:
+            self.add("-0.0")
+            return
+        value = int(x)
+        ...
+        self.add(str(value))
+- Also, if you intend to keep the earlier check that inserts a space when the last char is '-', move or leave it but be aware that for -0.0 the x < 0 test will still be False; the negative-zero preservation above avoids relying on x < 0.
+
+Why this fixes it
+- math.copysign examines the float sign bit and returns -1.0 for negative-zero, so is_neg becomes True for -0.0.
+- Handling -0.0 before int(x) avoids losing the sign when converting to an int.
+- You then produce the expected "-0.0" string instead of "0".
+
+No other parts of the code need to be guessed; the failure is specifically due to converting -0.0 to int and losing the sign bit.

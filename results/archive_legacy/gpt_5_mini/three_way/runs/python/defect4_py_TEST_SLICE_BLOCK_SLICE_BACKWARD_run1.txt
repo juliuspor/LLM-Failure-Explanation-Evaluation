@@ -1,0 +1,48 @@
+What happened (root cause)
+- In TimePeriodValues._update_bounds the code that updates the "max middle" tracking uses the wrong variable for the comparison / update. In other words, instead of comparing the current period's middle to the stored maximum-middle value it compares to some other stored value (for example max_start or a different index's middle), or it uses the wrong index variable when setting the stored index.
+- As a result, when the fourth item is added in test_max_middle_index_simple the code incorrectly thinks that item has the largest middle and sets self._max_middle_index = 3, even though the true largest middle is at index 1 (mid=150). The failing behavior is described by your test comment "Expected max_middle_index=1, got 3".
+
+Where it occurs (specific names and lines)
+- The problem is in _update_bounds (the method that runs when items are added). The slice you provided shows the nearby min-start logic (lines 331–349 and 340–346), and the test name and comments indicate the bug is in the analogous "max middle" branch.
+- The mistaken code is using the wrong variable / index in the comparison / assignment. Concretely:
+  - It should fetch the stored maximum middle value from the period at self._max_middle_index, compare the current period's middle to that stored middle, and if current > stored set self._max_middle_index = index.
+  - Instead the code compares against (or sets) the wrong thing — e.g., it reads the start or end or uses a different index variable — so it sets self._max_middle_index incorrectly.
+
+Why that causes the observed failure
+- The algorithm for tracking maxima/minima relies on comparing the new period's metric (middle, start, or end) against the previously stored best value. If the comparison uses the wrong stored value (wrong metric or wrong index), then the comparison yields wrong results and the stored index is updated incorrectly. That exactly explains your observed "got 3 instead of 1".
+
+Exact fix (step-by-step, minimal and deterministic)
+1. In _update_bounds, locate the "max middle" branch. It will:
+   - compute current middle for the new period (call it middle),
+   - check if self._max_middle_index >= 0,
+   - if so, obtain the period at self._max_middle_index and compute its middle (call it max_middle),
+   - compare middle to max_middle and update self._max_middle_index when appropriate.
+2. Ensure the comparison uses the variable max_middle (the stored maximum middle) — not max_start, max_end, or any other variable. The comparison must be:
+   if middle > max_middle:
+       self._max_middle_index = index
+3. Ensure the assignment sets self._max_middle_index to index (the index of the item just added). Do not set any other index variable.
+4. For the else branch (when no max yet), ensure you initialize self._max_middle_index = index.
+
+Suggested corrected code sketch for that branch
+- Replace the buggy block for max-middle with (pseudocode, use your actual names):
+
+    # compute middle for the new period (already done)
+    if self._max_middle_index >= 0:
+        max_mid_period = self.get_data_item(self._max_middle_index).get_period()
+        if isinstance(max_mid_period, SimpleTimePeriod):
+            max_middle = max_mid_period.get_middle_millis()
+        else:
+            max_middle = int((max_mid_period.get_start().timestamp() * 1000 +
+                              max_mid_period.get_end().timestamp() * 1000) // 2)
+        if middle > max_middle:
+            self._max_middle_index = index
+    else:
+        self._max_middle_index = index
+
+Why this is sufficient
+- This makes the comparison use the correct stored metric (max_middle) and, on success, store the correct index (index). That restores the intended invariant: self._max_middle_index always indexes the period with the greatest middle seen so far.
+
+Extra verification
+- Run your provided tests after making this single fix. test_max_middle_index_simple and test_generic_time_period_support should both pass if the other branches (min/max start/end/min middle) follow the same correct pattern.
+
+If you want, paste the exact _update_bounds code here and I will produce a precise one-line patch (showing the exact wrong variable and the corrected one).

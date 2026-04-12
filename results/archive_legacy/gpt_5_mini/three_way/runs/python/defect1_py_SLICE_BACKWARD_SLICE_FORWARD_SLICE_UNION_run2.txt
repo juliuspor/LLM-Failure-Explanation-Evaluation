@@ -1,0 +1,47 @@
+What happened (where it fails)
+- The method throws ValueError at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That validation rejects negative minute values, but later code at lines 402 and 404 expects minutes_offset can be negative (it uses `hours_in_minutes - minutes_offset` and `hours_in_minutes + minutes_offset`):
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 404 |                 minutes_offset = hours_in_minutes + minutes_offset
+- In short: minutes_offset is validated too early (and with the wrong condition), so valid inputs that produce a negative minutes part (or require applying a sign later) are rejected before the sign logic runs.
+
+Why this is the root cause (clear, concrete)
+- The check at line 396 assumes minutes_offset must be between 0 and 59 at that moment. But the algorithm later manipulates minutes_offset with sign-aware logic (lines 402/404). That implies minutes_offset may legitimately be negative until the sign is applied or until it’s combined with hours.
+- Because the validation runs before the sign/combination logic, any input that yields a negative minutes component (for example when parsing a negative timezone like "-01:30" if minutes carry the sign or are adjusted later) triggers the ValueError even though the final offset would be valid.
+- The code therefore rejects valid inputs (or prevents proper handling of signed minute components) rather than rejecting only truly out-of-range minute values.
+
+Exactly where to change (concrete fixes, step-by-step)
+Option A — Validate absolute minutes and allow negative before sign application
+1. Replace lines 396–397:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with:
+   if abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. This keeps the later sign-aware math at lines 402/404 working while still rejecting magnitudes >= 60.
+
+Option B — Move validation until after sign is applied
+1. Remove or comment out lines 396–397.
+2. After the code that applies the sign/combines with hours (i.e., after the logic that sets minutes_offset at lines 402/404 and before multiplying to millis at line 405), add:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range after sign applied: {minutes_offset}")
+3. This ensures minutes are checked only after you know whether they’re negative or positive.
+
+Option C — Keep minutes unsigned and apply sign explicitly
+1. Keep minutes_offset always non-negative (0..59) at validation time.
+2. Introduce a separate sign variable (e.g., sign = +1 or -1) when parsing the offset sign.
+3. After validation, convert to signed minutes: minutes_offset = sign * minutes_offset.
+4. Then do the combination with hours using signed minutes (so lines 402/404 will use the signed value correctly).
+5. Validate magnitude if needed after applying sign.
+
+Which to use
+- If the rest of the method expects signed minutes when it reaches lines 402/404, use Option A or C.
+- If the method’s intent was to reject any minute magnitude >= 60 but only after sign application, use Option B.
+
+Small note on safety
+- After fixing validation placement/condition, ensure `hours_in_minutes` is initialized before lines 402/404 and that the multiplication at line 405 (FieldUtils.safe_multiply) still uses the correctly signed minutes_offset.
+
+Summary
+The code fails because minutes_offset is validated as strictly non‑negative too early (lines 396–397), but later logic at lines 402/404 expects a signed minutes value. Move or change the validation to check abs(minutes) <= 59 or validate after you apply the sign, or keep minutes unsigned and apply sign separately before combining with hours.

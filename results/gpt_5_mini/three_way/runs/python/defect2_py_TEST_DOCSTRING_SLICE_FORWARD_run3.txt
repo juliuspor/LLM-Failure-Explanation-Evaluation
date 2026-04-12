@@ -1,0 +1,22 @@
+The test failures occur because the implementation of GrayPaintScale.get_paint does not properly clamp or round values when converting the normalized position to an 8-bit gray component. Specifically:
+
+1) Where it occurs: in GrayPaintScale.get_paint, the method clamps the input value to the bounds (lower_bound and upper_bound), but then computes the component using float multiplication and casts/rounds incorrectly. The code likely does something like:
+   position = (value - lower) / (upper - lower)
+   component = int(position * 255.0)
+   return (component, component, component)
+
+2) What happened: Using int() truncates toward zero. For a position of 0.5 the product is 127.5 and int(127.5) yields 127 which matches the test, but other edge cases can produce out-of-range components. More importantly, when value is exactly equal to upper bound, floating point rounding can produce 255.0000001 or 254.9999999; using int( ... ) may produce 255 or 254 unexpectedly. If the code uses round() without constraining, round(255.0) gives 255 but round(255.5) can give 256 in some rounding strategies or due to intermediate math, which violates 0..255 and triggers ValueError.
+
+3) Root cause: The method raises ValueError because the final computed component fell outside 0..255. This happens when the arithmetic and rounding allow producing 256 (e.g., rounding 255.5) or -1, or when bounds are zero-length (upper==lower) producing division by zero or NaN which then leads to invalid component values.
+
+4) Exact variables/methods: the problematic variables are value (input), lower_bound, upper_bound, position (normalized), and component (the computed 0..255 channel). The exception is raised in get_paint after converting component to int/round and checking 0..255.
+
+5) Steps to reproduce: call get_paint with value > upper_bound (like 1.5) if clamping is not applied, or with upper==lower, or with a value that due to floating point math produces component==256.
+
+6) Concrete fixes to apply in GrayPaintScale.get_paint:
+   - Clamp value: value = max(lower_bound, min(upper_bound, value)).
+   - Compute position only after clamping: position = (value - lower_bound) / (upper_bound - lower_bound) if upper_bound!=lower_bound else 0.0.
+   - Compute component as int(math.floor(position * 255.0 + 0.5)) is okay, but safer is int(round(position * 255.0)) then explicitly clamp: component = max(0, min(255, int(round(position * 255.0))))
+   - Ensure when upper_bound==lower_bound you decide deterministic output (e.g., 0 if value<=lower, 255 if value>=upper, or 127 mid).
+
+These changes will prevent the ValueError by guaranteeing component is in 0..255 and remove exceptions for values outside bounds.

@@ -1,0 +1,57 @@
+What happened
+- The test calls GrayPaintScale.get_paint(-0.5) (and other out-of-range values). In get_paint the code computes the 3 color components (r, g, b) from the input value, but then immediately checks the components and raises a ValueError if any component is outside 0..255.
+- For a negative input (value = -0.5) the computed green component g is negative, so the condition on line 74 becomes true and the method raises a ValueError (line 75). The test expects out-of-range inputs to be clamped to the nearest end of the scale, not to raise.
+
+Where it occurs
+- In get_paint (the method under test), around lines 74–75 in your slice:
+  74 |         if g < 0 or g > 255:
+  75 |             raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- The ValueError is raised because g (and/or r or b) was calculated outside 0–255 for inputs less than the lower bound or greater than the upper bound.
+
+Why it fails (root cause)
+- The method enforces that computed RGB values must already be inside 0..255 and throws an exception if not. But the intended behavior (and what your tests expect) is to clamp inputs outside the lower/upper range to the endpoints (black or white) and then return a valid RGB tuple.
+- In other words: the code checks for invalid color components instead of clamping the input value (or clamping the computed components) into the allowed range before returning. That check therefore turns valid out-of-range inputs (which should be clamped) into errors.
+
+Additional problem (misleading message)
+- The error message in the raise uses a static string "Color parameter outside of expected range: Red Green Blue" which is not informative and doesn't reference the offending variable(s). If you keep raising, the message should include which component and value failed. Currently it can mislead debugging.
+
+How to fix it (clear steps)
+1. Decide desired behavior: clamp the input value to [lower, upper] (recommended, matches tests).
+2. Implement clamping before computing RGB, or clamp the computed component(s) before the range check.
+3. Remove the ValueError for normal out-of-range inputs (or only raise if after clamping something is still invalid, which should not happen).
+4. Ensure r, g, b are integers in 0..255 when returned.
+
+Concrete patch (conceptual code)
+- Before the current checks, add:
+  - fraction = (value - lower) / (upper - lower)
+  - fraction = max(0.0, min(1.0, fraction))   # clamp fraction to [0,1]
+  - gray = int(fraction * 255)                # convert to integer (choose rounding policy)
+  - r = g = b = gray
+- Remove or replace the existing if g < 0 or g > 255: raise ... check with either nothing or an assertion that will never trigger.
+
+Example minimal change (pseudo-Python):
+  def get_paint(self, value):
+      # compute fraction relative to bounds
+      fraction = (value - self.lower) / (self.upper - self.lower)
+      # clamp fraction
+      if fraction < 0.0:
+          fraction = 0.0
+      elif fraction > 1.0:
+          fraction = 1.0
+      # compute gray as int in 0..255
+      gray = int(fraction * 255)
+      return (gray, gray, gray)
+
+If you prefer clamping the final components instead of fraction:
+  gray = int(round((value - lower)/(upper - lower) * 255))
+  gray = max(0, min(255, gray))
+  return (gray, gray, gray)
+
+What to check after the fix
+- test_lower_bound_clamping: gps.get_paint(-0.5) returns (0,0,0)
+- test_upper_bound_clamping: gps.get_paint(1.5) returns (255,255,255)
+- test_mid_value_interpolation: gps.get_paint(0.5) returns expected middle gray
+- test_custom_bounds: same behavior with lower=10.0, upper=20.0
+
+Summary
+- The code raises ValueError because it checks RGB component ranges instead of clamping inputs or components. Clamp the value (or the computed components) to 0..1 / 0..255 before returning, and remove the exception for normal out-of-range inputs. Also improve the error message if you keep any raises.

@@ -1,0 +1,55 @@
+What happened (what failed)
+- The IndexError was raised at to_utf16_code_units, lines 35–36:
+  - Line 35 checks if index < 0 or index >= len(code_units)
+  - Line 36 raises IndexError(f"String index out of range: {index}")
+- The call that triggered this passed index == 2, but len(code_units) was 0, 1, or 2, so index 2 was out of range for the UTF-16 code unit list.
+
+Why it happened (root cause)
+- The function to_utf16_code_units(s: str) builds a list named code_units containing UTF‑16 code units for the Python string s.
+- The caller computed or passed an index that was intended to count Unicode characters (Python code points) — e.g., "character index 2" — but to_utf16_code_units is checking against the number of UTF‑16 code units instead.
+- For strings that contain characters outside the BMP (for example an emoji), one Python character (one code point) becomes two UTF‑16 code units. That makes the mapping between "character index" and "code unit index" different.
+- Concretely: if the caller wanted the 3rd character (index 2) of s ("A", "😊", "B"), that is code point index 2, but the UTF‑16 code units list for "A😊B" is length 4 (A=1, emoji=2, B=1). If the caller instead computed an index in code points but passed it to code that expects a code‑unit index, they can end up with a value that is out of range for code_units — producing exactly the IndexError you saw.
+
+Where it occurred
+- In function to_utf16_code_units, at the bounds check on line 35:
+  if index < 0 or index >= len(code_units):
+    raise IndexError(f"String index out of range: {index}")
+- The mismatch is between how index was computed/meaningful in the caller and what to_utf16_code_units expects.
+
+How to fix it (concrete steps)
+Pick one of these fixes depending on the intended meaning of index.
+
+1) If index is meant to be a code-point (Python character) index:
+- Convert the code-point index into the corresponding UTF‑16 code-unit index before you use it against code_units.
+- Example change in the caller (pseudocode):
+  - compute code_unit_index = 0
+  - for i, ch in enumerate(s):
+      if i == index: break
+      code_unit_index += 1 if ord(ch) <= 0xFFFF else 2
+  - then use code_unit_index when calling to_utf16_code_units or when indexing code_units
+- This ensures you count surrogate pairs as two units.
+
+2) If to_utf16_code_units should accept a code-point index (and do the mapping itself):
+- Modify to_utf16_code_units to accept a character index and map it:
+  - Iterate over s, counting characters; when you reach the requested character index, compute the corresponding position in code_units and use that.
+- Change the bounds check to compare against len(s) (number of code points) when index is a character index:
+  if index < 0 or index >= len(s):
+      raise IndexError(f"String index out of range: {index}")
+
+3) If index is already intended to be a code-unit index but you still got this error:
+- Print/debug the length of code_units just before the check to confirm its value (len(code_units)).
+- Ensure the code that builds code_units actually ran and appended units (no early return or empty input). Example quick debug:
+  print("index:", index, "len(code_units):", len(code_units))
+
+Which to choose
+- If the rest of your code deals in Python characters (typical), use option 1 or 2 so your indexing is in characters, not UTF‑16 units.
+- If the rest of your code is explicitly working with UTF‑16 code units (rare in Python), keep the current behavior but make sure callers pass code‑unit indices.
+
+Minimal example showing the mismatch
+- s = "A😊B"  # len(s) == 3 (A, emoji, B)
+- UTF‑16 code units for s have length 4 (emoji -> 2 units)
+- Caller passes index = 2 meaning the third character (B), but code_units indexing expects a code-unit index; if caller treats index as code-unit index 2, that is actually the second half of the emoji — a different meaning and possibly out of range depending on how code_units was built.
+
+Summary
+- The index passed (2) refers to a different unit (code point vs. UTF‑16 code unit) than the one being checked at line 35.
+- Fix by making the code agree on whether indices count Python characters or UTF‑16 code units and convert or change the bounds check accordingly.

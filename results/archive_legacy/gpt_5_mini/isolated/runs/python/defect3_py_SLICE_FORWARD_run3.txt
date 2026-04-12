@@ -1,0 +1,56 @@
+What happened (where it fails)
+- At line 38 you load high = code_units[index].
+- At line 39 you test whether high is a high surrogate and whether there is a following code unit.
+- If the next unit is a valid low surrogate you correctly compute and return the full code point (line 43).
+- If the next unit is missing or not a valid low surrogate you fall through to line 44 and return high.
+
+Returning high (line 44) is the bug. When high is in the surrogate range 0xD800..0xDBFF, returning that raw surrogate value is invalid as a Unicode scalar value. The caller will receive a surrogate code unit as if it were a complete code point, which can later cause invalid Unicode text, crashes, or incorrect behavior. In short: the code treats a malformed surrogate pair as a valid code point instead of handling the error.
+
+Why it happens (root cause)
+- The unconditional "return high" at line 44 does not distinguish these two different cases:
+  1) high is not a surrogate — returning high is correct.
+  2) high is a high-surrogate but the low surrogate is missing or invalid — returning high is wrong.
+- The control flow lets case (2) fall through and be treated like case (1).
+
+Exactly where to change it
+- Change the behavior at/after line 44 so you do not return a raw high-surrogate value when high is in 0xD800..0xDBFF and a valid low surrogate was not found.
+
+Two concrete fixes (pick one depending on your desired behavior):
+
+Option A — reject malformed surrogates (raise an error)
+Replace the end of the function with an explicit check and raise:
+
+  38     high = code_units[index]
+  39     if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+  40         low = code_units[index + 1]
+  41         if 0xDC00 <= low <= 0xDFFF:
+  43             return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  44     if 0xD800 <= high <= 0xDBFF:
+  45         raise ValueError(f"Unpaired high surrogate at index {index}: 0x{high:X}")
+  46     return high
+
+- This makes the failure explicit and prevents returning invalid code points.
+
+Option B — replace malformed surrogates with U+FFFD (replacement char)
+If you prefer to tolerate malformed input and return a replacement code point:
+
+  38     high = code_units[index]
+  39     if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+  40         low = code_units[index + 1]
+  41         if 0xDC00 <= low <= 0xDFFF:
+  43             return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  44     if 0xD800 <= high <= 0xDBFF:
+  45         return 0xFFFD   # replacement character for malformed surrogate
+  46     return high
+
+Other implementation notes (do not omit)
+- If the caller expects this function to advance the index when returning a surrogate pair, verify that calling code increments index by 2 when you returned the combined code point and by 1 in other cases. The snippet only returns a value; make sure the index-handling logic elsewhere matches the chosen error handling.
+- Add unit tests that cover:
+  - Valid BMP code units (non-surrogate)
+  - Valid surrogate pairs
+  - High surrogate at end of array (missing low)
+  - High surrogate followed by non-low
+  - Low surrogate without preceding high
+
+Summary
+Line 44 returns a raw high-surrogate value in the case where the following code unit is missing or invalid. That produces an invalid Unicode scalar. Fix by explicitly handling the malformed-surrogate case (raise an error or return U+FFFD) instead of returning high.

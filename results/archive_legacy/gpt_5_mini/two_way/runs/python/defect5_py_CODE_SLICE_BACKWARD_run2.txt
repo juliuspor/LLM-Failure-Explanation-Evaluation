@@ -1,0 +1,37 @@
+What went wrong (root cause)
+- On line 336 you set inferred_type = type(array). That takes the Python type of the list object itself (e.g. <class 'list'>), not the type of the elements stored in the list.
+- ArrayUtils._copy_list_grow1 and the later check expect inferred_type to represent the element/component type, not the container type. Because inferred_type becomes list instead of the element class (or object), the logic that detects "object list vs typed list" and the name used in the error message are wrong.
+- Concretely, when array is a list (even a list of plain objects), type(array) == list, so:
+  - inferred_type == object is never true, so you won't raise when you should, or you might raise with the wrong class names.
+  - _copy_list_grow1 receives the wrong type information and produces a list with the wrong assumed component type, which leads to the casting/class-name mismatch and the TypeError you see at runtime.
+- The bug occurs at line 336 (inferred_type = type(array)) and then manifests at lines 346–347 when the code performs the type check / raises the error.
+
+Why this produces the observed failure
+- The code is trying to reason about the element type, but uses the container's type. That mismatch corrupts the semantics used by _copy_list_grow1 and the subsequent check, producing incorrect casting behavior or a misleading exception message like "[Ljava.lang.Object; cannot be cast to [Ljava.lang.SomeType;".
+
+How to fix it (explicit steps)
+1. Determine the element type, not the list type. When array is provided, inspect its contents to infer an element class:
+   - If array is non-empty, use type(array[0]) (or use a more robust scan if elements may differ).
+   - If array is empty, fall back to expected_type if provided, or to type(element) if element is not None, otherwise to object.
+2. Use that element-type value as inferred_type everywhere.
+3. Ensure you handle the empty-array case without raising an IndexError.
+4. Use identity or proper equivalence checks appropriate for types (e.g. compare to object by "is" or by equality of the actual classes).
+
+Concrete corrected version (replace the inference block)
+- Replace lines 335–340 with something like:
+
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+Notes and edge cases
+- If the array contains mixed element types, decide policy: either pick the first element's type, pick a common supertype, or require expected_type to be supplied.
+- If ArrayUtils._copy_list_grow1 expects a specialized type object (not a Python class), adapt inferred_type accordingly.
+
+What changed and why it fixes the failure
+- The change makes inferred_type describe the element class rather than the list class. That makes _copy_list_grow1 receive correct type information and makes the subsequent check at lines 346–347 accurate, avoiding misleading ClassCastException-style errors.

@@ -1,0 +1,55 @@
+What happened (short)
+- The translator walks a string expressed as UTF-16 code units using an index variable (commonly named i or index).
+- When it encounters a supplementary character (a Unicode code point > 0xFFFF, represented as a surrogate pair in UTF‑16), the code reads both UTF‑16 code units (high + low surrogate) to form the code point, but then only advances the loop index by 1 instead of 2.
+- That leaves the loop pointing at the low surrogate on the next iteration; code_point_at tries to read a following unit (index + 1) and goes past the end of the sequence. That produces "IndexError: String index out of range: 2" for the input "\U0001F630A" (emoji + 'A').
+
+Where it occurs
+- File: hit03_translator.py
+- Method: CharSequenceTranslator.translate (called by CsvEscaper.translate_string)
+- Variable names: the loop index (i or index), the input sequence (input_seq or units), and the helper code_point_at/to_utf16_code_units.
+- The offending statement is the index increment after processing a code point (the line that does something like i += 1 or index = index + 1). That increment is inside the main translation loop, in the branch that handled a supplementary code point.
+
+Step-by-step reproduction with your failing test
+1. Input string = "\U0001F630A". In UTF‑16 this is [high_surrogate, low_surrogate, 'A'] (three code units).
+2. Loop starts at index 0, sees a high surrogate, code_point_at reads the pair and returns a supplementary code point (😰).
+3. The code emits that code point but then runs the index increment i += 1 (wrong).
+4. Next loop iteration i == 1, pointing at the low surrogate. The translator attempts to read a code point starting at index 1; code_point_at expects either a single code unit or a surrogate pair, so it tries to read units[2] (index+1) to form a pair.
+5. units[2] exists (the 'A'), so in some code paths this may produce an incorrect code point or checks fail; in other variants, the code attempts to read units[2] when len == 2 and that triggers index 2 out of range. In your run the attempt to read units[2] produced the IndexError.
+
+Why the bug is subtle
+- The code mixes two levels of abstraction: iterating over UTF‑16 code units but also recognizing full code points. When a helper like code_point_at returns a code point composed of two units, the loop must advance by the number of units consumed (2). Failing to do that corrupts the loop state and eventually reads past the sequence end.
+
+Concrete fixes (steps to apply)
+1. In CharSequenceTranslator.translate (hit03_translator.py), find the main loop that iterates over input units and the line that advances the index after processing a code point. It will look like:
+   - i = 0
+   - while i < input_len:
+       cp = code_point_at(units, i, input_len)
+       ...handle cp...
+       i += 1    # offending line
+2. Replace the single-unit increment with an increment by the number of UTF‑16 units consumed. Two approaches:
+   - If code_point_at can tell you how many units it consumed, use that:
+       consumed = 2 if cp > 0xFFFF else 1
+       i += consumed
+   - Or compute consumed directly from cp:
+       if cp > 0xFFFF:
+           i += 2
+       else:
+           i += 1
+3. Add defensive bounds checks around reading the low surrogate inside code_point_at:
+   - Before reading units[i+1], ensure i+1 < input_len and that units[i+1] is a low surrogate. If not, handle as an isolated surrogate or raise a clear error.
+4. Add/keep tests that exercise:
+   - surrogate pair followed by another character (your failing test)
+   - surrogate pair at end of string
+   - a single surrogate pair alone
+   - malformed lone high surrogate and lone low surrogate
+
+Minimal code example of the corrected increment:
+   if cp > 0xFFFF:
+       i += 2
+   else:
+       i += 1
+
+Summary
+- Root cause: after consuming a surrogate pair, the loop advances by one UTF‑16 code unit instead of two.
+- Symptom: the loop lands on the low surrogate and a subsequent read looks one past the end, raising IndexError.
+- Fix: advance the index by the number of UTF‑16 units consumed (2 for supplementary code points), and add bounds checks when reading the low surrogate.

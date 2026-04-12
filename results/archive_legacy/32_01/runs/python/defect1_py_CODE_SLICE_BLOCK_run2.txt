@@ -1,0 +1,48 @@
+What happened (where it failed)
+- The failure is thrown at the check in for_offset_hours_minutes (lines 400–401 in your slice):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means the method was called with a negative minutes_offset and the method rejected it with a ValueError.
+
+Why it failed (root cause)
+- The method mixes two different sign conventions for the minute parameter:
+  - The validation at line 400 requires minutes_offset to be in the range 0..59 (i.e. non‑negative).
+  - Callers commonly pass a negative minutes_offset to mean a negative offset (for example hours_offset = -1 and minutes_offset = -30 to mean -1:30). When those callers call this method the validation rejects the negative minutes and you get the ValueError.
+- The code then reuses the minutes_offset parameter later (overwriting it with the total minutes). That reuse makes the intent ambiguous and hides whether minutes_offset was supposed to be signed or unsigned, which is why the two pieces of code disagree.
+
+What exactly you should change (clear step-by-step fixes)
+Pick one of these two consistent approaches and implement it:
+
+A) Enforce unsigned minutes (explicit, minimal change)
+1. Document the API: minutes_offset must be 0..59, and its sign is taken from hours_offset. E.g. for -1:30 the caller must pass hours_offset=-1, minutes_offset=30.
+2. Keep the existing validation (lines 400–401) as-is.
+3. Replace the minute combination code so it uses the sign of hours_offset and does not expect a signed minutes_offset. Example fix inside the try:
+   hours_in_minutes = hours_offset * 60
+   if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_offset   # negative hours, subtract unsigned minutes
+   else:
+       total_minutes = hours_in_minutes + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. (Optional) Rename the parameter or use a new local variable (total_minutes) so you don't overwrite minutes_offset.
+
+B) Allow signed minutes (API change)
+1. Change the validation to accept minutes_offset in -59..59 (or -59..59 with an additional check that hours_offset and minutes_offset are not contradictory).
+   e.g. if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+2. Combine hours and minutes simply by arithmetic:
+   total_minutes = hours_offset * 60 + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Document that minutes_offset may be signed and that the total offset is hours_offset*60 + minutes_offset.
+
+Why each fix works
+- Option A removes ambiguity by requiring minutes be unsigned and using hours sign when forming the total. The validation and the combination logic are consistent.
+- Option B accepts the caller style that provides signed minutes and combines them by plain addition; the validation is widened to allow negative minute values.
+
+Which to choose
+- If existing callers already pass minutes as signed values (e.g. -30 for negative offsets), pick B.
+- If you prefer the cleaner rule (minutes always 0..59 and sign from hours), pick A and update callers and docs.
+
+Other small cleanups
+- Do not reuse the parameter minutes_offset to hold the computed total. Use a new variable like total_minutes to avoid confusion.
+- Add unit tests for these cases: (1, 30), (-1, 30), (-1, -30) depending on which API you intend to support.
+
+This pinpoints the root cause (mismatched sign convention and parameter reuse at the minutes validation at lines 400–401), explains why the ValueError was raised, and gives explicit code-level fixes you can apply.

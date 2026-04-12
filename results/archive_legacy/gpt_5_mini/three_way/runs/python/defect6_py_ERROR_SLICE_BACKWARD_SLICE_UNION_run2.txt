@@ -1,0 +1,37 @@
+What happened (where, specifically)
+- At line 176 the code tests: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- That condition is true for x == -0.0 because -0.0 == int(-0.0) (both compare equal to 0).
+- The code then executes value = int(x) at line 177. int(-0.0) returns 0 (the integer 0 has no negative sign).
+- Later (line 192) the code does self.add(str(value)). That produces "0".
+- The test expected "-0.0". The branch that would have kept the original float string (line 194: self.add(str(x))) is never reached because the earlier branch handled the float as an integer, which lost the negative zero sign.
+
+Why this is the root cause (simple explanation)
+- IEEE floats have a signed zero: -0.0 is distinct from +0.0 in sign bit but compares equal to 0.0.
+- int(-0.0) and str(int(-0.0)) lose the sign information, so converting to an int and then emitting str(value) produces "0" instead of "-0.0".
+- The conditional at line 176 does not exclude signed zero, so the code treats -0.0 as an ordinary integer zero and discards its sign.
+
+Exact spots to change and concrete fixes (step-by-step)
+Option A — preserve negative zero by short-circuiting before line 176:
+1. Add a check immediately before line 176:
+   if x == 0.0 and math.copysign(1.0, x) < 0:
+       # x is -0.0; keep it as float string
+       self.add(str(x))
+   else:
+       # existing logic starting at line 176
+2. This ensures -0.0 is not handled by the integer branch and will be emitted as "-0.0".
+
+Option B — exclude negative zero from the integer branch:
+1. Change the condition on line 176 to explicitly reject signed zero:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x) and not (x == 0.0 and math.copysign(1.0, x) < 0):
+       ...
+2. That prevents the integer path from running for -0.0, so the code will fall through to the float-emission code (line 194) which emits "-0.0".
+
+Why those fixes work (brief)
+- math.copysign(1.0, x) < 0 reliably detects the negative sign bit on zero without changing numeric equality semantics.
+- By keeping -0.0 out of the int conversion branch, you avoid losing the sign bit and will emit the correct "-0.0".
+
+One-line patch example (Option B)
+Replace line 176 with:
+if x == int(x) and not math.isinf(x) and not math.isnan(x) and not (x == 0.0 and math.copysign(1.0, x) < 0):
+
+This fixes the failing test because -0.0 will no longer be turned into int(‑0.0) -> 0 and emitted as "0".

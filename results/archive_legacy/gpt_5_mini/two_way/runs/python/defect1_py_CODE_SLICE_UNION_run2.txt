@@ -1,0 +1,43 @@
+What goes wrong
+- The code reuses the parameter minutes_offset as the place to store the combined total minutes (lines 402 and 404). That overwrites the original minute component and makes the code harder to reason about.
+- More importantly, that reuse is a typo-like bug: you intended to compute a new variable that holds the total offset in minutes (hours_in_minutes ± minutes_offset), but instead you assign the result back into minutes_offset. That hides the original minutes value and mixes input meaning with an accumulator. In practice this is the root cause of the failure you see.
+
+Where it happens (exact lines)
+- Input validation (line 396–397) checks minutes_offset is 0..59.
+- Line 402: when hours_in_minutes < 0 the code does
+    minutes_offset = hours_in_minutes - minutes_offset
+  instead of writing the result into a new variable like total_minutes.
+- Line 404: when hours_in_minutes >= 0 the code does
+    minutes_offset = hours_in_minutes + minutes_offset
+  again overwriting the parameter.
+- Line 405 multiplies that overwritten value:
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  so the value used in the multiplication is the mutated minutes_offset, not a clear total-minutes variable.
+
+Why that causes the failure
+- Overwriting minutes_offset makes the code semantically wrong and brittle. If any other code or later logic expects the original minutes_offset value (or if you intended to keep a separate variable for clarity), it's lost. The mutation also makes it easy to introduce an incorrect sign or arithmetic error when you later change the code.
+- The intended value to multiply is "total minutes" (hours_in_minutes ± original minutes_offset). Because you reused minutes_offset, the code still computes the total minutes, but this reuse is the surprising bug that caused the error you encountered (it’s easy to overlook and to introduce further mistakes). If the runtime trace shows an incorrect offset or an unexpected exception coming from safe_multiply, the overwritten variable is the most likely source.
+
+How to fix it (concrete steps)
+1. Introduce a new variable total_minutes (or minutes_total) to hold the combined offset, instead of mutating the parameter.
+2. Replace the two assignments with:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+3. Multiply total_minutes rather than minutes_offset:
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return using offset as before:
+    return cls.for_offset_millis(offset)
+
+Minimal corrected snippet
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix solves it
+- It preserves the original input variable minutes_offset, makes the intent explicit, and eliminates the accidental mutation that produced the failure. The multiplication then clearly uses the computed total minutes and avoids confusing side effects or future regressions.

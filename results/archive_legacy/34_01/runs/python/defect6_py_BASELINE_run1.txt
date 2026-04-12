@@ -1,0 +1,49 @@
+What happened (root cause)
+- At the top of add_number you try to detect a negative value with the test on line 2: if x < 0 and prev == '-': … . For x == -0.0 that test is False because in Python (and IEEE floats) -0.0 < 0 is False. So you do not treat -0.0 as negative there.
+- Later you take the integer path (line with if x == int(x) and not math.isinf...): -0.0 == int(-0.0) is True so you convert value = int(x) which yields 0, losing the negative-zero sign bit.
+- You then call self.add(str(value)) (near the end of that branch). str(0) is "0", so you output "0" instead of "-0.0".
+- The failing assertion comes from the test expecting "-0.0" while your code emitted "0".
+
+Where exactly (lines)
+- The sign-detection failure is on the first check: if x < 0 and prev == '-': (top of add_number).
+- The loss of sign happens when you do value = int(x) and later self.add(str(value)) in the integer branch.
+- add(newcode) (lines 126–138 shown) merely appends the string you pass; it does not restore any lost negative sign.
+
+Why this is surprising
+- -0.0 compares equal to 0.0 (so x == int(x) is True) but it still has a negative sign bit that some consumers expect to preserve; converting to int and then to string drops that sign.
+
+Concrete fixes (step-by-step)
+1. Detect negative zero using math.copysign or testing 1.0/x:
+   - Replace the top sign test:
+     - From: if x < 0 and prev == '-':
+     - To: if math.copysign(1.0, x) < 0 and prev == '-':
+     This ensures -0.0 is treated as negative for the spacing rule.
+
+2. Preserve negative-zero when deciding the integer branch:
+   - Before converting to int, detect negative zero and handle it explicitly:
+     - Add:
+         if x == 0.0 and math.copysign(1.0, x) < 0:
+             # preserve negative zero exact formatting
+             self.add(str(x))
+             return
+     - Put that immediately before value = int(x) (or before the integer-path branch).
+   - Alternatively, skip the integer branch for any x that is exactly 0.0 with negative sign.
+
+3. (Optional) Use copysign for general sign checks:
+   - Replace any other x < 0 checks where you need to treat -0.0 as negative with math.copysign(1.0, x) < 0.
+
+Minimal example change to fix the failing test:
+- At the start of add_number, add:
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        # ensure we output "-0.0" instead of "0"
+        if self.get_last_char() == '-':
+            self.add(" ")
+        self.add(str(x))
+        return
+
+Why this solves it
+- math.copysign(1.0, x) < 0 detects the negative sign bit even for -0.0.
+- Handling -0.0 before converting to int prevents losing the sign when you call int(x) or str(int(x)).
+
+Summary
+The code loses the negative-zero sign because x < 0 is False for -0.0 and int(x) strips the sign. Detect negative zero with math.copysign(1.0, x) < 0 (or 1.0/x) and either handle -0.0 early (emit str(x)) or avoid the int-based path for that value.

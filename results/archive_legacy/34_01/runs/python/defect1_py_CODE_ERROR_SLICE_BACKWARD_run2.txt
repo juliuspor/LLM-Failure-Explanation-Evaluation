@@ -1,0 +1,58 @@
+What happened (where and when)
+- The exception is raised at lines 396–397 (the minutes-range check): the caller passed minutes_offset = -15, so the code hits
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  and raises ValueError: Minutes out of range: -15.
+
+Why it failed (root cause)
+- The method currently insists minutes_offset be between 0 and 59 before it applies the hours sign.
+- Later the code expects to combine hours and minutes taking the hours sign into account:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic assumes the incoming minutes_offset is a non-negative magnitude (0..59). If a caller passes a negative minutes_offset (e.g. -15) the early validation rejects it.
+- In other words, the code is inconsistent about whether minutes_offset is allowed to be negative:
+  - It rejects negative minute values at the start (lines 396–397).
+  - But its later arithmetic is written as if minutes_offset were a magnitude to be subtracted when hours are negative.
+
+Concrete fixes (choose one)
+
+1) Require callers to pass a non-negative minute magnitude (0..59) and keep the later logic, but clarify and enforce in the API
+- Change docstring and callers so minutes_offset is always >= 0.
+- No code change except updating documentation and any code that called this with negative minutes.
+
+2) Allow signed minute offsets and compute total minutes consistently (recommended if callers may pass negative minutes)
+- Change the validation to accept -59..59, and compute total_minutes as hours_offset*60 + minutes_offset (no extra sign juggling).
+- Example change (replace the validation and arithmetic block):
+
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+    try:
+        total_minutes = hours_offset * 60 + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+- This handles callers passing hours_offset=-1, minutes_offset=-15 and produces total_minutes = -75 correctly.
+
+3) Normalize minutes by sign of hours (alternative)
+- Keep minutes_offset required non-negative, but when hours_offset is negative you convert minutes to negative before combining:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(...)
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+
+- This keeps the original intention but requires callers to pass minutes as a positive magnitude.
+
+Which to pick
+- If callers sometimes pass negative minutes (as in your failure), pick option 2 so the method accepts signed minutes and is unambiguous.
+- If the API contract is that minutes must be a magnitude, pick option 3 and update callers to pass a positive 15 instead of -15.
+
+Summary
+- The immediate failure occurred because minutes_offset was negative and the method rejects negative minutes before it ever applies the negative sign to the combined offset. Fix by either (a) allowing signed minutes and adding consistent arithmetic, or (b) normalizing/documenting that minutes must be non-negative and changing callers accordingly.

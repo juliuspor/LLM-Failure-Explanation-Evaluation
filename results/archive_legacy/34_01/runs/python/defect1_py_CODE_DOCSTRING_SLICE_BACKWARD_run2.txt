@@ -1,0 +1,76 @@
+What fails
+- At lines 396–397 the code unconditionally rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- The docstring and examples explicitly allow negative minutes in some cases (e.g. (0, -15) => -00:15 and (-2, -15) => -02:15). The current check contradicts that and raises ValueError before any later logic runs. So calls that should be valid (minutes negative with hours zero or negative) fail at that validation.
+
+Why this is the root cause
+- Later code (lines after 397) expects minutes_offset can be negative and tries to combine sign with hours:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That branch makes sense only if negative minutes are allowed. But because negative minutes are rejected earlier, execution never gets that far for the valid-negative-minutes cases.
+
+Other issues to be aware of
+- The validation should also enforce the sign combination rules described in the docstring:
+  - Positive hours with negative minutes is invalid (e.g. (2, -15) => ValueError).
+  - Zero hours may have negative or positive minutes.
+  - Negative hours may have positive or negative minutes (both mean a negative overall offset).
+- The arithmetic that combines hours and minutes should produce one total signed minute value (e.g. (-2, -15) -> -135), not flip signs unintentionally. The current code tries to account for sign but is confusing (subtracting minutes_offset when hours negative relies on minutes_offset possibly being negative).
+
+Concrete fixes (step-by-step)
+1. Change the minutes range check to allow negative minutes:
+   - Replace the current check (lines 396–397) with a check that ensures minutes_offset is in [-59, 59]:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the sign-combination rule from the docstring:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError
+     (positive hours combined with negative minutes is explicitly invalid).
+   - No error for hours_offset < 0 with minute positive; that combination yields a negative total offset.
+
+3. Compute total minutes with one simple, clear expression (avoid the confusing branch):
+   - Example:
+       total_minutes = hours_offset * 60
+       if hours_offset < 0:
+           total_minutes -= abs(minutes_offset)
+       else:
+           total_minutes += minutes_offset
+   - Or equivalently:
+       if hours_offset < 0:
+           total_minutes = hours_offset * 60 - abs(minutes_offset)
+       else:
+           total_minutes = hours_offset * 60 + minutes_offset
+
+4. Then multiply by MILLIS_PER_MINUTE and proceed:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary of exact lines to change
+- Replace:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  With:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError(f"Minutes must be non-negative when hours is positive: {minutes_offset}")
+
+- Replace the hours/minutes combination block:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  With something clearer, e.g.:
+    total_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes -= abs(minutes_offset)
+    else:
+        total_minutes += minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+That fixes the failing behavior and makes the implementation match the docstring examples.

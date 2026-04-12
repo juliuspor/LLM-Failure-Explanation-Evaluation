@@ -1,0 +1,54 @@
+What happens
+- Where it fails: inside the for loop here:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  The crash/incorrect behavior happens when code_point_at tries to examine a surrogate pair at the end of code_units and reads past the array bounds (IndexError) or otherwise misinterprets a low surrogate as a separate code point (wrong pos advance).
+- Why it fails (root cause): translate_codepoint(...) returns the number of code points consumed (consumed), but the code advances pos by repeatedly calling code_point_at(code_units, pos) and then char_count(...) without protecting against reading past length or against seeing an isolated low surrogate. If pos reaches the final code unit that is a high surrogate (or if a previous iteration advanced pos onto a low surrogate), code_point_at will try to read the next code unit to form the full code point and go out of bounds (or will treat a lone low surrogate as a 1-unit code point), so pos gets advanced incorrectly or an exception is thrown. In short: the loop assumes every call to code_point_at(pos) is safe and will return a valid code point, but when you iterate consumed times you can land on positions where code_point_at needs to read one more unit beyond the array — causing the failure.
+
+Concrete lines involved
+- translate_codepoint(...) call and its returned value consumed (line: consumed = self.translate_codepoint(code_units, pos, out))
+- Advancement loop (exact failing lines):
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+What happened in plain terms
+- translate_codepoint said “I consumed N code points starting at pos”.
+- The code tried to skip those N code points by repeatedly asking “what code point is at pos?” and adding its unit length.
+- That worked until pos arrived at the last code unit of a surrogate pair (or a low surrogate position). At that moment code_point_at tried to read the missing partner unit and either crashed (index error) or mis-counted, so pos was moved wrong or execution failed.
+
+How to fix it (clear, specific steps)
+Pick one of these precise fixes:
+
+1) Make translate_codepoint return number of code units consumed instead of code points.
+   - Change translate_codepoint contract to return units_consumed (1 or 2 per code point).
+   - Replace the for-loop with: pos += units_consumed
+   - This avoids re-parsing code points and eliminates the out-of-bounds read.
+
+2) If you must keep translate_codepoint returning code points, advance pos safely by inspecting code_units with bounds checks:
+   - Replace the loop with:
+       for _ in range(consumed):
+           if pos >= length:
+               break  # or handle error
+           cu = code_units[pos]
+           # if cu is a high surrogate and pos+1 < length, advance by 2, otherwise advance by 1
+           if is_high_surrogate(cu) and pos + 1 < length:
+               pos += 2
+           else:
+               pos += 1
+   - This prevents code_point_at from reading pos+1 when it is out of bounds and avoids treating a low surrogate as a standalone code point.
+
+3) Alternatively, compute the unit-count before advancing using one safe parsing pass from the original pos:
+   - Do something like:
+       units_to_skip = 0
+       p = pos
+       for _ in range(consumed):
+           cp = code_point_at_safe(code_units, p, length)   # returns code point and actual unit count without reading out-of-bounds
+           units_to_skip += unit_count_for(cp)
+           p += unit_count_for(cp)
+       pos += units_to_skip
+
+Which fix to choose
+- If your translators work in code points (contract says they understand surrogate pairs), the simplest and least error-prone is option (1): have translate_codepoint return number of code units consumed.
+- If you can’t change translate_codepoint, use option (2) and explicitly check for high-surrogate + bounds when advancing pos.
+
+This explains exactly where (the for-loop lines), why (out-of-bounds/isolated surrogate mis-read), and how to fix it with step-by-step code changes.

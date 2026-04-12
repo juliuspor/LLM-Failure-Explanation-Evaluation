@@ -1,0 +1,36 @@
+What happened (where it fails)
+- The failure occurs in CodeConsumer.add_number, inside the branch that starts at line 176:  
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- For x == -0.0 that condition is True because -0.0 == 0 (so x == int(x) is True). The code then converts x to an integer:
+  value = int(x)  # value becomes 0, sign lost
+  mantissa = value
+- Because the sign is lost when casting to int, later calls to self.add(...) end up writing "0" (or "0.0", depending on the path) instead of preserving the negative sign. This is why the test expecting "-0.0" sees "0".
+
+Why it happens (root cause)
+- The code treats numbers that are equal to their integer value (x == int(x)) as integers and routes them into integer-specific formatting. That test does not distinguish -0.0 from +0.0 because Python comparison treats -0.0 == 0.0 as True.
+- There is a utility is_negative_zero (TestNegativeZeroUtility references CodeConsumer.is_negative_zero) but that check is not used before the integer branch. As a result, negative zero is swallowed by the integer branch and its sign is lost by the int() conversion and subsequent formatting.
+
+Exactly where to change it (concrete steps)
+1. In add_number, before entering the integer branch on line 176, explicitly detect negative zero and handle it. For example, insert immediately before line 176:
+   if self.is_negative_zero(x):
+       self.add("-0.0")
+       return
+   This preserves "-0.0" and prevents falling into the integer formatting logic.
+
+2. Alternatively, change the integer-branch condition to exclude negative zero so the existing integer logic won't run for -0.0:
+   Replace line 176 with:
+   if x == int(x) and not self.is_negative_zero(x) and not math.isinf(x) and not math.isnan(x):
+
+3. Use a reliable check for negative zero. Implement is_negative_zero like:
+   @staticmethod
+   def is_negative_zero(x):
+       return x == 0.0 and math.copysign(1.0, x) < 0.0
+   (This detects -0.0 without misclassifying +0.0.)
+
+Why these fixes work
+- They prevent the int() cast and integer-formatting path from being used for -0.0, so the code can directly emit "-0.0" (preserving the sign).
+- They are minimal, localized changes: either a dedicated early-return for -0.0 or a simple guard in the existing if-condition.
+
+Notes
+- Do not change the behavior for +0.0 (tests expect "0"), so only exclude negative zero from the integer branch.
+- Make sure to add the early-return before any code that mutates or converts x (value = int(x), mantissa loops, etc.).

@@ -1,0 +1,97 @@
+I can’t point to an exact line number because you didn’t include the implementation, but I can explain precisely why LocaleUtils.to_locale (the method named in your docstring) typically fails, where inside that method the failure occurs, and how to fix it step by step. If you paste the method body I’ll give line-numbered, exact fixes. For now, here are the concrete root causes, the exact spots in the method where each problem shows up, and explicit fixes and tests.
+
+Summary of the root cause
+- The method enforces a very strict format (language lower-case, country upper-case, underscore separators, fixed lengths) and therefore fails whenever input deviates even slightly (common deviations: hyphen instead of underscore, wrong case, extra or missing parts, empty parts, or unexpected length). The failure happens in the validation logic inside LocaleUtils.to_locale — specifically where the code checks:
+  - whether locale_str is None,
+  - length and split/substring positions,
+  - that the separator is '_' (underscore),
+  - that language is lower-case and country is upper-case,
+  - and that the variant length/position is valid.
+- The immediate symptom you see is ValueError raised from LocaleUtils.to_locale when input is valid in practice (or accepted by other code), but not accepted by this strict validator.
+
+Exact places inside to_locale that typically cause the failure
+(assume a common implementation structure)
+1. at the top: None check
+   - if locale_str is None: return None
+   - If your caller passes "", you may get later validation errors.
+2. where the method checks for separators/length:
+   - code that does something like if '_' not in locale_str and len(locale_str) not in (2,3,...): raise ValueError
+   - Failures happen when separator is '-' (en-US), or when there are multiple underscores, or when trailing underscores exist.
+3. where language, country, variant substrings are sliced:
+   - language = locale_str[0:2]
+   - country = locale_str[3:5]
+   - variant = locale_str[6:]
+   - Failure happens when locale_str is shorter than expected and substring indexing yields wrong slices or empty strings.
+4. where case is validated:
+   - if not language.islower(): raise ValueError
+   - if len(country) == 2 and not country.isupper(): raise ValueError
+   - This fails on inputs like "EN", "en-us", or "en-us" with hyphen: country will be e.g. "us" lower-case.
+5. where separator is validated:
+   - if locale_str[2] != '_': raise ValueError
+   - This fails for "en-US" (uses '-') or "en" (no index 2).
+6. where variant handling occurs:
+   - variant may be uppercased/lowercased incorrectly or allowed/disallowed length; mismatches between JDK versions were mentioned in the docstring—if you rely on JDK behavior you may get different results across platforms.
+
+Concrete examples of inputs that will trigger the failure
+- "en-US" → fails because separator is '-' not '_' (failure at separator check).
+- "en_us" → fails because country is lower-case (failure at country.isupper() check).
+- "EN" → fails because language is upper-case (failure at language.islower() check).
+- "en" followed by trailing underscore "en_" or "en__GB" → fails because substring slicing or separator validation rejects empty parts.
+- "" (empty string) → may raise ValueError if method expects length 2/5/ or >=7.
+
+Why this is the root cause (plain language)
+- The method is doing strict, character-position based validation and substring extraction. If any of the exact characters or positions differ, it raises ValueError. Real-world locale strings are not always exactly "xx", "xx_YY", or "xx_YY_variant" with the exact cases and underscore separator. The validation-code does not tolerate common variants (hyphen, different case, extra whitespace, empty parts), so valid-looking inputs fail.
+
+Exact fixes (step-by-step)
+1. Decide how strict you want to be. Two common choices:
+   - Strict: keep current checks but produce clearer error messages and handle common small deviations first (normalize input).
+   - Lenient: normalize common formats (hyphen → underscore, trim whitespace, fix case) before validating the normalized string.
+2. Normalize the input before validation (recommended). Example steps:
+   - If locale_str is None: return None (keep that).
+   - Trim whitespace: locale_str = locale_str.strip()
+   - Replace hyphen with underscore: locale_str = locale_str.replace('-', '_')
+   - Collapse multiple underscores: optionally normalise "__" → "_"
+   - Split into parts: parts = locale_str.split('_')
+3. Validate by parts, not by fixed indices:
+   - language = parts[0] if parts[0] != '' else raise ValueError("empty language")
+   - if len(language) not in (2, 3): raise ValueError("language must be 2 or 3 letters")
+   - if not language.isalpha(): raise ValueError("language must be alphabetic")
+   - country = parts[1] if len(parts) > 1 else ''
+   - if country and (len(country) != 2 or not country.isalpha()): raise ValueError("country must be two letters")
+   - variant = '_'.join(parts[2:]) if len(parts) > 2 else ''
+   - Now canonicalize case: language = language.lower(); country = country.upper()
+   - Build Locale(language, country, variant) and return
+4. If you must preserve strictness exactly as docstring states, at least check for index length before accessing locale_str[2] etc., and provide clear error messages:
+   - Replace direct indexing with safe checks:
+     - if len(locale_str) >= 3 and locale_str[2] != '_': raise ValueError("separator must be '_' at position 3")
+     - if len(locale_str) < 2: raise ValueError("language must be two letters")
+5. Add unit tests to cover the variations:
+   - assert to_locale(None) is None
+   - assert to_locale("en") -> Locale("en","")
+   - assert to_locale("en_GB") -> Locale("en","GB")
+   - assert to_locale("en-GB") -> Locale("en","GB") after normalization
+   - assert to_locale("en_gb") -> Locale("en","GB") after normalization
+   - assert to_locale("en_GB_POSIX") -> Locale("en","GB","POSIX")
+   - assert to_locale("en__GB") raises ValueError or normalized to ("en","GB") depending on chosen policy
+6. Provide clear error messages in the exceptions so callers know exactly which rule failed. Example messages:
+   - "invalid locale: expected two-letter lowercase language at start"
+   - "invalid locale: expected '_' as separator at position 3"
+   - "invalid locale: expected two-letter uppercase country"
+   - "invalid locale: empty language component"
+
+Minimal code sketch (adapt and insert into your to_locale)
+- Normalize first: strip + replace('-', '_')
+- parts = locale_str.split('_')
+- Validate parts lengths and characters
+- canonicalize case (language.lower(), country.upper())
+- construct and return Locale(language, country, variant)
+
+What I need from you to give line-numbered, exact diagnosis and a patch
+- Paste the implementation of LocaleUtils.to_locale (the whole method).
+- If available, paste the exact input that fails and the exception stack trace.
+With that I will:
+- point to the exact line(s) (by number) causing the error,
+- provide a minimal patch (with the fewest line edits) that fixes the failure,
+- provide exact unit tests to add and one-run outputs showing the fix.
+
+If you want, paste the method now and I’ll give the precise, line-numbered fix.

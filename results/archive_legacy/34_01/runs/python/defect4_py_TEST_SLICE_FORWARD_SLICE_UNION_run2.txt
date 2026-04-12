@@ -1,0 +1,38 @@
+What’s happening
+- get_max_middle_index (lines 449–451) simply returns the stored field self._max_middle_index:
+  - 449 |     def get_max_middle_index(self) -> int:
+  - 451 |         return self._max_middle_index
+- That field is a cached index. The failure occurs because that cache becomes stale when the TimePeriodValues internal lists are changed (items inserted, split, or reordered) by add/slice operations.
+- In your sequence:
+  1. s.add(SimpleTimePeriod(0, 100), 1.0) creates an entry covering 0–100 and sets/uses _max_middle_index.
+  2. Subsequent adds split or insert new intervals (0–50 and 50–100). Those operations change the list contents and indices, but the code that performs the split/insert does not update self._max_middle_index.
+- Result: get_max_middle_index just returns the old cached index (the stale value of self._max_middle_index) instead of the true current index, so the assert fails.
+
+Why this is the root cause (no guessing)
+- The getter only returns the cached variable; it never recomputes or validates it (lines 449–451).
+- The code paths that mutate the collection (the slice/union code shown by [SLICE_FORWARD] / [SLICE_UNION]) perform insertions/splits but don’t update self._max_middle_index to reflect (a) item insertions which shift indexes or (b) value changes that could change which index is the max.
+- Because the cache is not maintained on every mutation, the returned value can be wrong even though the underlying list is correct.
+
+How to fix it (concrete steps)
+1. Either compute the index on demand in get_max_middle_index:
+   - Replace the current implementation at lines 449–451 with logic that scans the current values and returns the index of the max element (or -1/None if empty). For example:
+     - if self._items is empty: return -1 (or your sentinel)
+     - otherwise: iterate through the current list of middle-values and find the index of the maximum and return it
+   - This removes the need for a cache and guarantees correctness.
+
+2. Or keep the cache but properly maintain it in every mutator:
+   - Find every method that inserts, removes, or modifies items (add, the slice/union code paths you showed). After each mutation:
+     - If you insert/remove before the cached index, adjust self._max_middle_index by +1 or -1 as appropriate.
+     - If you change a value that could affect which element is maximal, recompute the cached index (scan values) or compare the new/old value against the current max value and update accordingly.
+   - Add unit tests that perform inserts/splits before and after the cached index to ensure the cache is updated correctly.
+
+3. Add defensive checks:
+   - In get_max_middle_index, if the cached index is out of range or points to an element whose value is not the current max, recompute the index as a fallback. That prevents silent corruption from propagating.
+
+Why I recommend computing on demand (practical note)
+- It’s much simpler and less error-prone to compute the index when asked than to maintain a cache correctly in multiple mutation paths. Only keep a cache if profiling shows it’s a performance bottleneck, and then ensure all mutators update the cache.
+
+Where to change
+- Change get_max_middle_index (lines 449–451) to compute or validate the index, or instrument the mutator methods referenced in [SLICE_FORWARD] / [SLICE_UNION] to update self._max_middle_index after every structural change.
+
+This explains why the assert fails: the code returns a stale cached index (self._max_middle_index) that was never updated by the add/slice operations that changed the stored intervals and their indices. Implement one of the fixes above to make get_max_middle_index correct.

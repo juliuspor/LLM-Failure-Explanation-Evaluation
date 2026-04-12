@@ -1,0 +1,64 @@
+What happened (where it fails)
+- The code in __init__ around lines 331–349 can raise an UnboundLocalError (NameError) because the local variables start and/or min_start may never be assigned before they are used at line 346.
+  - start is assigned only inside the if isinstance(period, SimpleTimePeriod) block (lines 331–335). If period is not a SimpleTimePeriod, start is never set, but the code still reaches line 346 and uses start in the comparison if start < min_start:.
+  - Likewise, min_start is assigned only inside the inner if isinstance(min_start_period, SimpleTimePeriod) block (lines 342–345). If min_start_period is not a SimpleTimePeriod, min_start is never set, but the code still reaches line 346 and uses min_start.
+- There is also a logic bug: line 349 unconditionally sets self._min_start_index = index, which makes the conditional assignment at line 347 meaningless (the test at 346–347 is effectively overridden). That likely defeats the intended purpose of tracking the minimum start index.
+
+Why it failed (root cause)
+- Root cause: use of variables that may be uninitialized depending on runtime types (period and min_start_period). The code assumes those variables exist regardless of the isinstance checks, but the checks only create them for the SimpleTimePeriod case.
+- Secondary logic error: unconditional assignment at line 349 always updates _min_start_index, so the comparison result (start < min_start) is ignored.
+
+Exact places to look
+- start assignment: lines 331–335
+- min_start retrieval and assignment: lines 340–345
+- comparison and conditional assignment: lines 346–347
+- unconditional overwrite: line 349
+- accessor: get_min_start_index() returns self._min_start_index (lines 437–439)
+
+Concrete fixes (step-by-step)
+1. Decide intended behavior: only update self._min_start_index when you can compare valid start times, or treat non-SimpleTimePeriod periods as having a comparable start timestamp.
+2. Ensure start and min_start are always defined before comparison:
+   - Option A (guarded compare): only run the compare-and-possibly-update block when both period and min_start_period are SimpleTimePeriod. Example change:
+     - Replace the code around 340–349 with:
+       - if isinstance(period, SimpleTimePeriod) and self._min_start_index >= 0:
+           min_start_period = self.get_data_item(self._min_start_index).get_period()
+           if isinstance(min_start_period, SimpleTimePeriod):
+               start = period.get_start_millis()   # or the timestamp-based line you prefer
+               min_start = min_start_period.get_start_millis()
+               if start < min_start:
+                   self._min_start_index = index
+       - If self._min_start_index < 0, handle initial assignment separately (see next step).
+   - Option B (initialize defaults): set start and min_start to sentinel values before the blocks, e.g. start = None; min_start = None, then check None before comparing. This avoids NameError but you still need to decide how to behave when one is None.
+3. Remove the unconditional assignment at line 349 unless you really want to always set _min_start_index to index. Likely intended logic is:
+   - If _min_start_index < 0 (no previous item), set _min_start_index = index (initialization).
+   - Else compare start vs min_start and update only if start < min_start.
+   Concretely:
+     - if self._min_start_index < 0:
+           self._min_start_index = index
+       else:
+           (do the guarded comparison as in step 2)
+4. After changes, add unit tests that cover:
+   - period is a SimpleTimePeriod, min_start_period is SimpleTimePeriod
+   - period is not SimpleTimePeriod
+   - min_start_period is not SimpleTimePeriod
+   - initial insertion (self._min_start_index < 0)
+
+Minimal code skeleton implementing the intended behavior
+- In __init__ where you update indexes:
+  - if self._min_start_index < 0:
+        # first item
+        if isinstance(period, SimpleTimePeriod):
+            self._min_start_index = index
+  - else:
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        if isinstance(period, SimpleTimePeriod) and isinstance(min_start_period, SimpleTimePeriod):
+            start = int(period.get_start().timestamp() * 1000)
+            min_start = int(min_start_period.get_start().timestamp() * 1000)
+            if start < min_start:
+                self._min_start_index = index
+
+Why this will fix it
+- Those changes guarantee start and min_start are defined whenever they are compared, preventing the UnboundLocalError.
+- Removing the unconditional assignment prevents silently overwriting the result of the comparison, restoring the intended "track the minimum start" behavior.
+
+If you want, paste the full function body and I will produce a corrected version with exact line edits.

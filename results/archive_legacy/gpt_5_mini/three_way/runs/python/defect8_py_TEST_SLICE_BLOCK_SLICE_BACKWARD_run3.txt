@@ -1,0 +1,55 @@
+What happened (what failed)
+- The test input "fr__POSIX" triggers LocaleUtils.to_locale to raise ValueError at lines 239–240.
+- At line 237 the code does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - then it checks that ch3 and ch4 are uppercase letters:
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- For "fr__POSIX":
+  - locale_str[0:2] = "fr" (language) — OK
+  - locale_str[2] = '_' (separator)
+  - locale_str[3] = '_' (empty country, double underscore)
+  - locale_str[4] = 'P' (first letter of variant)
+- The validation expects an uppercase letter at position 3, but position 3 is '_' for the language__variant form. The check ch3 < 'A' ... treats '_' as invalid and raises the ValueError. Root cause: the code assumes a two-letter country always occupies indices 3–4 and does not consider the allowed language__variant format (empty country indicated by a double underscore).
+
+Where it happened (exact references)
+- Method: LocaleUtils.to_locale
+- Lines: 237–240 (ch3 / ch4 extraction and uppercase validation)
+- Input example that fails: "fr__POSIX" (language__variant, empty country)
+
+Why it happened (concise cause)
+- The parser conflates two different valid forms:
+  - language_country (e.g. "en_US") — country in positions 3–4
+  - language__variant (e.g. "fr__POSIX") — empty country, variant starts at position 4
+- The code only implements the first form’s validation and rejects the second because it forces uppercase letters at index 3.
+
+Exact, actionable fixes (apply one of these)
+1) Minimal patch (explicitly detect empty country and return variant):
+   - Replace the validation block around lines 237–240 with:
+
+   if locale_str[3] == '_':
+       # language__variant: empty country, variant starts at index 4
+       return Locale(lang, "", locale_str[4:])
+   ch3 = locale_str[3]
+   ch4 = locale_str[4]
+   if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+       raise ValueError(f"Invalid locale format: {locale_str}")
+
+   - This handles language__variant correctly and keeps existing country validation.
+
+2) Alternative robust approach (pattern-based parsing):
+   - First split on underscores: parts = locale_str.split('_', 2)
+     - if len(parts) == 1: language only
+     - if len(parts) == 2:
+         - if parts[1] == "": empty country => variant in remainder (if any)
+         - else parts[1] is country
+     - if len(parts) == 3: language, country, variant
+   - Validate language is lowercase 2 letters, country (if present) is uppercase 2 letters, variant can be any non-empty string.
+   - This avoids index arithmetic errors and makes the logic clearer.
+
+Extra notes
+- Make sure to preserve existing checks for language length/case and invalid separators.
+- If you choose the minimal patch, also ensure the code only indexes locale_str[4] when length >= 5 to avoid IndexError for too-short inputs (your tests already check those cases).
+
+Summary
+- The code fails because it requires an uppercase letter at index 3 even when index 3 is allowed to be '_' for the language__variant form. Fix by detecting the double underscore case and treating it as an empty country with variant starting at index 4, or rewrite parsing to use split-based logic which is clearer and less error-prone.

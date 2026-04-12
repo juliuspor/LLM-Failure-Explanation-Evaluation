@@ -1,0 +1,55 @@
+What happened
+- The call LocaleUtils.to_locale("fr__POSIX") failed because the parser rejected the input string as an invalid locale format and threw ValueError: Invalid locale format: fr__POSIX.
+- The failure happens inside the LocaleUtils.toLocale(String) method when it parses and validates the tokens split by underscores (language, country, variant).
+
+Why it fails (root cause)
+- LocaleUtils.toLocale splits the input on underscores and then validates each token.
+  - It expects either: language, language_country, or language_country_variant.
+  - When you pass "fr__POSIX" there are two underscores in a row: language = "fr", country = "" (empty), variant = "POSIX".
+- The implementation contains a validation check that treats an empty country as invalid in that branch. In other words, the method does not accept a zero-length country token even when a non-empty variant follows.
+- Because of that validation branch the method throws the ValueError with the message you saw.
+
+Where in the code it happens
+- Inside LocaleUtils.toLocale(String). The exception is raised in the validation branch that handles the case where there are two underscores (language + empty country + variant). Concretely, look for the code that:
+  - finds the first underscore (indexOf('_')), the second underscore (indexOf('_', first+1)),
+  - extracts country = s.substring(first+1, second),
+  - then runs validation on country and/or variant and throws the invalid-format error when the country is an empty string.
+- (If you open the method, search for the block that handles first != -1 && second != -1 — that’s the exact location to inspect.)
+
+Concrete ways to fix it (step-by-step)
+Choose one of the following, depending on what you control:
+
+1) Quick workaround (no code change)
+- Construct the Locale directly rather than using the parser:
+  - result = Locale("fr", "", "POSIX")
+- Or build via API that accepts empty country explicitly, e.g. new Locale("fr", "", "POSIX") or Locale.forLanguageTag("fr-x-posix") if suitable.
+
+2) Change your input string to a form the parser accepts
+- If the library accepts "fr_POSIX" or "fr-posix" (check the library docs), use that. Note: most parsers do not accept "fr_POSIX" because that would put POSIX in country; verify first.
+
+3) Fix LocaleUtils.toLocale to accept empty country when a variant exists
+- Edit LocaleUtils.toLocale(String) in the validation branch that handles language + country + variant. Replace the strict country-length check with one that allows an empty country token when a non-empty variant follows.
+
+Example patch (conceptual — adapt to your codebase)
+- Current (pseudo):
+  country = s.substring(first+1, second);
+  variant = s.substring(second+1);
+  if (!isAlpha(language) || !(country.length()==2 || country.length()==0) /* or similar */ == false) {
+      throw new IllegalArgumentException("Invalid locale format: " + s);
+  }
+- Replace the country check with:
+  if (!isAlpha(language)) {
+      throw new IllegalArgumentException("Invalid locale format: " + s);
+  }
+  if (!(country.length() == 0 || country.length() == 2 || country.length() == 3)) {
+      throw new IllegalArgumentException("Invalid locale format: " + s);
+  }
+  // allow empty country when variant is present:
+  return new Locale(language, country, variant);
+
+4) Add a unit test and documentation
+- Add a test that asserts toLocale("fr__POSIX") returns new Locale("fr", "", "POSIX") to avoid regressions.
+- Document that the parser accepts an empty country when a variant is present.
+
+Summary
+- The parser treats an empty country token as invalid in the branch that handles language + country + variant. Either pass a Locale directly, change the input to an accepted format, or update LocaleUtils.toLocale to accept empty country tokens (allow country length == 0) when a variant follows.

@@ -1,0 +1,46 @@
+What happened
+- At line 38 you load high = code_units[index].
+- Lines 39–41 check whether high is a UTF-16 high surrogate and whether there is a following code unit (index + 1 < len(code_units)).
+- If there is a following code unit and it is a low surrogate, lines 43–44 combine them into a single code point and return it.
+- If the following code unit is not a low surrogate, or if there is no following code unit, the function falls through to line 44 and returns high directly.
+
+Why that fails (root cause)
+- If high is a high surrogate (0xD800..0xDBFF) and there is no valid low surrogate following it (either because index == len(code_units)-1 or because the next unit is not a low surrogate), the function returns the raw surrogate value (high) instead of signalling an error or otherwise handling the unpaired surrogate.
+- The caller expects a valid Unicode scalar value (a code point). A raw high-surrogate value is not a valid Unicode code point on its own. Passing this invalid value downstream causes failures later (exceptions, corrupt text, or invalid encoding output).
+- Concretely, the failure occurs when:
+  - high has 0xD800 <= high <= 0xDBFF (line 39 true), and
+  - index + 1 >= len(code_units) (no next unit), or the next unit is not in 0xDC00..0xDFFF (line 41 false),
+  - then the function returns high at line 44 instead of raising or otherwise handling the unpaired high surrogate.
+
+Where to change the code (exact steps)
+1. Decide the correct behavior for an unpaired high surrogate. Two common choices:
+   - Raise an IndexError (or a specific error) to indicate the caller supplied an invalid index/sequence.
+   - Return a replacement code point (for example U+FFFD) if you want to tolerate invalid UTF-16 sequences.
+
+2. Implement the chosen behavior at the point where you currently fall through. Replace the fall-through return with an explicit action. Example fixes:
+
+- To raise an error when the high surrogate is unpaired:
+  - After line 39 add an explicit check for the missing/invalid low surrogate and raise:
+    if 0xD800 <= high <= 0xDBFF:
+        if index + 1 >= len(code_units):
+            raise IndexError(f"Unpaired high surrogate at end: index {index}")   # new
+        low = code_units[index + 1]
+        if 0xDC00 <= low <= 0xDFFF:
+            return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+        raise ValueError(f"Expected low surrogate after high surrogate at index {index}, got {hex(low)}")
+
+- To return a replacement code point (U+FFFD) for unpaired high surrogates:
+    if 0xD800 <= high <= 0xDBFF:
+        if index + 1 < len(code_units):
+            low = code_units[index + 1]
+            if 0xDC00 <= low <= 0xDFFF:
+                return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+        return 0xFFFD  # replacement character for invalid sequence
+
+3. Add tests:
+   - Test where index points to a high surrogate at the last code unit (index == len(code_units)-1).
+   - Test where index points to a high surrogate and the next unit is not a low surrogate.
+   - Test valid surrogate pair to ensure the combine code still works.
+
+Summary
+The function currently returns a raw high-surrogate value when it encounters an unpaired high surrogate (no low surrogate follows). That raw surrogate is not a valid code point and causes downstream failures. Fix by explicitly handling the unpaired case (raise an error or return a replacement code point) at the spot where you now fall through and return high.

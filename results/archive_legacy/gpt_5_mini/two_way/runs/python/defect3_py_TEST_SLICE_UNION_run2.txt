@@ -1,0 +1,50 @@
+What happened
+- The code mixes two different index spaces: Python's str character indexes (which are Unicode code points) and UTF‑16 "code unit" indexes. That mismatch causes an IndexError at line 35 when the loop advances past a surrogate pair.
+
+Where it occurs (lines and names)
+- to_utf16_code_units builds a list of UTF‑16 code units (line 10/12).
+- code_point_at (the slice you showed) expects an index into that code_units list and checks bounds at line 35:
+  - if index < 0 or index >= len(code_units): raise IndexError(...)
+- If the element at index is a high surrogate and the next unit is a low surrogate, code_point_at returns the combined code point (lines 39–44).
+- The tests exercise translate_string on strings containing emoji (surrogate pairs in UTF‑16). translate_string (in CsvEscaper) iterates and calls code_point_at, but it advances its index assuming Python str indexing (one step per Python character). Because UTF‑16 represents a surrogate pair as two code units, advancing the index the wrong way makes a later call pass index == len(code_units), which triggers the IndexError at line 35.
+
+Why this causes the failure (simple sequence)
+1. to_utf16_code_units(code) produces N code units. A surrogate pair occupies two units.
+2. translate_string is using a Python str index i that counts Unicode code points (Python already treats a surrogate pair as one character).
+3. translate_string calls code_point_at with i (a Python index), but code_point_at treats i as an index into the UTF‑16 code_units list.
+4. For input like "\U0001F630A" (emoji + 'A'), the UTF‑16 sequence length is greater than the Python-length-by-code-point count. After processing the surrogate pair, translate_string increments the Python index by 1 (correct for Python characters), but that only moves one code unit ahead in the UTF‑16 view; the next call to code_point_at receives an index that can be equal to len(code_units), and line 35 raises IndexError.
+
+Concrete fixes (pick one)
+1) Stop mixing index spaces — operate consistently on code points (recommended)
+   - Do not convert to UTF‑16 code units at all. Work with Python str and ord(s[i]) + a surrogate test that looks at the next Python character:
+     - If 0xD800 <= ord(s[i]) <= 0xDBFF and i + 1 < len(s) and 0xDC00 <= ord(s[i+1]) <= 0xDFFF, then combine using
+       0x10000 + ((ord(s[i]) - 0xD800) << 10) + (ord(s[i+1]) - 0xDC00)
+     - Advance the Python index by 2 code units only when you actually consumed two Python characters (which will be the case only if you inspect the next Python char). Otherwise advance by 1.
+   - This keeps indexes in the same domain (Python str indexes) and avoids IndexError on line 35 entirely.
+
+2) Or operate entirely in UTF‑16 code units
+   - Make translate_string convert the input to a UTF‑16 code_units list (call to_utf16_code_units once), iterate using an index over that list, call code_point_at with that index, and then advance index by 1 or 2 depending on whether code_point_at combined a surrogate pair.
+   - That way code_point_at's index checks (line 35) and the loop index are in the same space.
+
+3) Make code_point_at accept Python str index and map it internally
+   - Change code_point_at so it receives the Python string and a Python index, and then it computes the corresponding UTF‑16 code unit index (or better: entirely avoid building a code_units list and compute using ord on Python chars as in (1)).
+
+Exact minimal code changes (examples)
+- Recommended minimal change: update translate_string to iterate over Python string characters and use ord-based surrogate detection. Example logic inside translate loop:
+  - cp = ord(s[i])
+  - if 0xD800 <= cp <= 0xDBFF and i + 1 < len(s):
+      next_cp = ord(s[i+1])
+      if 0xDC00 <= next_cp <= 0xDFFF:
+          combined = 0x10000 + ((cp - 0xD800) << 10) + (next_cp - 0xDC00)
+          # handle combined
+          i += 2
+          continue
+  - # handle cp normally
+  - i += 1
+
+Why this is safe and correct
+- Python strings are sequences of Unicode code points. Using ord(s[i]) and checking ord(s[i+1]) matches how surrogate pairs actually appear in UTF‑16 without mixing index domains. It prevents attempts to index past the end of the UTF‑16 code_units list (the IndexError at line 35).
+
+Summary
+- Root cause: index space mismatch — code_point_at expects UTF‑16 code_unit indexes, but translate_string uses Python str indexes. That causes an out‑of‑range index (line 35) when surrogate pairs are present.
+- Fix: keep indexing consistent. Best approach: operate on Python str + ord(...) and detect/consume surrogate pairs there (no UTF‑16 conversion), or convert once to UTF‑16 and iterate that representation end‑to‑end.

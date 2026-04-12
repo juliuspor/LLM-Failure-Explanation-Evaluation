@@ -1,0 +1,47 @@
+What happened (root cause)
+- The loop that advances pos mixes up "UTF-16 code units" and "Unicode code points".
+- translate_codepoint(...) returns a count measured in UTF-16 code units (it reports how many code units it consumed), but the code that advances pos treats that returned value as a count of code points and uses char_count(code_point_at(...)) inside a loop to skip the consumed items again.
+- That double-counting makes pos jump the wrong amount when surrogate pairs are present (a surrogate pair is 2 UTF-16 code units but 1 code point). As a result pos can be moved too far (skipping characters) or end up past the buffer boundary, which produces the IndexError in the surrogate-pair test.
+
+Where it occurs in your code
+- In translate(), after calling consumed = self.translate_codepoint(code_units, pos, out):
+  - The branch for consumed > 0 starts at the for pt in range(consumed): loop (the loop that advances pos).
+  - Inside that loop you call code_point_at(code_units, pos) and then pos += char_count(...).
+- The mismatch is between:
+  - consumed (what translate_codepoint returned), and
+  - the number of code points the loop assumes it should iterate over and skip using char_count().
+
+Why that triggers the failing test
+- Input "\U0001F630A" has 3 UTF-16 code units: [high-surrogate, low-surrogate, 'A'].
+- translate_codepoint() consumes the emoji as one logical unit but returns a value counting code units (2) or vice versa. The loop then adds char_count(code_point_at(...)) which itself returns 2 for the pair, causing pos to advance 4 units overall or otherwise misalign with the buffer. That misalignment causes the subsequent indexing/consumption to go out of sync and raise IndexError in the next iterations.
+
+Concrete evidence in your helper function
+- code_point_at checks index+1 < len(code_units) to form a surrogate pair (lines you showed). That logic is fine; the bug is in how many units the outer loop thinks it should skip and how it re-reads code points while skipping them.
+
+Clear fixes (pick one)
+1) Treat consumed as code units (recommended if translate_codepoint is already returning code units)
+   - Replace the loop that advances pos with a single addition:
+     pos += consumed
+   - Rationale: pos indexes UTF-16 code units; if translate_codepoint reports the number of code units consumed, advancing by that number is correct and avoids double-counting surrogate pairs.
+
+2) Treat consumed as code points (alternative)
+   - Make translate_codepoint return the number of code points it consumed (1 for a surrogate pair, 1 for an ASCII char).
+   - Then advance pos by reading each code point beginning at the current pos and adding its char_count:
+     for _ in range(consumed):
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+   - Rationale: if consumed is a count of code points, you must compute how many code units each code point used and advance accordingly. Note: you must call code_point_at on the position before you move pos.
+
+3) Another safe alternative: have translate_codepoint return both values (code_points_consumed, code_units_consumed) so the caller can unambiguously advance pos by code_units_consumed.
+
+Minimal code change (if translate_codepoint returns code units)
+- Replace the existing advance loop with:
+    pos += consumed
+
+Why this is sufficient and safe
+- pos indexes the list of UTF-16 code units (to_utf16_code_units output).
+- If translate_codepoint already counts how many code units it read/wrote into out, advancing by that many code units exactly keeps pos and the translator contract in sync and fixes the surrogate-pair off-by-one/out-of-range behavior.
+
+Summary
+- Root cause: mismatch between units (UTF-16 code units) and code points when advancing pos.
+- Fix: make the contract clear and use matching units when advancing pos (recommended: advance pos by consumed if consumed is code units).

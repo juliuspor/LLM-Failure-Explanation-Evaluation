@@ -1,0 +1,68 @@
+What happened (root cause)
+- The failure occurs inside ArrayUtils.add when you call ArrayUtils.add(None, None, expected_type=str).
+- Internally the method creates an array of type Object[] (a generic array) because element is None, then later attempts to cast or return that Object[] as a String[] (or the equivalent typed array for expected_type). That cast fails with a ClassCastException: an Object[] cannot be cast to a String[].
+- In other words: array == None and element == None → code chooses an Object[] representation → code later does something like (String[]) objectArray (or Arrays.copyOf(..., String[].class)) → JVM refuses to cast, producing the error you saw.
+
+Where it happens (which variables/methods/line)
+- Method: ArrayUtils.add
+- Inputs: array == None, element == None, expected_type == str
+- The problematic sequence is:
+  1. Creating/returning an Object[] (variable holding the new array).
+  2. Casting that Object[] to the requested component type (String[]).
+- If the implementation uses Arrays.copyOf or an explicit cast (for example: (T[]) Arrays.copyOf(src, len, componentTypeArrayClass)), the source array must already be the correct runtime array type; copying an Object[] to String[] via a raw cast triggers ClassCastException.
+
+Why it happens (simple language)
+- Java array types are part of runtime type information. An Object[] is not a String[] even if every element is null or actually a String — the runtime type differs. Casting does not change the actual runtime array class.
+- The code creates the wrong runtime array class (Object[]) and then tries to treat it as the expected runtime class (String[]). That is invalid.
+
+Concrete fixes (step-by-step, specific)
+1. If expected_type is provided and array is None:
+   - Do not create an Object[] first. Allocate an array whose runtime component type is expected_type.
+   - Java example:
+     - Use Array.newInstance(expected_type, 1) to create a String[] when expected_type == String.class.
+     - Example:
+       Object newArray = Array.newInstance(expectedType, 1);
+       // newArray is a String[] at runtime when expectedType == String.class
+       Array.set(newArray, 0, null);
+       return (T[]) newArray;
+2. If array is non-null and you need to return a larger array of the same runtime type:
+   - Use Arrays.copyOf(originalArray, newLength, originalArray.getClass()) so the returned array has the same runtime component type as originalArray.
+   - Do not rely on copying into an unrelated target class via an unchecked cast.
+3. If element != None but array == None:
+   - If element is non-null, you can infer the component type from element.getClass() and create the new array with Array.newInstance(element.getClass(), 1).
+4. If both array and element are None and expected_type is not provided:
+   - You must pick a neutral runtime type; keeping Object[] is OK, but do not later cast it to String[] (because the caller asked for String[]). If the caller provides expected_type, allocate an array of that type per step 1.
+5. Ensure no code path returns an Object[] when the method signature (or caller) expects a more specific runtime array type.
+
+Minimal change example (Java pseudo-code patch)
+- Replace the branch that sets up resultArray when array == null with:
+
+if (array == null) {
+    Class<?> componentType = null;
+    if (expectedType != null) {
+        componentType = expectedType;
+    } else if (element != null) {
+        componentType = element.getClass();
+    }
+
+    if (componentType == null) {
+        // fallback: Object[]
+        Object[] newArr = new Object[1];
+        newArr[0] = element; // element may be null
+        return (T[]) newArr;
+    } else {
+        Object newArr = Array.newInstance(componentType, 1);
+        Array.set(newArr, 0, element); // element may be null
+        return (T[]) newArr;
+    }
+}
+
+How to verify
+- Run the failing test test_add_null_to_null_with_expected_type after applying the change; it should return a String[] (runtime type String[]) containing a single null element and not throw ClassCastException.
+- Also verify other tests: adding element to null array (infers from element), adding to existing arrays (preserve runtime component types), and the ArrayUtils.add_at_index behavior.
+
+Why the suggested fix is safe
+- It ensures the returned array has the correct runtime component type when expected_type is given, so no improper cast will be attempted later.
+- It preserves the existing-array runtime type when resizing existing arrays (via Arrays.copyOf with the original array class or Array.newInstance with original component type), avoiding cross-type copies that trigger ClassCastException.
+
+If you paste the current implementation of ArrayUtils.add I can point to the exact lines to change and provide a ready patch.

@@ -1,0 +1,44 @@
+What happens
+- The bug is in the post-consumed loop that advances pos after a translator handled a codepoint:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+- The code mutates pos inside the loop and also uses pos as the read index for code_point_at on each iteration. That makes the next iteration read from the already-advanced position instead of the next codepoint from the original place. With a surrogate pair (U+1F630) this causes you to read past the end of code_units and hit an out-of-range read inside code_point_at (or to skip code units incorrectly).
+
+Why it fails on your test
+- Input '\U0001F630' is represented by two UTF-16 code units (a surrogate pair).
+- Suppose consumed > 0 indicates the translator consumed one codepoint. The loop runs consumed times (likely 1 or 2 depending on contract). On the first iteration pos is advanced by 2 (char_count returns 2 for the surrogate pair) so pos becomes length (2). If consumed > 1, the loop tries another iteration and calls code_point_at(code_units, pos) with pos == length, which is out of range and raises an error. Even if consumed == 1, the pattern is fragile and misleading: the code mixes the loop index and a changing pos, which is logically wrong and easy to break.
+
+Where it happens in your code
+- In the while loop, after:
+      consumed = self.translate_codepoint(code_units, pos, out)
+  the problematic block is:
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+What you should do (concrete fixes)
+Option A — iterate by consumed codepoints from the original start, advancing pos correctly:
+    start = pos
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+Option B — if consumed is the number of UTF-16 code units consumed, then simply:
+    pos += consumed
+
+(Choose A if consumed counts codepoints; choose B if consumed already counts code units. From your comment "they have to understand codepoints", consumed appears to count codepoints, so Option A is likely correct.)
+
+Exact replacement (recommended, assuming consumed is codepoints):
+Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+with
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+Why this fixes it
+- This makes each iteration read the codepoint that begins at the current pos and advance pos by the correct number of UTF-16 code units for that codepoint. It does not reuse a stale index or read beyond the end of code_units.
+
+Additional note
+- Make sure you understand whether translate_codepoint returns number of codepoints or number of UTF-16 code units. The fix above assumes "consumed" is a count of codepoints. If it already counts code units, replace the loop with pos += consumed.

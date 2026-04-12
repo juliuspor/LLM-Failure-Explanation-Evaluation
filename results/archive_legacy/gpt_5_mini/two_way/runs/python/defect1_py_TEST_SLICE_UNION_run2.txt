@@ -1,0 +1,53 @@
+What failed
+- The code rejects negative minute values at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This check treats any negative minutes as invalid. That makes tests such as DateTimeZone.for_offset_hours_minutes(-2, -15) and DateTimeZone.for_offset_hours_minutes(0, -15) raise ValueError incorrectly.
+
+Where it happens (lines from the slice)
+- Line 396: minutes range check (the immediate cause of the failure).
+- Lines 402–404: later code attempts to combine hours and minutes, but the logic there shows special handling for when hours are negative — which contradicts the early rejection at line 396. So the code both forbids negative minutes and then tries to handle negative-minute cases; it never reaches that handling because the input is already rejected.
+
+Why it fails (root cause)
+- The minutes validity check uses the wrong lower bound. It disallows any negative minute value even though the intended behavior (and the rest of the method’s logic) expects minutes to be allowed in the range -59..+59, and to be interpreted differently depending on the sign of hours:
+  - If hours > 0: minutes must be >= 0 (e.g. (2, 15) => +02:15).
+  - If hours < 0: minutes should augment the negative offset regardless of minute sign (e.g. (-2, 15) and (-2, -15) both => -02:15).
+  - If hours = 0: minutes carry their own sign (e.g. (0, -15) => -00:15).
+- Because the code rejects negative minutes unconditionally, any test providing negative minutes fails immediately at line 396, and the later handling at lines 402–404 is never used.
+
+Concrete, actionable fixes (steps)
+1. Change the minutes bounds check so it allows negative minutes down to -59:
+   - Replace line 396 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Replace the convoluted minutes/hours combination (lines 402–404) with clear logic that computes total minutes correctly for all sign combinations. For example:
+   - Compute total_minutes by handling three cases:
+     a) hours > 0:
+         - require minutes_offset >= 0 (raise ValueError if minutes_offset < 0)
+         - total_minutes = hours * 60 + minutes_offset
+     b) hours < 0:
+         - treat minutes as magnitude to add to the negative hours (so both (-2, 15) and (-2, -15) become -(2*60 + 15))
+         - total_minutes = -(abs(hours) * 60 + abs(minutes_offset))
+     c) hours == 0:
+         - total_minutes = minutes_offset
+   - In code form:
+     if hours_offset > 0:
+         if minutes_offset < 0:
+             raise ValueError("Positive hours with negative minutes not allowed")
+         total_minutes = hours_offset * 60 + minutes_offset
+     elif hours_offset < 0:
+         total_minutes = -(abs(hours_offset) * 60 + abs(minutes_offset))
+     else:  # hours_offset == 0
+         total_minutes = minutes_offset
+
+3. After total_minutes is computed, multiply by DateTimeConstants.MILLIS_PER_MINUTE (you already do similar at line 405) and call for_offset_millis with that offset.
+
+4. Keep/verify other bounds checks: hours must be in [-23, 23] and final offset size check (line 407) should remain.
+
+Why these steps fix it
+- Step 1 stops incorrectly rejecting negative minutes.
+- Step 2 implements the intended sign rules described in the file’s docstring and observed behavior: negative hours always produce a negative offset whose magnitude includes both hours and minutes; positive hours require positive minutes; zero hours use the minute sign.
+- The combination ensures inputs like (-2, -15), (-2, 15), (0, -15) and (2, 15) are handled as your tests expect, while invalid mixes (2, -15) or out-of-range values still raise ValueError.
+
+If you want, I can produce the exact patch (diff) that replaces the lines you showed with the corrected checks and combination logic.

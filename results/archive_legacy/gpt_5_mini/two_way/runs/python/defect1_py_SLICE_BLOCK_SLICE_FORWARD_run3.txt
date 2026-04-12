@@ -1,0 +1,41 @@
+What happened (where it fails)
+- At line 396 the code does:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check runs before the later adjustments at lines 402 and 404:
+  402: minutes_offset = hours_in_minutes - minutes_offset
+ 404: minutes_offset = hours_in_minutes + minutes_offset
+
+Because the validation runs too early, an input that legitimately encodes a negative zone minutes (for example parsing "-01:30", where the parsed minutes component is -30) triggers the check at line 396 and raises ValueError before the code ever applies the sign/combines hours and minutes. In short: minutes_offset is validated in its raw parsed form instead of after sign/combination, so valid inputs with negative-minute components (or the expected intermediate values used by the later arithmetic) are rejected.
+
+Why this is the root cause (no jargon)
+- The code expects to adjust minutes_offset using hours_in_minutes at lines 402/404. Those adjustments assume minutes_offset can be negative temporarily (or that the check will happen after adjustment).
+- But the check at 396 forbids negative minutes_offset immediately, so the adjustment code never runs for those inputs.
+- Therefore the exception originates at line 396, not at the later arithmetic or at for_offset_millis(...).
+
+Exactly where to change it and concrete fixes
+Option A — Validate the absolute minute value (recommended)
+1. Replace the check at line 396 with an absolute-value check:
+   if abs(minutes_offset) < 0 or abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   (or simply: if abs(minutes_offset) > 59: raise ...)
+2. Keep the later arithmetic at lines 402 and 404 unchanged.
+This lets parsed negative-minute inputs (e.g. -30) pass the validation, then be combined with hours_in_minutes correctly.
+
+Option B — Move validation after adjustment
+1. Remove the validation at line 396.
+2. After lines 402/404 (after minutes_offset has been combined with hours_in_minutes), add:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range after combination: {minutes_offset}")
+This ensures you validate the final minutes value the code will use.
+
+Option C — Normalize during parse, then validate
+1. When parsing the minute component, store sign separately and normalize minutes to a non-negative value (0..59) immediately.
+2. Use the sign when combining with hours_in_minutes.
+3. Keep the original check (or tightened check) on the normalized minutes (0..59).
+
+What to watch for after the change
+- Ensure minutes_offset represents the same unit (minutes) and sign when passed to FieldUtils.safe_multiply and for_offset_millis.
+- Add unit tests for inputs like "01:30", "-01:30", "00:30", "-00:30" to confirm behavior matches expectations.
+
+This explains the failure: the minutes range check (line 396) runs too soon, rejecting correctly structured negative-minute inputs before the code at lines 402/404 can convert them into the intended positive/combined offset. The fixes above show exactly where and how to change the checks so valid inputs are accepted.

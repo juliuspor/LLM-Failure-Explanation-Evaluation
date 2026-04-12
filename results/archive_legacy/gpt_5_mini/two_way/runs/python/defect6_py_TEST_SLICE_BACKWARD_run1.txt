@@ -1,0 +1,52 @@
+What happened (where it failed)
+- The test fail happens in CodeConsumer.add_number when given x == -0.0.
+- At the branch starting on line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  the code treats x like an integer and prints it as an integer (e.g. via int(x) or str(int(x))).
+- For x == -0.0 the comparison x == int(x) is True (because -0.0 == 0.0), so that integer branch runs.
+- Converting -0.0 to int (int(-0.0) == 0) or otherwise formatting it as an integer loses the sign bit, so the output becomes "0" instead of "-0.0".
+- The root cause: the integer-detection branch runs before any check for negative zero, so negative zero is swallowed by the integer-formatting logic.
+
+Why this happens (technical cause)
+- Python equality treats -0.0 == 0.0 as True, so the test x == int(x) does not distinguish signed zero.
+- The code prints integer-like values without checking for negative zero; thus the special case (preserve the negative sign for -0.0 by printing "-0.0") is never reached.
+- The utility is_negative_zero exists (tested in the suite), but it is not consulted before the integer branch at line 176.
+
+Concrete fixes (step-by-step, specific)
+Option A — Handle negative zero before the integer branch (preferred)
+1. At the start of add_number, before line 176, add:
+     if CodeConsumer.is_negative_zero(x):
+         self.append("-0.0")
+         return
+   This ensures -0.0 is printed as "-0.0" and never falls into the integer branch.
+
+Option B — Exclude negative zero from the integer branch
+1. Change the condition at line 176 to explicitly avoid negative zero:
+     if x == int(x) and not math.isinf(x) and not math.isnan(x) and not CodeConsumer.is_negative_zero(x):
+         ...
+2. Then add a dedicated branch after it to handle negative zero:
+     if CodeConsumer.is_negative_zero(x):
+         self.append("-0.0")
+         return
+
+Option C — Use sign-aware formatting
+1. Use math.copysign to detect sign and format accordingly:
+     if x == 0.0:
+         if math.copysign(1.0, x) < 0.0:
+             self.append("-0.0"); return
+         else:
+             self.append("0"); return
+   and keep the integer branch for non-zero integer-like values.
+
+Which variables/methods to touch
+- Method: CodeConsumer.add_number
+- Line: the branch beginning at line 176 (the integer check)
+- Utility: CodeConsumer.is_negative_zero (use it before the integer branch or in the integer-branch guard)
+- Variable: x (the number being formatted)
+
+Why these fixes work
+- They ensure negative zero is detected before any formatting that would drop its sign bit (int conversion or plain integer formatting).
+- They preserve the expected output "-0.0" while leaving other integer-like cases (0.0 -> "0", 42.0 -> "42") unchanged.
+
+Short summary
+- The add_number integer-detection branch (line 176) runs for -0.0 because -0.0 == 0, and that branch prints it as "0". Detect negative zero earlier (or exclude it from that branch) and explicitly append "-0.0". This resolves the failing test.

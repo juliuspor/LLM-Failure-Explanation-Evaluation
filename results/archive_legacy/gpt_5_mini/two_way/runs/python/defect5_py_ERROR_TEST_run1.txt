@@ -1,0 +1,54 @@
+What happened (root cause)
+- The failing call is ArrayUtils.add(None, None, expected_type=str).
+- Inside ArrayUtils.add the code chooses a component type for the new array by inspecting the existing array (arr) or the element (element). When both arr and element are None the code falls back to java.lang.Object (or Python/Java Object[]), so it creates an Object[].
+- The caller, however, expected a String[] (because expected_type=str was passed). Somewhere after ArrayUtils.add returns the code attempts to treat/ cast the returned array as String[], which triggers the ClassCastException:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+- In short: when both arr and element are None the implementation picks the wrong component type (Object) instead of using the expected_type parameter, so the returned array has the wrong runtime type.
+
+Where this happens (variables and method names)
+- Method: ArrayUtils.add(arr, element, expected_type=None)
+- Relevant local variables: arr (the incoming array), element (incoming element), expected_type (parameter supplied by caller)
+- Failure occurs at the point where the code constructs the new Java array (e.g. using java.lang.reflect.Array.newInstance(component_class, new_length)) or when the result is cast to the expected array type by the caller.
+- The problematic branch is the code path taken when arr is None and element is None: component_class gets set to Object (or is derived from element/arr only), rather than using expected_type.
+
+Why the current logic is wrong (clear, simple)
+- The function relies on arr or element to infer the array element type. If both are None there is nothing to infer from, so a fallback is needed.
+- The implementation uses Object as a fallback. That creates an Object[] at runtime. An Object[] cannot be cast to String[], even if all entries are null — Java arrays are reified by runtime component type.
+- The caller provided expected_type=str, which is intended to tell ArrayUtils what component type to use; the implementation ignored that in the None/None case.
+
+Concrete fixes (step-by-step, exact places to change)
+1. Add/adjust the component type selection logic inside ArrayUtils.add before creating the new array:
+   - Compute component_type in this order:
+     a) If expected_type is provided (not None), use it.
+     b) Else if arr is not None, use arr.getClass().getComponentType() (or infer from Python list contents if this code lives in pure Python).
+     c) Else if element is not None, use element.getClass() (or type(element) in Python-to-Java mapping).
+     d) Else fall back to java.lang.Object (only as last resort).
+   - This ensures expected_type controls the resulting runtime array type when the caller supplies it.
+
+2. Use component_type when creating the new array:
+   - If you're using Java reflection: java.lang.reflect.Array.newInstance(component_type, new_length)
+   - If using Jython/Py4J interop make sure the Python type maps to the correct Java class (e.g. str -> java.lang.String).
+
+3. When inserting element=None into the new array, allow nulls (no special handling beyond using the correct component type is needed).
+
+4. If there is code that casts the returned array to a specific Java array type, ensure the casting code uses expected_type or the actual component_type used to create the array.
+
+Minimal pseudocode patch (place in ArrayUtils.add before creating the array)
+- component_type = None
+- if expected_type is not None:
+    component_type = expected_type  # convert Python type -> Java class if necessary
+  elif arr is not None:
+    component_type = arr.getClass().getComponentType()
+  elif element is not None:
+    component_type = element.getClass()
+  else:
+    component_type = java.lang.Object
+- new_array = java.lang.reflect.Array.newInstance(component_type, new_length)
+
+Why this will fix the failing test
+- For ArrayUtils.add(None, None, expected_type=str) the new component_type becomes java.lang.String (mapped from Python str), so the created array is String[]. Returning that array lets the caller treat it as String[] and you no longer get the ClassCastException.
+
+Extra note about add_at_index
+- The same inference logic should be applied in ArrayUtils.add_at_index wherever it constructs a new array. If add_at_index uses the same inference code, apply the same change so null/null + expected_type works there too.
+
+If you want, paste the ArrayUtils.add implementation here and I will give an exact patch with line numbers.

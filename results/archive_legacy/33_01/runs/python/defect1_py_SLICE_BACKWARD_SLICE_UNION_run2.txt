@@ -1,0 +1,37 @@
+What happened (where)
+- The code checks the minutes field at lines 396–397:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+  - That validation only covers the raw minutes part (0–59).
+- Later the same variable minutes_offset is reused and changed at lines 402 and 404:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Immediately after (line 405) minutes_offset is multiplied by MILLIS_PER_MINUTE and stored in offset.
+- If that multiplication overflows or produces a value outside the allowed range, line 407 raises ValueError("Offset is too large").
+
+Why it fails (root cause)
+- The variable minutes_offset is reused for two different meanings:
+  - First it means the minute-of-hour part (which must be 0–59).
+  - Later it becomes a total-minute quantity (hours_in_minutes ± minutes_offset).
+- The initial check at lines 396–397 only guarded the minute-of-hour value. There is no subsequent validation of the new total-minute value before you multiply it (line 405).
+- Because the total-minute value can be much larger than  0–59 (for example hours_in_minutes + 30), the multiplication can overflow or exceed whatever limit FieldUtils.safe_multiply enforces — that causes the code to hit the "Offset is too large" error at line 407.
+
+Concrete example (how to reproduce)
+- Suppose hours_in_minutes == 840 (14 hours * 60) and the original minutes_offset == 30 (allowed by the check).
+- After line 404 minutes_offset becomes 840 + 30 = 870.
+- At line 405 you compute offset = 870 * MILLIS_PER_MINUTE — that value may be outside the allowed range and triggers the "Offset is too large" error.
+
+How to fix (exact steps)
+1. Stop reusing minutes_offset for a different meaning. Introduce a new variable for the total minutes, e.g.:
+   - total_minutes = hours_in_minutes - minutes_offset  (or +, depending on branch)
+2. Validate total_minutes after you compute it and before multiplying:
+   - if total_minutes < MIN_ALLOWED or total_minutes > MAX_ALLOWED: raise ValueError("Offset is out of range")
+   - (pick MIN_ALLOWED/MAX_ALLOWED consistent with your domain; for example 0 <= total_minutes < hours_in_minutes if that is intended)
+3. Use total_minutes for the multiplication:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the original check at lines 396–397 (it’s still needed to validate the minute-of-hour input).
+
+Why these steps fix it
+- They separate the minute-of-hour input check from checks on the computed total minutes. That prevents unexpected large values from being multiplied and avoids the overflow / "Offset is too large" error.
+
+Summary
+- Root cause: minutes_offset is validated as a minute-of-hour (0–59) but later reused as a total-minute value without re-validation, leading to an out-of-range/overflow and the "Offset is too large" error at line 407. Fix by using a separate variable for total minutes and validating it before multiplication.

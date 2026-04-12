@@ -1,0 +1,48 @@
+What happened (root cause)
+- The code tries to treat an Object[] as a String[] and Java throws a ClassCastException: "[Ljava.lang.Object; cannot be cast to [Ljava.lang.String;". That is the exact runtime failure reported inside the TypeError you saw.
+- In your function (variables: array, element, expected_type) you build or copy an array/list whose runtime component type is Object (Object[]) but then you cast it to a more specific array type (String[]). The JVM does not allow casting Object[] → String[] even when every element currently is a string; the array's runtime component type must already be String.
+
+Where it occurs
+- The exception happens at the code path that casts or returns the new container as a typed array/list. Typical offending call patterns:
+  - Arrays.copyOf(array, newLength, String[].class) when array is Object[] (Arrays.copyOf will produce an Object[] that cannot be cast to String[]).
+  - Or an explicit cast like (String[]) someArray where someArray.getClass().getComponentType() == Object.class.
+- In terms of your variables: this happens after you create the "new list" (or new array) and before returning it, when you coerce it to the expected element type (expected_type or an inferred String.class).
+
+Why it fails (concrete example)
+- Suppose array is an Object[] (or a List whose underlying array is Object[]) and expected_type == String.class (or you return a List[str]):
+  - You allocate/copy elements into an Object[].
+  - You then attempt to return it as String[]/List[str] (or perform (String[]) cast). JVM refuses because Object[] is not a subtype of String[].
+
+How to fix it (ordered, specific steps)
+1. Decide the runtime component type up front
+   - If array is not None, get its component type: componentType = array.getClass().getComponentType() (or for List use the element type metadata you maintain).
+   - If array is None, derive componentType from element:
+     - If element != null: componentType = element.getClass()
+     - Else if expected_type supplied: componentType = expected_type
+     - Else: componentType = Object.class
+
+2. Verify assignability before adding
+   - If element != null and !componentType.isAssignableFrom(element.getClass()), throw TypeError (or IllegalArgumentException) with a clear message like "element of type X not assignable to array component type Y".
+
+3. Create a new array with the correct component type
+   - Use Array.newInstance(componentType, newLength) to allocate an array of the correct runtime type.
+   - Copy existing elements into that new array (System.arraycopy or manual copy).
+   - Put element into the last slot.
+
+4. Return the array (or wrap it in a typed List) without casting to an incompatible array type.
+
+Concrete Java-like snippet to replace the buggy cast (illustrative)
+- Suppose you have Object[] old = ...; Object elem = ...; Class<?> componentType = ... final Object[] result = (Object[]) Array.newInstance(componentType, old.length + 1); System.arraycopy(old, 0, result, 0, old.length); result[old.length] = elem; return result;
+- Do not do: return (String[]) Arrays.copyOf(old, old.length+1, String[].class) unless old is already a String[].
+
+Messages and checks to add
+- When throwing a TypeError/TypeMismatch, include:
+  - the runtime class of array (array.getClass().getComponentType()),
+  - the class of element (element == null ? "null" : element.getClass().getName()),
+  - the expected_type (if provided).
+- Example error: "Cannot add element of type java.lang.Object to list with component type java.lang.String."
+
+Why the suggested fix works
+- Array.newInstance produces an array whose runtime component type is the exact Class you pass. Copying elements into that array avoids any illegal cast later. The JVM allows assignment of an element into that array only if the element is compatible with componentType, which you checked.
+
+If you paste the specific code around where you allocate/copy/cast the array (the few lines that use Arrays.copyOf, Array.newInstance, or an explicit cast), I will point exactly which line to change and provide the exact replacement.

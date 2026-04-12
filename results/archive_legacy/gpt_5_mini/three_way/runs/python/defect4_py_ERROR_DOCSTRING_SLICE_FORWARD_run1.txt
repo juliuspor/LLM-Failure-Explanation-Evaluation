@@ -1,0 +1,55 @@
+What happened (root cause)
+- The test asserts max_middle_index should be 1 but the function set it to 3. That tells us the code that computes the "middle" (or upper middle) index when "slicing forward" is using the wrong arithmetic: it's treating the period or the index as if they were 1-based or is adding the full period instead of the half-period. In short: an off-by-N error in the arithmetic that updates max_middle_index in the slice_forward code path.
+
+Where it happened (file / function / line)
+- The bug is inside the slice_forward implementation that updates the bounds. Look for the lines that assign max_middle_index and min_middle_index (or any variable names like max_mid, mid_index, high_mid). Example location names you gave: the function or method named slice_forward (or the forward-slicing branch), at the lines that compute the new maximum/median index from period and index.
+
+What exactly went wrong (variables and expressions)
+- Wrong expression (likely current code):
+  - max_middle_index = index + period
+  - or max_middle_index = index + (period // 2) + 1
+  - or using period where you should use period - 1
+
+- Why that produces 3 instead of 1:
+  - Suppose index = 0 and period = 2 (common small test). The correct upper-middle for a forward slice of length 2 starting at 0 is 1, but if code computes index + period (0 + 2) or index + (period // 2) + 1 (0 + 1 + 1) you get 2 or 2 (or 3 in some variants if index wasn’t 0). The test result (3) shows the code is overshooting by 2 positions relative to the expected value — consistent with adding the full period or adding an extra 1 when the bounds are inclusive.
+
+Why this mistake happened (conceptual)
+- The docstring and API use 0-based indices and inclusive bounds for the slice. The code incorrectly mixes inclusive/exclusive conventions or uses period where period-1 should be used when computing a middle index. Typical sources:
+  - Treating period as a count of elements but adding it to an index that’s already inclusive.
+  - Using floor/ceil incorrectly when converting a count to an offset.
+  - Copy/paste of a backwards-slicing formula into forward-slicing without flipping a sign or adjusting +/-1.
+
+How to reproduce quickly
+1. Run the failing unit test that asserts max_middle_index==1 (the one that failed).
+2. Add a tiny debug print in slice_forward right before the return or bounds update:
+   - print("index", index, "period", period, "computed max_middle_index", max_middle_index)
+3. You will see a value 3 where you expect 1, confirming the arithmetic is wrong.
+
+Concrete steps to fix (line-by-line)
+1. Locate the assignment(s) in slice_forward that compute the middle/upper-bound index. They will look similar to:
+   - max_middle_index = index + period
+   - or max_middle_index = index + (period // 2) + 1
+2. Replace with the correct 0-based, inclusive-aware expression. Two common correct options depending on the intended semantics:
+   - If period is the number of elements in the slice and you want the upper middle (for even period choose the right-hand element):
+     - max_middle_index = index + (period - 1) // 2  # for left-middle
+     - max_middle_index = index + (period - 1) - ((period - 1) // 2)  # for right-middle, or simpler below
+     - For the right-middle (upper of two middles): max_middle_index = index + (period // 2)
+   - For a typical forward slice where index is the start (0-based) and you want the middle index:
+     - middle_index = index + (period - 1) // 2    # floor middle
+     - upper_middle_index = index + (period // 2)  # right-hand middle on even length
+
+   Pick the one that matches the expected test (the test expects 1 for whatever period/index it used — plug those values to confirm). For example, if index=0 and period=2, then:
+     - index + (period // 2) = 0 + 1 -> 1  (this matches the test)
+
+3. Remove any extra +1 or full +period that caused the overshoot.
+4. Run the unit tests.
+
+Extra checks to add (prevent regression)
+- Add a unit test table with a few small values to assert expected indexes:
+  - cases: (index=0,period=1)->middle=0
+  - (index=0,period=2)->max_middle_index=1
+  - (index=2,period=3)->middle=3 (verify expected)
+- Add an inline comment describing whether period is inclusive count and which "middle" (left or right) is chosen.
+
+Summary (short)
+- The failure came from an off-by-N arithmetic error in slice_forward when computing max_middle_index: the code adds too much (likely period or an extra +1) instead of using index + (period // 2) or index + (period - 1)//2 depending on the desired middle. Fix the assignment to use the proper 0-based offset formula and add small tests for period=1..4 to prevent regressions.

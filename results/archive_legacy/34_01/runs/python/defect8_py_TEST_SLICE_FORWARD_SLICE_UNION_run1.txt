@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- The code reads characters at fixed positions and rejects anything that isn't A–Z:
+  - At lines 237–240 the code does
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+- For the input 'fr__POSIX' the characters are indexed:
+  0:'f' 1:'r' 2:'_' 3:'_' 4:'P' 5:'O' ...
+  So ch3 == '_' and ch4 == 'P'.
+- The check at lines 237–240 fails because ch3 is '_' (not an uppercase letter), so the method raises ValueError and the test fails.
+
+Why it fails (root cause)
+- The code assumes positions 3 and 4 are always a two-letter country code (A–Z). It does not handle the valid form where the country is empty and is represented by a double underscore, like 'fr__VARIANT'.
+- Because of that assumption the validator at lines 237–240 rejects the legitimate double-underscore pattern.
+- There are also misplaced/incorrect index checks later (line 245 expects locale_str[5] == '_' in some branch), which do not match the double-underscore + variant layout either. The logic for the "empty country, variant present" case is missing/misordered.
+
+Exact places to change
+- Faulty validation: lines 237–240 (the uppercase check on ch3 and ch4).
+- Misplaced variant separator check: line 245 and the following return at 247.
+
+Concrete fixes (step-by-step)
+1. Check the required '_' at index 2 first (locale_str[2] must be '_').
+2. Distinguish three cases explicitly before doing uppercase checks:
+   - length == 2: language only (existing behavior).
+   - country present: locale_str[3] and locale_str[4] are letters -> Locale(lang, country).
+   - empty country with variant: locale_str[3] == '_' and then the rest (from index 4 or 5 depending on how you count separators) is the variant -> Locale(lang, '', variant).
+3. Example corrected logic (pseudocode, replace current lines 237–247):
+
+   if locale_str[2] != '_':
+       raise ValueError(...)
+   if locale_str[3] == '_' :
+       # form: ll__variant
+       return Locale(locale_str[0:2], '', locale_str[4:])
+   else:
+       # form: ll_CC or ll_CC_variant
+       ch3 = locale_str[3]; ch4 = locale_str[4]
+       validate ch3,ch4 are A-Z
+       if len(locale_str) == 5:
+           return Locale(locale_str[0:2], locale_str[3:5])
+       if locale_str[5] != '_':
+           raise ValueError(...)
+       return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+4. Add unit tests for:
+   - 'fr' -> Locale('fr','','')
+   - 'fr_FR' -> Locale('fr','FR','')
+   - 'fr_FR_POSIX' -> Locale('fr','FR','POSIX')
+   - 'fr__POSIX' -> Locale('fr','','POSIX')
+
+What to expect after the fix
+- The string 'fr__POSIX' will no longer fail the uppercase check; it will be parsed as language='fr', country='' and variant='POSIX', matching the test's expected Locale('fr', '', 'POSIX').

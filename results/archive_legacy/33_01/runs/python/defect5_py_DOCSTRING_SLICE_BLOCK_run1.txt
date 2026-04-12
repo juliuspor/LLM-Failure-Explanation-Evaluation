@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The failure comes from the check at lines 346–351:
+  - It raises TypeError when inferred_type == object and expected_type != object.
+- That check runs when the method is deciding the element/component type for the new list (the local variables are inferred_type, expected_type, plus the inputs array and element).
+- Practically this triggers when the code cannot infer a concrete element class from the input array or element (so inferred_type got set to object) but an expected_type was supplied that is not object. The code then raises, claiming an object-list cannot be cast to a List[expected_type].
+
+Why it fails (root cause)
+- The code treats inferred_type == object as a hard incompatibility with any expected_type != object, and immediately raises a TypeError. That logic is wrong in the common case where:
+  - array is None or empty, or
+  - element is None (so there is no concrete element class to infer),
+  but the caller did provide expected_type to tell the method what the intended component type should be.
+- Because inferred_type was computed before considering expected_type, the method refuses to honor expected_type and raises even though it could legitimately create a List[expected_type]. In short: the code uses inferred_type == object as evidence of an unfixable mismatch, when actually expected_type can resolve the ambiguity.
+
+Concrete variables and lines involved
+- inferred_type: the type the method inferred from the existing array/element.
+- expected_type: the optional type parameter the caller passed in for type checking.
+- Lines 346–351:
+  - if inferred_type == object and expected_type != object:
+  - raise TypeError(... f"[Ljava.lang.Object; cannot be cast to [Ljava.lang.{expected_type.__name__};" ...)
+
+Why that is incorrect in plain terms
+- An inferred_type of object simply means “I couldn’t determine a more specific type from the inputs.” It does not prove the caller’s expected_type is invalid.
+- The code should prefer expected_type when it is provided (or at least combine the information sensibly), not immediately throw because inferred_type is generic.
+
+Exact fix (step-by-step) you can apply
+1. Decide precedence: expected_type should be used to set/adjust inferred_type when inferred_type is object (i.e., when no more specific information is available).
+2. Replace the current check with logic that:
+   - If inferred_type == object and expected_type is not None and expected_type != object: set inferred_type = expected_type (don’t raise).
+   - Otherwise, if both types are concrete and incompatible, then raise.
+3. Example minimal patch (replace lines 346–351 with this logic):
+   - if inferred_type == object:
+   -     # No concrete type could be inferred from inputs; use expected_type if provided
+   -     if expected_type is not None and expected_type != object:
+   -         inferred_type = expected_type
+   -     else:
+   -         # keep inferred_type == object
+   -         pass
+   - elif expected_type is not None and not issubclass(inferred_type, expected_type):
+   -     raise TypeError(f"Cannot cast {inferred_type.__name__} list to {expected_type.__name__} list "
+   -                     f"(ClassCastException: [Ljava.lang.{inferred_type.__name__}; cannot be cast to "
+   -                     f"[Ljava.lang.{expected_type.__name__};)")
+
+4. After that, use inferred_type as the component type for the new list and only raise if there is a real incompatibility between two concrete types.
+
+Why this fix works
+- If nothing can be inferred (object) but the caller supplied expected_type, we now create a list with the caller’s requested component type instead of raising.
+- We still raise when there is a genuine mismatch between two concrete, incompatible types.
+
+If you want, I can produce a full code patch in the exact file context to replace lines 346–351.

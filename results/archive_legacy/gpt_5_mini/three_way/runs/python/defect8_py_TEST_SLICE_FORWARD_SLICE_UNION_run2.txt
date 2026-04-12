@@ -1,0 +1,54 @@
+What happened
+- The failure happens in LocaleUtils.to_locale when parsing "fr__POSIX".
+- At lines 237–246 the code assumes characters at indices 3 and 4 (variables ch3 and ch4) are uppercase letters for a country code:
+  - lines shown:
+    - 237: ch3 = locale_str[3]
+    - 238: ch4 = locale_str[4]
+    - 239: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+    - 240:     raise ValueError(f"Invalid locale format: {locale_str}")
+- For "fr__POSIX" the bytes/indices are:
+  - index 0 = 'f', 1 = 'r' (language)
+  - index 2 = '_' (separator)
+  - index 3 = '_' (second underscore, indicating empty country)
+  - index 4 = 'P' (start of variant)
+- Because ch3 (locale_str[3]) is '_' not an uppercase letter, the check on line 239 fails and raises ValueError. That is exactly the Java-reported bug: the code does not handle the language__variant (empty country) format.
+
+Why it happened (root cause)
+- The code only has a parsing path for:
+  - 2-char language only (length == 2),
+  - language_country where both country letters exist,
+  - language_country_variant where country exists and variant follows.
+- It never handles the specific pattern where the country is empty and the input uses two underscores in a row (language__variant). The validation on ch3 and ch4 rejects '_' as an invalid country character instead of interpreting the second underscore as "empty country" and treating the remainder as the variant.
+
+Where exactly (file and lines)
+- Method: LocaleUtils.to_locale
+- Problem lines: 237–240 (the ch3/ch4 extraction and validation) and the ValueError raise at line 240.
+- The bad behavior leads to raising ValueError for inputs like "fr__POSIX" (the failing test test_locale_with_empty_country_variant).
+
+Concrete, actionable fixes (what to change, step-by-step)
+1. Before checking ch3 and ch4 for uppercase letters, detect the double-underscore empty-country case. Example insertion (showing indices used in current code):
+   - After computing length and before:
+       ch3 = locale_str[3]
+       ch4 = locale_str[4]
+     add:
+       if locale_str[2] == '_' and locale_str[3] == '_':
+           # language__variant: language at [0:2], variant starts at index 4
+           return Locale(locale_str[0:2], "", locale_str[4:])
+2. Ensure the variant is non-empty (optional but recommended):
+   - If you require a non-empty variant, check that len(locale_str) > 4 and raise ValueError otherwise.
+3. Keep the current uppercase-country validation for the normal language_country and language_country_variant cases unchanged (they still apply when locale_str[2] == '_' and locale_str[3] is a letter).
+4. Add unit tests (you already have them) to cover "fr__POSIX" and other language__variant inputs, and run the suite.
+
+Minimal code sketch to insert (replace the relevant block around lines 237–246):
+- Insert before extracting ch3/ch4:
+  if locale_str[2] == '_' and locale_str[3] == '_':
+      if length <= 4:
+          raise ValueError(f"Invalid locale format: {locale_str}")  # no variant present
+      return Locale(locale_str[0:2], "", locale_str[4:])
+- Then proceed to the existing ch3/ch4 checks for the non-empty-country paths.
+
+What to expect after the change
+- LocaleUtils.to_locale("fr__POSIX") will return Locale("fr", "", "POSIX") instead of raising ValueError.
+- Existing parsing for "en_US", "en_US_WIN", etc. will continue to be validated by the uppercase checks.
+
+This pinpoints the exact variables (locale_str, ch3, ch4), method (to_locale), and lines (237–246) causing the problem and gives explicit insertion code and checks so the parser correctly supports language__variant.

@@ -1,0 +1,82 @@
+What failed
+- The tests call DateTimeZone.for_offset_hours_minutes(hours, minutes). The implementation in hit01_timezone.py does not normalize the sign of the minutes and does not compute the total offset consistently with the docstring. As a result:
+  - For negative hours with negative minutes you end up formatting the ID with a negative sign on the minutes (e.g. "-02:-15") or otherwise producing an incorrect ID string instead of "-02:15".
+  - The offset calculation uses the raw hours and minutes signs rather than the intended combined magnitude, so the returned millisecond offset can be wrong (for example it may compute -2h + 15m or -2h -15m inconsistently).
+- The tests that expect ValueError for (2, -15) and that expect (-2, 15) and (-2, -15) to both yield "-02:15" fail because the implementation treats minute sign independently instead of normalizing as described in the docstring.
+
+Where it happens
+- The mistake happens inside DateTimeZone.for_offset_hours_minutes when:
+  - It validates hours/minutes range,
+  - then converts hours and minutes into milliseconds (or into a string ID).
+- The docstring excerpt referenced by the test (lines ~363–378 in your file) defines the expected behavior:
+  - +ve hours require minutes >= 0 (2, -15) => ValueError
+  - zero hours: sign of minutes determines sign of total offset
+  - negative hours: both (-2, 15) and (-2, -15) must produce -02:15 (i.e. minutes extend the magnitude; sign of minutes should not be rendered separately)
+
+Why that causes the failing assertions
+- Two specific bad outcomes you will observe in failing tests:
+  1. Wrong ID string: the code probably constructs the ID with both hour sign and minute sign, producing "-02:-15" or "+02:-15" instead of "-02:15" / raising ValueError where required. The tests assert exact strings like "+02:15", "-00:15" or "-02:15".
+  2. Wrong millisecond offset: the code likely computes offset_millis = hours*3600000 + minutes*60000 without first normalizing minutes to be an absolute magnitude added/subtracted according to the overall sign rules. That yields the wrong numeric offset for (-2, 15) or (-2, -15) if the intended result is -(2*3600000 + 15*60000).
+
+Exact places/identifiers involved
+- Method: DateTimeZone.for_offset_hours_minutes(hours, minutes)
+- Values/variables affected: hours_offset, minutes_offset (as named in the docstring), ID string returned by zone.get_id(), numeric offset returned by zone.get_offset(0)
+- Docstring lines referenced by the tests: around lines 363–378 (the test comments refer to those lines showing the allowed sign combinations)
+
+How to fix it (step‑by‑step)
+1. Validate ranges exactly:
+   - if not (-23 <= hours <= 23): raise ValueError
+   - if not (-59 <= minutes <= 59): raise ValueError
+
+2. Enforce the sign rule for positive hours:
+   - If hours > 0 and minutes < 0: raise ValueError (test expects ValueError for (2, -15)).
+
+3. Compute a single total minutes magnitude and overall sign according to the docstring rules:
+   - If hours > 0:
+       total_minutes = hours * 60 + abs(minutes)  # minutes must be >= 0 already
+       sign = +1
+   - If hours < 0:
+       total_minutes = abs(hours) * 60 + abs(minutes)  # minutes always treated as magnitude added to hours
+       sign = -1
+   - If hours == 0:
+       if minutes >= 0:
+           total_minutes = minutes
+           sign = +1
+       else:
+           total_minutes = abs(minutes)
+           sign = -1
+
+   Use total_millis = sign * total_minutes * 60000.
+
+   Examples:
+   - (2, 15) -> sign +1, total_minutes = 2*60 + 15 = 135 => +02:15
+   - (2, 0) -> +02:00
+   - (2, -15) -> rejected (ValueError)
+   - (-2, 15) -> sign -1, total_minutes = 2*60 + 15 = 135 => -02:15
+   - (-2, -15) -> sign -1, total_minutes = 2*60 + 15 = 135 => -02:15
+   - (0, 15) -> +00:15
+   - (0, -15) -> -00:15
+
+4. Build the ID string using the overall sign and absolute hour/minute fields:
+   - hours_part = total_minutes // 60
+   - minutes_part = total_minutes % 60
+   - id = ("%+03d:%02d" % (sign * hours_part, minutes_part)) but ensure formatting yields "-02:15" or "+00:15" (or keep sign separated: sign_char = "-" if sign < 0 else "+"; id = f"{sign_char}{hours_part:02d}:{minutes_part:02d}")
+
+   Important: never include the sign of minutes separately. Always use minutes_part = abs(minutes_part) and show the sign only once at the front.
+
+5. Return a canonical UTC singleton when total_millis == 0:
+   - If total_millis == 0: return DateTimeZone.UTC (so test_zero_offset comparing object equality passes).
+
+6. Ensure get_offset(0) returns total_millis.
+
+What to check after applying the fix
+- Run the full test file. Confirm:
+  - (0, 0) returns DateTimeZone.UTC with id "UTC" and offset 0
+  - (2, 15) -> get_id "+02:15", get_offset 8100000
+  - (2, -15) raises ValueError
+  - (-2, 15) and (-2, -15) both return id "-02:15" and offset -8100000
+  - (0, -15) -> "-00:15"
+  - Out of range hours/minutes raise ValueError
+
+Summary
+The root cause is non‑normalized handling of the minute sign and direct additive computation hours*3600000 + minutes*60000 without applying the docstring’s sign rules. Fix by validating the sign combination (reject positive hours with negative minutes), computing a single total magnitude in minutes based on the overall sign, formatting the ID with a single leading sign, and returning the canonical UTC object for a zero offset. Following the detailed steps above will make the implementation match the docstring and make your tests pass.

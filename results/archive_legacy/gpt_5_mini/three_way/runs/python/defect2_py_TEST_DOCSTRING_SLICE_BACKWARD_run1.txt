@@ -1,0 +1,44 @@
+What fails
+- The tests expect get_paint to "clamp" values outside the bounds to the nearest bound (map negatives to black (0,0,0) and >upper to white (255,255,255)).
+- The current implementation computes g and then raises a ValueError when g is outside 0–255 instead of clamping it. That causes tests to fail with an exception for inputs like -0.5 or 1.5.
+
+Where it happens (exact places)
+- Constructor sets bounds at lines shown (30–44).
+- get_paint is defined at line 54.
+- The gray component is calculated at line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after, at lines 74–75 it checks:
+  if g < 0 or g > 255:
+      raise ValueError(...)
+  That raise is the direct cause of failures.
+
+Why it fails (concrete examples)
+- For value = -0.5 with default bounds 0.0–1.0:
+  calculation gives g = int((-0.5 - 0.0) / 1.0 * 255.0) = int(-127.5) -> -127 → triggers g < 0 → ValueError is raised.
+- For value = 1.5:
+  calculation gives g = int((1.5 - 0.0) / 1.0 * 255.0) = int(382.5) -> 382 → triggers g > 255 → ValueError is raised.
+- For custom bounds (lower=10.0, upper=20.0) and value=5.0:
+  (5.0 - 10.0) / 10.0 * 255 -> negative g -> same raise.
+
+What to change (step-by-step fixes)
+1. Clamp the input value to the bounds before (or clamp g after) instead of raising. Either approach works; clamping the input is clearer:
+   - value = max(self._lower_bound, min(self._upper_bound, value))
+   - compute g from the clamped value
+2. Or clamp g itself to 0..255:
+   - g = max(0, min(255, g))
+3. Remove the ValueError that is raised for out-of-range g (since tests expect clamping).
+4. (Optional) If you want symmetric behavior with rounding, consider rounding before int-casting: g = int(round(...)) — tests currently expect truncation to 127 for 0.5, so rounding is optional.
+
+Minimal replacement example
+Replace the calculation + check (lines 71–75) with:
+
+    # clamp the input value to the bounds, then compute gray
+    value = max(self._lower_bound, min(self._upper_bound, value))
+    g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+    # ensure g is in 0..255 just in case of tiny FP error
+    g = max(0, min(255, g))
+
+This will make get_paint(-0.5) -> (0,0,0), get_paint(1.5) -> (255,255,255), and preserve expected mid-values like 0.5 -> (127,127,127).
+
+Why this fix addresses the root cause
+- The failure was caused by raising on out-of-range gray values rather than mapping them to the expected boundary colors. Clamping ensures values outside the bounds map to black or white rather than causing exceptions, matching the tests' expectations.

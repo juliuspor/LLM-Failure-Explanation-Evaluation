@@ -1,0 +1,55 @@
+What happened (where it failed)
+- The exception comes from to_utf16_code_units at lines 35–36:
+  ```
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  ```
+  The code raised IndexError because index == 2 but len(code_units) == 2, so the check considered index out of range (valid indices are 0 and 1).
+
+Why it happened (root cause)
+- The variable index is being treated as if it refers to a position inside code_units, but its value 2 was computed or passed from elsewhere using a different unit of indexing (most likely Unicode code points / Python string indices), not UTF-16 code units.
+- A single Unicode code point outside the BMP (e.g. U+1F600) becomes two UTF-16 code units (a surrogate pair). If the code computed index by counting Python string characters (code points) but then used that same index to access the list code_units (which has more entries when surrogate pairs are present), the two index systems no longer match.
+- Concretely: suppose you had two Python characters but one expanded to two UTF-16 units; code_units length will be different from len(s). Index 2 can be valid for string positions (or be produced by codepoint counting) but invalid for the shorter code_units list at runtime.
+
+Where to look in your code
+- to_utf16_code_units builds code_units (lines before 35). The mismatch is between how index is calculated (caller or earlier code) and how the bounds check uses len(code_units).
+- Look for any code that sets index from:
+  - a Python string index (e.g. loop over enumerate(s))
+  - or from a count of code points
+  and then later uses that index to read code_units without converting it.
+
+How to fix it (specific steps)
+1. Decide which index type you want:
+   - If callers should pass a UTF-16 code-unit index, enforce that and document it. Make sure any code that computes index counts UTF-16 units, not Python characters.
+   - If callers pass a Python-string (code point) index, convert that index to a UTF-16 code-unit index before using it.
+
+2. If converting code point index -> code unit index, compute it explicitly. Example algorithm (insert before the bounds check at line 35):
+   - Walk the string up to the code point index and add 1 for BMP characters, 2 for non-BMP characters (surrogate pairs), producing code_unit_index.
+   - Then use code_unit_index in the bounds check and access.
+
+   Pseudocode (replace use of `index` with `code_unit_index`):
+   ```
+   code_unit_index = 0
+   for cp in s[:index]:           # index is code point index
+       if ord(cp) > 0xFFFF:
+           code_unit_index += 2
+       else:
+           code_unit_index += 1
+   if code_unit_index < 0 or code_unit_index >= len(code_units):
+       raise IndexError(...)
+   ```
+
+3. If the caller should use code-unit indices, change the caller instead:
+   - Wherever index is produced (e.g. enumerate(s) or some slicing), change it to compute the proper UTF-16 offset using the same logic shown above.
+
+4. Add a clear assert or docstring:
+   - At function signature or top of function, state whether `index` is a code point index or a UTF-16 code-unit index. Example: `index: index into UTF-16 code units`.
+
+5. Add unit tests that include:
+   - ASCII-only strings (no change).
+   - Strings containing characters outside the BMP (e.g. emoji) to verify mapping and bounds checks.
+
+Why these steps fix it
+- They eliminate the mismatch between the index origin (code points) and the list you are indexing (UTF-16 code units). The error occurs because the code used the wrong coordinate space; converting indexes consistently prevents IndexError: String index out of range: 2.
+
+If you want, paste the lines that compute `index` (the caller or earlier in to_utf16_code_units) and I will give the exact code change to convert it to a UTF-16 code-unit index.

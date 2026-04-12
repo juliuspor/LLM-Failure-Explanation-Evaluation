@@ -1,0 +1,40 @@
+What happened (root cause)
+- The code is reusing the variable minutes_offset both for the parsed minute component (e.g. 15) and for the combined total minutes (hours_in_minutes ± minutes). Because of that reuse, the arithmetic on lines 402 and 404 mixes up the minute component and the running total and produces an invalid minute component like -15. That invalid minute value later triggers the ValueError: "Minutes out of range: -15".
+
+Where it happened (exact lines & variables)
+- Line 402: minutes_offset = hours_in_minutes - minutes_offset
+- Line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The invalid minute (-15) is coming from the value in minutes_offset after the arithmetic on lines 402/404.
+
+Why it fails (step-by-step)
+1. Earlier in the parsing code, minutes_offset holds the parsed minutes component (for example 15).
+2. The code then computes a combined minutes total by reassigning minutes_offset using hours_in_minutes and the current minutes_offset:
+   - In one branch it does hours_in_minutes - minutes_offset (line 402),
+   - In another branch it does hours_in_minutes + minutes_offset (line 404).
+3. Because minutes_offset was the minute component originally, these operations can produce incorrect intermediate values (for example subtracting when you meant to subtract the sign from a separate minute component), ending up with a negative minute component (like -15).
+4. That negative minute value is later considered invalid and raises ValueError when the code validates the minute component (the error message shows the offending value: -15).
+
+Concrete fixes (exact changes and checks to make)
+1. Stop reusing minutes_offset as both "minute component" and "total minutes". Introduce a separate variable name for the parsed minute component, for example minutes_component.
+   - Before combination, ensure you have:
+     - hours_in_minutes (already present)
+     - minutes_component (the parsed 0–59 minute field)
+2. Replace the two lines with explicit combinations using minutes_component:
+   - If the sign/branch means "subtract minute component":
+     - minutes_offset = hours_in_minutes - minutes_component
+   - If the sign/branch means "add minute component":
+     - minutes_offset = hours_in_minutes + minutes_component
+   (Use minutes_component on the right-hand side; do not reuse minutes_offset there.)
+3. Validate the minute component before combining:
+   - if minutes_component < 0 or minutes_component >= 60:
+       raise ValueError("Minutes out of range: {}".format(minutes_component))
+   This ensures you never combine invalid minute values.
+4. After computing minutes_offset (the total minutes), keep the existing conversion to milliseconds at line 405:
+   - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+5. Add unit tests that parse these cases:
+   - A positive offset like "+01:15" should produce minutes_offset = 75
+   - A negative offset like "-00:15" should validate minutes_component = 15 and produce minutes_offset = -15 only if the sign handling is explicit and correct (but note: the ValueError shows -15 as "Minutes out of range", so ensure you are checking minutes_component before applying sign)
+
+One-line summary
+- The code overwrote the minute component variable minutes_offset while trying to compute total minutes, mixing up component vs total; split the variables (use minutes_component and minutes_offset), validate minutes_component (0..59) before combining, and then compute the total minutes correctly. This will prevent the "Minutes out of range: -15" error.

@@ -1,0 +1,60 @@
+What happened (the symptom)
+- The code raises IndexError coming from code_point_at(...), which checks the index and throws when index < 0 or index >= len(code_units) (see lines 35–36 and 38–44 in the slice).
+- The failure occurs inside the loop
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  after translate_codepoint(...) returned a positive consumed.
+
+Why it fails (root cause)
+- translate_codepoint(...) and the caller disagree about what consumed means.
+  - The caller treats consumed as "number of codepoints translated" and therefore loops consumed times, each time calling code_point_at(code_units, pos) and advancing pos by the character length (1 or 2 UTF-16 code units) of that codepoint.
+  - If translate_codepoint(...) instead returns the number of UTF-16 code units (for example it returns 2 when it consumed a surrogate pair), the caller will execute the loop consumed times (2 iterations). The first iteration advances pos by 2 (to the value length), then the second iteration calls code_point_at(code_units, pos) with pos == length, which is out of range and causes the IndexError in code_point_at (lines 35–36).
+- In short: consumed is interpreted as "count of codepoints" by the loop but is actually "count of UTF-16 code units" (or vice versa). That mismatch lets the loop run one time too many and call code_point_at with pos == len(code_units).
+
+Where it happened (specific names/lines)
+- Variable names: consumed, pos, code_units, out.
+- Methods: translate (the method shown), translate_codepoint(code_units, pos, out) (returns consumed), code_point_at(code_units, pos) (lines 35–44 in the slice), char_count(...).
+- Faulty loop: for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))
+- Error triggered inside code_point_at when it checks index >= len(code_units) and raises IndexError (slice lines 35–36 and 38–44).
+
+How to fix (concrete steps)
+Pick one consistent interpretation and implement the matching change (do not mix units).
+
+Option A — If consumed is meant to be the number of UTF-16 code units consumed
+1. Replace the for-loop with a single advance by consumed code units:
+   pos += consumed
+   (Remove the loop and the per-iteration code_point_at call.)
+2. Rationale: translate_codepoint already reported how many code units it consumed; you should advance pos by that many units.
+
+Option B — If consumed is meant to be the number of codepoints consumed
+1. Change translate_codepoint(...) so it returns the number of codepoints consumed (1 for a single BMP codepoint, 1 for a surrogate pair too — i.e., count codepoints, not code units).
+2. Keep the caller loop but ensure translate_codepoint returns 1 when it handled a surrogate pair.
+3. Alternatively, keep the loop but guard calls to code_point_at with bounds checks:
+   for _ in range(consumed):
+       if pos >= len(code_units):
+           break   # or raise a clear error
+       pos += char_count(code_point_at(code_units, pos))
+
+Option C — Simpler and safest
+1. Make translate_codepoint return the number of UTF-16 code units consumed (most direct).
+2. In the caller do:
+   if consumed == 0:
+       ...
+   else:
+       pos += consumed
+   This avoids repeated code_point_at calls and eliminates the mismatch.
+
+Example replacement (Option C):
+- Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with
+    pos += consumed
+
+Why these fixes work
+- They remove the mismatch between "codepoints" and "code units". Advancing pos by the same unit that translate_codepoint reports (code units) guarantees pos stays in-range and that code_point_at is never called with pos == len(code_units).
+
+Recommended immediate change
+- If you control translate_codepoint, decide which unit it should return. The least invasive is to have it return code units and change the caller to pos += consumed (Option C). That is a one-line fix and removes the out-of-range call.
+
+If you want, paste the implementation of translate_codepoint and I will propose the exact one-line patch.

@@ -1,0 +1,44 @@
+What happened (in plain terms)
+- The function assumes code_units is a list of UTF‑16 code units (16‑bit values where non‑BMP characters are represented as surrogate pairs). It then checks for a high surrogate at code_units[index] (line 39) and, if present, reads the next unit to form a full code point (lines 40–43).
+- But the code that built code_units (the to_utf16_code_units function; lines around 10–12) did not actually produce UTF‑16 code units. It appended Python code points (ord(c)) directly. For characters outside the Basic Multilingual Plane (ord(c) > 0xFFFF), ord(c) is a single integer > 0xFFFF, not a pair of 16‑bit surrogate values.
+- Because code_units contains raw code points instead of 16‑bit units, the surrogate tests fail unpredictably: either the ranges 0xD800..0xDBFF/0xDC00..0xDFFF are never matched and you return a wrong (too large) value at line 44, or the function tries to form a surrogate pair from values that are not UTF‑16 units and produces incorrect results or later errors elsewhere.
+
+Where it fails (specific lines & variables)
+- The wrong assumption starts where code_units is built (around line 12). That list must contain UTF‑16 code units, but the implementation appended ord(c) directly.
+- The incorrect behavior appears at:
+  - line 39: the check 0xD800 <= high <= 0xDBFF fails for non‑BMP characters because high is a value > 0xFFFF (ord(c)), not a high surrogate.
+  - line 44: the function returns high (a raw code point > 0xFFFF) instead of combining two UTF‑16 units into a code point, so callers that expect one UTF‑16 unit may get an out‑of‑range integer.
+  - If another part of the code assumes code_units are 16‑bit units and uses index arithmetic (consuming two units for a surrogate pair), those assumptions break because to_utf16_code_units produced one element instead of two.
+
+Why it happened (root cause)
+- Root cause: mismatch between what to_utf16_code_units creates and what the downstream decoding code expects. The decoder expects a list of 16‑bit UTF‑16 code units (with surrogate pairs split across two list elements). The builder instead stored full Unicode code points (ord(c)), so non‑BMP characters are not split into high/low surrogates.
+
+Concrete, step‑by‑step fixes (pick one)
+
+Option A — Make code_units real UTF‑16 code units
+- Replace the builder to split code points > 0xFFFF into surrogate pairs. Example implementation (conceptual lines to change in to_utf16_code_units):
+  1. For each character c in s, get cp = ord(c).
+  2. If cp <= 0xFFFF: append cp.
+  3. Else: compute cp' = cp - 0x10000, then
+     - high = 0xD800 + (cp' >> 10)
+     - low  = 0xDC00 + (cp' & 0x3FF)
+     - append high, then append low
+- This ensures code_units[index] is always a 16‑bit unit and the decoder logic at lines 39–43 works correctly.
+
+Option B — Work with Python code points instead of UTF‑16
+- If you want to treat s as Python code points (one element per Unicode scalar value), change the decoder to expect ord(c) values and remove surrogate logic:
+  1. Do not split non‑BMP characters into surrogates when building code_units.
+  2. Remove the surrogate checks (lines 39–43) and just return code_units[index] as the scalar value.
+- Use this only if every consumer expects a Unicode scalar value per list element.
+
+Option C — Use a reliable UTF‑16 conversion via encoding
+- Build code_units from s.encode('utf-16-le') (or 'utf-16-be') and interpret each pair of bytes as a 16‑bit unit. That guarantees correct surrogate splitting.
+  1. bytes_utf16 = s.encode('utf-16-le')
+  2. for i in range(0, len(bytes_utf16), 2): append(bytes_utf16[i] | (bytes_utf16[i+1] << 8))
+
+Which to choose
+- If the rest of your code is written to work in UTF‑16 code units (surrogate pairs split across two elements), use Option A or C.
+- If the rest of your code expects one element per Unicode character, use Option B and remove surrogate handling.
+
+Summary (short)
+- The code fails because code_units is not actually a list of UTF‑16 16‑bit code units; it contains Python code points. The decoder at lines 39–44 therefore misdetects or mishandles surrogate pairs. Fix by producing real UTF‑16 units (split non‑BMP code points into surrogate pairs) or by changing the decoder to match how code_units is actually built.

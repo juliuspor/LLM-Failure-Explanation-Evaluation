@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) fails at the input validation:
+  - At line `if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)` the method rejects -15 and raises ValueError. So the test fails immediately (the method never reaches the combination/return code).
+
+Why that is wrong (root cause)
+- The API you expect accepts a negative minutes_offset when hours_offset is negative (e.g. hours = -2, minutes = -15 should mean -2 hours 15 minutes).
+- The method currently enforces minutes_offset to be in [0,59], so it disallows any negative minute value and raises before combining hours and minutes.
+- Even if that validation were removed, there is a second bug in the combination logic:
+  - The code computes hours_in_minutes = hours_offset * 60.
+  - For negative hours it does `minutes_offset = hours_in_minutes - minutes_offset`.
+  - For hours=-2 and minutes=-15: hours_in_minutes = -120, then minutes_offset becomes -120 - (-15) = -105, but the expected total minutes is -120 + (-15) = -135. So the subtraction is the wrong operation when both parts are negative.
+
+Where it happens (specific lines / variables)
+- Validation failure: line `if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")` rejects minutes_offset == -15.
+- Incorrect combination: the block
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  is wrong for negative minutes (the `- minutes_offset` is the wrong sign).
+
+How to fix (concrete steps)
+1. Decide and document the contract for minutes_offset:
+   - Option A (recommended for your test): allow minutes_offset to be negative only when hours_offset is negative (i.e. treat minutes as signed part of total offset).
+   - Option B: force minutes_offset to be non-negative and let the sign be provided by hours_offset only. (Then callers must pass positive minutes.)
+
+2. If you choose Option A (allow signed minutes as test expects), change validation and combination like this:
+   - Replace the existing minute-range check with: if abs(minutes_offset) > 59: raise ValueError(...)
+     (This allows negative minutes but still bounds magnitude to [0,59].)
+   - Compute combined minutes using the sign of hours_offset, not by subtracting the minutes directly:
+     - Determine sign = 1 if hours_offset >= 0 else -1
+     - total_minutes = hours_offset * 60 + sign * abs(minutes_offset)
+   - Then multiply total_minutes by MILLIS_PER_MINUTE and continue.
+
+3. If you choose Option B (disallow negative minutes), then update the test or call site to pass minutes as a positive 15 together with negative hours: for_offset_hours_minutes(-2, 15) and keep validation and combination as hours_in_minutes + minutes_offset when hours >= 0, hours_in_minutes - minutes_offset when hours < 0 (but only if minutes_offset is always non-negative). However the current code subtracts minutes when hours are negative but expects minutes_offset positive — keep that only if you enforce non-negative minutes.
+
+Minimal corrected code (Option A — signed minutes allowed)
+- Change validation:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Replace combination with:
+    hours_in_minutes = hours_offset * 60
+    sign = 1 if hours_offset >= 0 else -1
+    total_minutes = hours_in_minutes + sign * abs(minutes_offset)
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+That will make DateTimeZone.for_offset_hours_minutes(-2, -15) produce total_minutes = -120 + (-15) = -135 and yield the expected id "-02:15".
+
+Summary
+- Immediate failure: validation rejects negative minutes (-15).
+- Even if validation changed, the combination logic currently uses the wrong sign (it subtracts a negative minutes value, producing the wrong total).
+- Fix by allowing signed minutes (or enforcing positive minutes consistently) and computing total minutes with the sign of hours, as shown above.

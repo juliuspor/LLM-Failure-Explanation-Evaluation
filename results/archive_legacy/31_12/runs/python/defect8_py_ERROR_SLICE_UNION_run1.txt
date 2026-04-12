@@ -1,0 +1,60 @@
+What happened (where it failed)
+- The error was raised in Locale.to_locale (method name shown at line 193).
+- The throw happens at the check on lines 242–244:
+  - ch3 = locale_str[3]; ch4 = locale_str[4]
+  - then the code requires both ch3 and ch4 to be between 'A' and 'Z' and raises ValueError otherwise.
+- For input "fr__POSIX", the characters by index are:
+  - 0='f', 1='r', 2='_', 3='_', 4='P', ...
+  - ch3 is '_' (index 3), so the check at line 244 fails and ValueError("Invalid locale format: fr__POSIX") is raised.
+
+Why it failed (root cause)
+- The parser expects the format "ll_CC" or "ll_CC_variant" where the two-letter country code occupies indices 3–4 and must be uppercase letters.
+- "fr__POSIX" uses an empty country code and a variant after a double underscore (format "language__variant"). The code does not accept an underscore in ch3 (it only allows 'A'..'Z'), so it treats this valid language-with-variant string as invalid and raises the ValueError at line 244.
+- In short: the code does not support the "language__variant" form (empty country) and validates positions 3–4 too rigidly.
+
+Exactly where to change (concrete fixes, step-by-step)
+Option A — allow empty country (minimal change)
+1. Before extracting ch3/ch4 (around lines 242–244), add a branch to detect an empty country segment:
+   - if locale_str[2] == '_' and locale_str[3] == '_': return Locale(locale_str[0:2], None, locale_str[4:])
+   - This handles "ll__VARIANT" (e.g. "fr__POSIX") by treating country as None and variant = locale_str[4:].
+2. Keep the existing country-letter validation after that branch for normal "ll_CC" and "ll_CC_variant" cases.
+
+Option B — parse reliably using split (recommended)
+1. Replace the positional-index logic with a split on '_' limited to 2 splits:
+   - parts = locale_str.split('_', 2)
+   - Then interpret parts:
+     - If len(parts) == 1: language only ("ll")
+     - If len(parts) == 2: language + country (or language + variant if second part empty/pattern)
+     - If len(parts) == 3: language + country + variant (country may be empty)
+2. Validate language (positions 0–1) and country when present:
+   - Country can be empty (treat as None) or must be two uppercase letters.
+3. Return Locale(language, country_or_None, variant_or_None).
+
+Why Option B is better
+- Splitting makes intent explicit, avoids magic index offsets, and handles double underscores cleanly (parts[1] can be empty).
+- Easier to reason about and less error-prone for variants and missing country fields.
+
+What to change exactly in your file
+- In Locale.to_locale (around lines 227–252):
+  - Either insert the double-underscore branch before line 242, or
+  - Replace the index-based parsing entirely with a split-based parsing as described.
+
+Small concrete patch (pseudo-code you can paste)
+- At the top of the method replace index checks with:
+
+  parts = locale_str.split('_', 2)
+  if len(parts[0]) != 2:
+      raise ValueError(...)
+  language = parts[0]
+  country = None
+  variant = None
+  if len(parts) >= 2 and parts[1] != '':
+      if len(parts[1]) != 2 or not parts[1].isupper():
+          raise ValueError(...)
+      country = parts[1]
+  if len(parts) == 3:
+      variant = parts[2]
+  return Locale(language, country, variant)
+
+Result
+- With either fix, "fr__POSIX" will parse: language="fr", country=None, variant="POSIX" instead of raising ValueError at line 244.

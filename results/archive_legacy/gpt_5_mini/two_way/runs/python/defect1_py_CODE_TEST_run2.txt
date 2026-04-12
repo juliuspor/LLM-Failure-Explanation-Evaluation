@@ -1,0 +1,64 @@
+What happened (where: lines that compute hours_in_minutes and then change minutes_offset)
+
+- The code computes hours_in_minutes = hours_offset * 60.
+- Then it combines hours and minutes with:
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- Finally it multiplies minutes_offset by MILLIS_PER_MINUTE and returns the zone.
+
+Root cause
+
+- The combination logic mis-handles the case where both hours_offset and minutes_offset are negative.  
+  Example: hours_offset = -2, minutes_offset = -15
+  - hours_in_minutes = -2 * 60 = -120
+  - code does minutes_offset = hours_in_minutes - minutes_offset = -120 - (-15) = -105
+  - expected combined minutes = -120 + (-15) = -135
+  - as a result offset = -105 * 60000 = -6_300_000 instead of expected -8_100_000
+- In short: the code subtracts minutes_offset when hours_in_minutes is negative, but minutes_offset may already be negative; subtracting a negative adds it, producing the wrong sign/magnitude.
+
+Why the tests fail
+
+- test_negative_hours_negative_minutes expects -02:15 (-8,100,000 ms). The code produces -6,300,000 ms (i.e. -1:45) because of the incorrect arithmetic above. That triggers assertion failures.
+
+Exactly where to fix (line(s) to change) and how to fix it (concrete steps)
+
+Replace the block:
+
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+with one of these simple, correct alternatives.
+
+Option A — follow the docstring behavior (allow negative hours with positive minutes, reject positive hours with negative minutes):
+
+    hours_in_minutes = hours_offset * 60
+    # disallow mixed-sign (+ hours, - minutes)
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError(f"Mixed sign: hours={hours_offset}, minutes={minutes_offset}")
+    if hours_offset < 0:
+        combined_minutes = hours_in_minutes - abs(minutes_offset)
+    else:
+        combined_minutes = hours_in_minutes + abs(minutes_offset)
+    offset = FieldUtils.safe_multiply(combined_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Option B — simpler sign-driven combine (if you want minutes to extend hours' sign):
+
+    hours_in_minutes = hours_offset * 60
+    sign = -1 if hours_offset < 0 else 1
+    combined_minutes = hours_in_minutes + sign * abs(minutes_offset)
+    offset = FieldUtils.safe_multiply(combined_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Notes
+
+- The existing range checks for minutes (-59..59) and hours (-23..23) are fine; you may still want to explicitly reject the (positive hours, negative minutes) combination if that matches your spec (tests expect ValueError for (2, -15)).
+- Do not reuse minutes_offset to hold the combined value unless you intend to; using a new variable name like combined_minutes reduces confusion.
+
+Summary
+
+The bug is a sign/arithmetics error when combining hours_in_minutes and minutes_offset: the code subtracts minutes_offset when hours are negative without accounting for minutes_offset possibly already being negative. Fix by computing combined_minutes using abs(minutes_offset) and applying the correct sign (and optionally rejecting mixed-sign combinations per your spec).

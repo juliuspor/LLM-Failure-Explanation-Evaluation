@@ -1,0 +1,54 @@
+What happened (root cause)
+- The failure occurs inside the for-loop that advances pos after a translator returned consumed > 0:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- When that loop runs its final iteration pos can already be equal to length, so the call code_point_at(code_units, pos) triggers the index check:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  and raises IndexError: String index out of range: 2.
+
+Why that happens (step-by-step)
+1. translate_codepoint(...) returns consumed — the number of codepoints it handled starting at the current pos.
+2. Your code assumes it must advance pos by the number of UTF-16 code units that those consumed codepoints occupied.
+3. The loop for pt in range(consumed): calls code_point_at(code_units, pos) each iteration to determine how many code units that next codepoint uses.
+4. On the last iteration pos has already been advanced to length (the end of the array) or beyond, so calling code_point_at with pos == length triggers the index bounds check and raises IndexError.
+
+Exact location to look at
+- The problematic code is the for loop near the end of translate:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- The index check that raises is inside code_point_at when called with index == len(code_units).
+
+How to fix it (concrete steps)
+You must not call code_point_at(code_units, pos) when pos is already at or past length. Options:
+
+1) Advance safely by examining code_units directly (recommended)
+- Replace the for-loop with logic that checks the next code unit(s) without calling code_point_at when pos >= length:
+    for _ in range(consumed):
+        if pos >= length:
+            break   # or raise a clear error if translators promised more codepoints than available
+        cu = code_units[pos]
+        # detect surrogate pair: if cu is a high surrogate and next exists and is low surrogate, advance by 2
+        if is_high_surrogate(cu) and pos + 1 < length and is_low_surrogate(code_units[pos + 1]):
+            pos += 2
+        else:
+            pos += 1
+
+This avoids calling code_point_at at position == length and correctly advances by UTF-16 code units.
+
+2) Check bounds before calling code_point_at
+- Keep your loop but add a bounds check:
+    for _ in range(consumed):
+        if pos >= length:
+            break  # or raise a meaningful error
+        pos += char_count(code_point_at(code_units, pos))
+
+3) (Design) Make translate_codepoint return the number of UTF-16 code units consumed instead of codepoints
+- Then you could simply do pos += consumed_units without per-codepoint inspection. This is a protocol change and has broader impact.
+
+Which to choose
+- If translators promise to consume only codepoints that exist in code_units, implementing option 1 and raising a clear error when they promised more codepoints than are available is best.
+- If translators might legitimately claim codepoints beyond the input (buggy), detect that and raise a clear ValueError instead of letting an IndexError bubble up.
+
+Summary
+The loop advances pos by calling code_point_at even when pos == length; code_point_at enforces bounds and throws IndexError. Fix by advancing pos with explicit, bounds-safe checks (inspect code_units and detect surrogate pairs) or check pos < length before calling code_point_at, and consider returning a clearer error if a translator declares it consumed more codepoints than are present.

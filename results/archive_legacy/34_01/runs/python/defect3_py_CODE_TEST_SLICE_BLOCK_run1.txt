@@ -1,0 +1,50 @@
+What happened (where it failed)
+- The IndexError is raised inside code_point_at(code_units, pos) at the check on lines 35–36 ("String index out of range: {index}"). That call got pos == len(code_units) (2 for a single surrogate pair), so code_point_at raised because pos was past the end of the array.
+
+Why it happened (root cause)
+- The bug is a mismatch between what translate_codepoint(...) returns and how the caller advances pos afterwards.
+- After translate_codepoint(...) returns a nonzero consumed, the code does:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- This loop assumes consumed counts codepoints (for each consumed codepoint it calls code_point_at at the current pos and advances by the number of UTF-16 code units for that codepoint).
+- In your failing case (input '\U0001F630', which is a surrogate pair => two UTF-16 code units), translate_codepoint(...) actually returned 2 (it returned the number of UTF-16 code units consumed), not the number of codepoints.
+- Because consumed == 2, the for loop runs twice:
+  - First iteration: pos == 0, code_point_at returns the supplementary codepoint, char_count(...) == 2, so pos becomes 2 (correct after consuming the pair).
+  - Second iteration: pos == 2, the code calls code_point_at(code_units, pos) again. Since pos == len(code_units), code_point_at raises the IndexError seen in the slice block (lines 35–36).
+- In short: the caller expects consumed to be a count of codepoints, but translate_codepoint returned a count of UTF-16 code units. That off-by-semantic error causes the loop to read past the end.
+
+Concrete fixes (step-by-step)
+Choose one of these consistent fixes:
+
+1) Make translate_codepoint return codepoint count (preferred if contract is "consumed codepoints")
+   - Change translate_codepoint so it returns 1 when it handled a surrogate pair (one codepoint), not 2.
+   - Keep the for-loop as-is.
+   - Reason: caller then iterates once and advances pos by char_count(...) which yields 2, so pos becomes 2 and the loop ends without extra call.
+
+2) If translate_codepoint is intended to report UTF-16 code units consumed, advance pos directly by consumed (simpler)
+   - Replace the for-loop (lines after "Contract with translators...") with:
+         pos += consumed
+   - This treats consumed as the number of code_units consumed and avoids any extra code_point_at calls.
+
+3) Make the contract explicit and enforce it
+   - Update method docstring and all translator implementations so they agree whether translate_codepoint returns number of codepoints or number of code units.
+   - Add an assertion in the caller after consumed is returned (temporary debugging aid), e.g.
+         assert consumed >= 0 and consumed <= length - pos
+     or
+         # if consumed is codepoints: assert consumed >=1 and consumed <= max_possible_codepoints_at(pos)
+   - Run tests to confirm behavior for single BMP chars and surrogate pairs.
+
+What to change in your code right now (exact lines)
+- At the for-loop region replace the current block
+     for pt in range(consumed):
+         pos += char_count(code_point_at(code_units, pos))
+  with one of:
+  - If translate_codepoint returns codepoints:
+         # keep this pattern but ensure translate_codepoint returns codepoints, not units
+         for pt in range(consumed):
+             pos += char_count(code_point_at(code_units, pos))
+  - If translate_codepoint returns UTF-16 units (recommended if it's already implemented that way):
+         pos += consumed
+
+Why that will fix it
+- Both fixes remove the situation where pos becomes equal to len(code_units) and is then used as an index for code_point_at in the next loop iteration. They make the meaning of consumed and the way pos is updated consistent so you don't index off the end of code_units.

@@ -1,0 +1,40 @@
+What happens (where it fails)
+- The code raises ValueError at lines 400–401:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- But minutes_offset is still in a temporary, pre-normalized state at that point. Later, at lines 406–409 the code changes minutes_offset to account for the hour sign:
+  406 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 408 |                 minutes_offset = hours_in_minutes + minutes_offset
+ 409 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Because the range check runs before the code at 406/408 has applied the sign/normalization, a valid input can produce a minutes_offset value that looks out of range at line 400 and so the method throws early even though the code would have produced a valid final offset after the sign adjustment.
+
+Why that is the root cause (plain language)
+- The minutes value is sometimes represented temporarily with a sign or as a value that needs combining with the hours sign to become the final minutes count.
+- The check at line 400 assumes minutes_offset is already the final, absolute minute quantity between 0 and 59. It is not — the code that makes it final runs afterward (lines 406–409).
+- As a result, the code rejects inputs that are actually valid after normalization because it validated too early.
+
+Concrete example you can use to reproduce
+- Any input where minutes are represented in a form that requires the later adjustment (for example a minutes value that has the sign applied separately from hours) will trigger the premature error. The code path shows the minutes value is altered at lines 406 and 408, so any case that needs that alteration will fail at line 400 before alteration happens.
+
+Exact, actionable fixes (step-by-step)
+1. Move the minutes range validation so it runs after the normalization/sign handling:
+   - Cut lines 400–401 and paste them after line 409 (i.e., after minutes_offset has been adjusted and before using it to compute offset).
+   - This ensures you validate the final minutes value, not the temporary representation.
+2. Alternatively, validate the absolute minute magnitude before sign handling:
+   - Replace the early check with one that tests abs(minutes_offset) <= 59, if the minutes_offset can legitimately be negative at that stage:
+     - Change line 400 to: if abs(minutes_offset) > 59: raise ValueError(...)
+   - Keep the later normalization at lines 406–409 unchanged.
+3. Add or adjust unit tests:
+   - Add tests for inputs that previously failed (cases that require the adjustment at 406/408) to ensure the moved/changed validation is correct.
+   - Tests should cover positive and negative hour signs combined with minute values near the boundaries (0, 59, and invalid values like 60).
+
+Why these fixes are safe
+- Moving validation after normalization checks the actual value used to compute the offset (no more premature rejection).
+- Validating abs(minutes) is safe only if you intend to accept signed minute representations at the earlier stage; it preserves the original normalization logic while preventing false negatives.
+
+Where to change it (reference lines)
+- Remove or change the check at lines 400–401.
+- Add the validation after line 409 (just before line 411/412 where offset is used/returned), or replace the early check with abs-based validation as shown above.
+
+That is the root cause: the minutes range check is performed before the code that makes minutes_offset into its final form (lines 406–409), so valid inputs can be rejected prematurely. Fix by validating after normalization or by validating the absolute value at the earlier stage.

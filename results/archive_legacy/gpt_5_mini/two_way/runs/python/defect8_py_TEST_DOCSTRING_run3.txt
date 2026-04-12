@@ -1,0 +1,52 @@
+What happened
+- The test fails because LocaleUtils.to_locale rejects the input "fr__POSIX".
+- The parser assumes that when a second character after the language separator exists it must be an uppercase country letter. In "fr__POSIX" the character at index 3 (0-based indexing) is '_' not an uppercase letter, so the method raises "Invalid locale format".
+- In other words, the code never handles the valid format language__variant (empty country, double underscore). It treats the second underscore as an unexpected character in the "country" slot.
+
+Where it occurs (what to look for)
+- In LocaleUtils.to_locale, the validation branch that reads/validates the country expects two uppercase letters at positions 3 and 4 (or specifically checks locale_str[3] is uppercase). For the input "fr__POSIX":
+  - positions are f(0) r(1) _(2) _(3) P(4)...
+  - The code checks position 3 and fails because it's '_'.
+- So the failure is in the code that:
+  - distinguishes the language-only, language_country, and language_country_variant forms, and
+  - validates the country characters (it does not allow the empty country case).
+
+Why this is the root cause
+- The standard locale form language__variant (double underscore) is a valid case (language + empty country + variant). The validator incorrectly enforces that the country must always be two uppercase letters whenever a second underscore exists, rather than accepting an empty country when two underscores are adjacent.
+
+Exact steps to fix (concrete)
+1. Detect the double-underscore case when the separator after the language is '_' and the next character is also '_'.
+2. In that case:
+   - set country = "" (empty string),
+   - set variant = locale_str[4:] (variant starts at index 4; for "fr__POSIX" that gives "POSIX"),
+   - skip the country-uppercase validation branch.
+3. Otherwise keep the existing validation (2-letter uppercase country, or language-only).
+
+Minimal patch (Python-style pseudocode you can drop into LocaleUtils.to_locale)
+- Find the branch where you handle strings with a separator at index 2 (locale_str[2] == '_') and currently validate country characters.
+- Replace/extend it with:
+
+    # after confirming locale_str[2] == '_'
+    if len(locale_str) > 3 and locale_str[3] == '_':
+        # language__variant: empty country, variant starts at index 4
+        country = ""
+        variant = locale_str[4:] if len(locale_str) > 4 else ""
+        # validate variant if you have rules (or allow any non-empty)
+    else:
+        # existing behavior: expect two-letter uppercase country at 3..4
+        if len(locale_str) < 5:
+            raise ValueError("Invalid locale format: country too short")
+        country = locale_str[3:5]
+        if not country.isupper() or not country.isalpha():
+            raise ValueError("Invalid locale format: country must be uppercase letters")
+        variant = locale_str[6:] if len(locale_str) > 5 and locale_str[5] == '_' else ""
+
+Notes and tests to add
+- Add an explicit unit test for "fr__POSIX" (already present in your suite) — after the change it should pass.
+- Also ensure other cases still validate:
+  - "en" -> language-only
+  - "en_US" -> language + country
+  - "en_US_WIN" -> language + country + variant
+  - "en__UNIX" -> language + empty country + variant
+
+This explains where the code fails (the country-character validation at index 3), why (it doesn't consider double-underscore as empty country), and exactly how to change the parsing to accept language__variant.

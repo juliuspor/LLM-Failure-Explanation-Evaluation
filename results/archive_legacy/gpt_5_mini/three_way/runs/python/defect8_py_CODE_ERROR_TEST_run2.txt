@@ -1,0 +1,68 @@
+What happened (where it failed)
+- The code raises ValueError while parsing "fr__POSIX" at the check:
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+- For "fr__POSIX", length == 9, locale_str[2] == '_' so the code goes into the branch that expects a country (two uppercase letters) at positions 3 and 4.
+- But this input uses the "language__variant" form (empty country, double underscore). At index 3 there is '_' (the second underscore), not an uppercase letter, so ch3 is '_' and the uppercase-letter check fails and raises ValueError.
+- In short: the code assumes positions 3 and 4 are always an uppercase country code when length > 2, and rejects the valid "language__variant" form where the country is empty (represented by a second underscore).
+
+Why it happened (root cause)
+- The logic after the else (length != 2) always treats the characters at indices 3 and 4 as an uppercase country code:
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+- It never checks for the possibility that locale_str[3] == '_' which denotes an empty country and means the variant begins immediately after, e.g. variant = locale_str[4:] (or index 4 onward).
+- Therefore input with a double underscore (language__variant) is misrecognized as invalid.
+
+Exactly where to change the code (what to do)
+1. After confirming locale_str[2] == '_', check whether locale_str[3] == '_':
+   - If locale_str[3] == '_', treat country = "" and parse variant = locale_str[4:] (make sure length >= 4+1 so variant exists).
+   - Otherwise, validate locale_str[3] and locale_str[4] are uppercase letters and treat those as the country code as currently implemented.
+2. Adjust the slices for constructing Locale:
+   - For empty country + variant: Locale(locale_str[0:2], "", locale_str[4:])
+   - For non-empty country + variant: existing return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+     (note: keep checking separators at positions 2 and 5 as now)
+
+Minimal illustrative patch (precise places to change)
+Replace this block:
+
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+                
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    else:
+        if locale_str[5] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+With logic like:
+
+    # handle empty country with double underscore: language__variant
+    if locale_str[3] == '_':
+        # country is empty, variant must follow at index 4+
+        if length < 5:
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # otherwise expect two-letter uppercase country
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    else:
+        if locale_str[5] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fixes the failure
+- It explicitly recognizes the double-underscore case, sets country to "", and takes the variant from the correct starting index (4). That prevents the uppercase-letter check from seeing '_' and throwing the ValueError for valid inputs like "fr__POSIX".
+
+Edge cases to watch
+- Ensure you validate there is actually a variant after the second underscore (length check).
+- Keep existing checks for uppercase/lowercase and underscore separators for other formats.
+
+This explains the exact failing line (the uppercase-country check), why it failed for "fr__POSIX", and gives concrete replacement code and steps to accept the language__variant form.

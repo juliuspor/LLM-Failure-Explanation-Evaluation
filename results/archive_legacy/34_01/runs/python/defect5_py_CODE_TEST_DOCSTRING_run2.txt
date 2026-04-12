@@ -1,0 +1,82 @@
+What happened (what failed)
+- The test calls ArrayUtils.add(None, None, expected_type=str).
+- Your function sets inferred_type = object (because both array and element are None).
+- You then create the new list and immediately raise a TypeError because inferred_type == object and expected_type != object.
+- The test expected the function to return [None], but the function raises a TypeError instead.
+
+Root causes (exact lines and why)
+1. Wrong inference from an existing array
+   - Code: `if array is not None: inferred_type = type(array)`
+   - Problem: `type(array)` returns the Python list type (e.g. `list`), not the element/component type. If `array` were non-empty you should inspect its elements to get the element type, or use a stored component/type hint. Using `type(array)` feeds an incorrect type into `_copy_list_grow1`.
+
+2. Incorrect TypeError condition for the None/None case
+   - Code:
+     ```
+     if expected_type is not None:
+         if inferred_type == object and expected_type != object:
+             raise TypeError(...)
+     ```
+   - Problem: When both `array` and `element` are None, you intentionally set `inferred_type = object` (matches the docstring). But then you always treat `inferred_type == object` as an error if `expected_type` requests a more specific type (e.g. `str`). That contradicts the docstring and the test expectation which says "if element is None, return List[object]". In short: you treat the legitimate object-list result as a type mismatch and raise.
+
+Where it occurs
+- Setting `inferred_type = type(array)` (line under `if array is not None:`) is the wrong place to get element type.
+- The TypeError raise block (lines under `if expected_type is not None:`) is the immediate place that causes the test to fail for add(None, None, expected_type=str).
+
+How to fix (concrete steps)
+Option A — preserve "object list" behavior when both inputs are None
+1. Change the TypeError check so it does not raise when both array and element were None.
+   - Replace:
+     ```
+     if inferred_type == object and expected_type != object:
+         raise TypeError(...)
+     ```
+     With:
+     ```
+     # only raise if we inferred object from an existing array (not from both None),
+     # because None element should produce an object list per docstring
+     if array is not None and inferred_type == object and expected_type != object:
+         raise TypeError(...)
+     ```
+   - This keeps the behavior where add(None, None, expected_type=str) returns [None].
+
+Option B — use expected_type to decide inferred_type when both inputs are None
+1. If both array and element are None, and expected_type is provided, treat inferred_type as expected_type (so you produce a list typed to expected_type).
+   - Replace the block that sets inferred_type with:
+     ```
+     if array is not None:
+         inferred_type = _component_type_of(array)   # see Option C below
+     elif element is not None:
+         inferred_type = type(element)
+     elif expected_type is not None:
+         inferred_type = expected_type
+     else:
+         inferred_type = object
+     ```
+   - Then the existing TypeError check would not fire because inferred_type equals expected_type.
+
+Option C — correct component-type detection for a provided array
+1. Replace `inferred_type = type(array)` with logic that inspects the array's element type, for example:
+   - If you want the runtime element type and array is non-empty:
+     ```
+     if array:
+         inferred_type = type(array[0])
+     else:
+         # empty list — you need a policy: fall back to expected_type or object
+         inferred_type = expected_type if expected_type is not None else object
+     ```
+   - Or if ArrayUtils stores/uses a component-type metadata, use that instead.
+
+Suggested minimal change to satisfy the failing test
+- Change only the TypeError condition to avoid rejecting the None/None case:
+  ```
+  if expected_type is not None:
+      # don't reject the case where both array and element are None (docstring says return List[object])
+      if array is not None and inferred_type == object and expected_type != object:
+          raise TypeError(...)
+  ```
+This minimal change makes add(None, None, expected_type=str) return [None] as the test expects.
+
+Summary
+- The test fails because your function treats an intended "object list" result (inferred_type == object when both array and element are None) as a type mismatch and raises TypeError.
+- Also, `type(array)` is not the element type and should be changed if you want to infer element/component types from a passed-in list.
+- Apply one of the suggested fixes (preferred: change the TypeError condition or set inferred_type from expected_type when both inputs are None) to correct the behavior.

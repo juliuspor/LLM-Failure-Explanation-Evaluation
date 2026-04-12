@@ -1,0 +1,64 @@
+What happened
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) returned the wrong zone id, so the assertion failed. The code treated the negative minutes as if they had the opposite sign when composing the total offset, producing the wrong total minutes (for example producing -1:45 instead of -2:15) or otherwise rejecting the combination.
+
+Where it happens
+- In the factory method DateTimeZone.for_offset_hours_minutes (DateTimeZone.java), in the block that composes/normalizes hours and minutes into a single offset in minutes. The bug is in the line that computes the total offset minutes from the two inputs (the “minutes normalization” branch).
+
+Why it fails (root cause)
+- The method uses the wrong operation for the minutes component when the hour value is negative. Instead of adding the signed minutes to the signed hours, the code subtracts the minutes (or treats them as unsigned) in the negative-hour case. Concretely, it does something equivalent to:
+    totalMinutes = hours * 60 - minutes;
+  so with hours = -2 and minutes = -15 you get:
+    totalMinutes = (-2)*60 - (-15) = -120 + 15 = -105 minutes -> -1:45
+  The correct composition is:
+    totalMinutes = hours * 60 + minutes;
+  which yields -120 + (-15) = -135 minutes -> -2:15.
+
+- The validation logic can also be involved: if the implementation incorrectly normalizes signs before validation it may reject valid combinations or compute the wrong id string.
+
+Exactly where to change
+- In DateTimeZone.for_offset_hours_minutes, find the lines that:
+  1) combine hours and minutes into a single offset value (minutes or milliseconds),
+  2) and the nearby sign/range checks.
+  Those are the lines to fix.
+
+Concrete fix (steps)
+1. Replace the incorrect composition with a signed addition:
+   - Wrong:
+     totalMinutes = hours * 60 - minutes;   // or code that treats minutes as magnitude
+   - Correct:
+     totalMinutes = hours * 60 + minutes;
+
+2. Ensure minutes keep their sign and that the following checks use the signed total:
+   - If you need an absolute-minute magnitude for formatting, take Math.abs(totalMinutes) at formatting time; do not flip minute sign during calculation.
+
+3. Keep existing validations, but apply them to the final signed total (or validate hours and minutes ranges independently as the docstring requires). Example checks:
+   - hours between -23 and +23
+   - minutes between -59 and +59
+   - if hours > 0 and minutes < 0: reject (per docstring)
+   - when computing the total offset, ensure Math.abs(totalMinutes) <= 23*60 + 59
+
+4. Add tests that cover the sign combinations in the docstring, especially:
+   - (-2, -15) -> "-02:15"
+   - (-2, 15)  -> "-02:15"
+   - (2, -15)  -> ValueError (per doc)
+   - (0, -15)  -> "-00:15"
+   - (0, 15)   -> "+00:15"
+   - (2, 15)   -> "+02:15"
+
+Suggested code snippet (Java-like pseudocode)
+- Replace the faulty composition with:
+
+    // validate ranges first...
+    if (hours < -23 || hours > 23) throw new IllegalArgumentException(...);
+    if (minutes < -59 || minutes > 59) throw new IllegalArgumentException(...);
+    if (hours > 0 && minutes < 0) throw new IllegalArgumentException(...);
+    // Now compute signed total minutes:
+    int totalMinutes = hours * 60 + minutes;
+    if (Math.abs(totalMinutes) > (23 * 60 + 59)) throw new IllegalArgumentException(...);
+    // Create zone from totalMinutes
+
+Why this fix works
+- Using signed addition preserves the combined sign of hours and minutes exactly as described in the docstring. It prevents the minute component from being treated as a magnitude that flips sign when hours are negative.
+
+Final note
+- After applying the change, run/extend unit tests to ensure all combinations in the DOCSTRING table produce the expected ids (including "-02:15" for (-2, -15)). This both verifies the bug fix and prevents regression.

@@ -1,0 +1,69 @@
+What happened (where it fails)
+- Location: both snippets show the same failure check at lines 32–33 (and line 34 in SLICE_UNION).
+- The code raises IndexError when either start or end is negative or when start > end:
+  - Line 32 checks: if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):
+  - Line 33 raises IndexError(f"String index out of range: {end}")
+- Consequence:
+  - Any call that passes a negative index (common Python slice usage) will instantly raise IndexError because start < 0 or end < 0 is treated as an error.
+  - Any call that intentionally supplies start > end (for a reverse or backward slice) will also raise IndexError because of the start > end test.
+  - In SLICE_UNION the code then returns s[start:end] (line 34), but that return is never reached for negative indices or reversed ranges because the check rejects them first.
+
+Why this is the root cause (plain language)
+- The check treats negative indices and start > end as invalid. In normal Python slicing:
+  - Negative indices are allowed (they count from the end of the string).
+  - start > end is legitimate when you want an empty slice (with default step) or when using a negative step to produce a reversed slice.
+- Because the validator rejects these cases unconditionally, valid uses of slicing are turned into IndexError before any slice is performed.
+
+Exact variables and lines implicated
+- Variables: start, end, s
+- Lines: 32–33 (the conditional and raise), and 34 in SLICE_UNION (the return that never runs for rejected inputs)
+
+How to fix it (concrete steps)
+1. Decide whether you want to emulate Python slicing behavior (recommended). If so:
+   - Allow negative indices and normalize them to non-negative indices by adding len(s).
+   - Allow start > end unless you also implement/accept a negative step.
+   - Only raise IndexError when an index is strictly outside the valid range after normalization (for example, index < -len(s) or index > len(s)).
+
+2. Minimal corrected check that mirrors basic Python slicing (no step handling, but accepts negative indices and start > end):
+Replace the conditional at line 32 with:
+  # normalize negative indices
+  if start < 0:
+      start += len(s)
+  if end < 0:
+      end += len(s)
+  # clamp to bounds; allow start > end (it will produce empty slice if appropriate)
+  if start < 0 or end < 0 or start > len(s) or end > len(s):
+      raise IndexError(f"String index out of range: {end}")
+
+3. If you need to support reverse slicing (negative step), implement explicit step handling and only forbid start > end for positive steps. Example pattern:
+  def slice(s, start, end, step=1):
+      if step == 0:
+          raise ValueError("slice step cannot be zero")
+      # normalize negative indices
+      if start is None:
+          start = len(s)-1 if step < 0 else 0
+      if end is None:
+          end = -1 if step < 0 else len(s)
+      if start < 0:
+          start += len(s)
+      if end < 0:
+          end += len(s)
+      # now bounds check; allow start > end when step < 0
+      if start < 0 or end < -1 or start > len(s) or end > len(s):
+          raise IndexError(...)
+      return s[start:end:step]
+
+4. If you only want to support simple forward slicing (no negative indices, no negative steps), remove start < 0 or end < 0 from the check only after documenting that negative indices are unsupported. But this is worse UX than normalizing negatives.
+
+Example minimal replacement (forward slicing allowing negative indices normalization):
+  if start < 0:
+      start += len(s)
+  if end < 0:
+      end += len(s)
+  if start < 0 or end < 0 or start > len(s) or end > len(s):
+      raise IndexError(f"String index out of range: {end}")
+  return s[start:end]
+
+Summary
+- Root cause: the validator at lines 32–33 rejects negative indices and start > end unconditionally, but those are valid slice cases in Python.
+- Fix: normalize negative indices and only raise when an index is truly out of bounds after normalization; if you support negative step, handle step and allow start > end for negative step.

@@ -1,0 +1,56 @@
+What happened
+- The test calls ClassUtils.to_class(['Test', None, 99.0]) and expects [str, type(None), float].
+- The call fails because the to_class method is not returning the built-in type for the first element (str) and/or is not returning type(None) for the second element.
+
+Why it fails (root cause)
+- The most likely root cause is that to_class treats string values as class-names and tries to resolve them (for example via a name lookup, import, or getattr), instead of returning the runtime type of the string instance.
+  - If to_class treats 'Test' as the name of a class and tries to find a class object called "Test", that will either return a different object (a user class), None (if not found), or raise, rather than returning the built-in str class.
+- A second likely issue is that the method has a special-case that mishandles None:
+  - Instead of returning type(None) it may be returning None, or omitting it, or returning some sentinel.
+- Concretely, the error occurs inside ClassUtils.to_class (the method under test). The logic there is mixing up:
+  - "value is a string instance" with "value describes a class by name".
+  - "value is None" with "value's class is None" (incorrectly returning None instead of type(None)).
+
+Where it happened
+- Inside ClassUtils.to_class, in the branch that handles values of type str and the branch that handles None values. (Open the method implementation to inspect those branches.)
+
+Minimal reproduction of the incorrect pattern (pseudo-code I expect you may have)
+- A buggy implementation that would cause your failing test:
+  def to_class(values):
+      classes = []
+      for v in values:
+          if isinstance(v, str):
+              # bug: treating string as class name, not as a string instance
+              classes.append(resolve_class_by_name(v))   # wrong for literal strings
+          elif v is None:
+              classes.append(None)                       # wrong: should be type(None)
+          else:
+              classes.append(v.__class__)
+      return classes
+
+How to fix it (exact steps)
+1. Open the file where ClassUtils.to_class is defined and find the method (search for "def to_class(").
+2. Replace the faulty branches with logic that uses the runtime types for values, except when the API explicitly requires interpreting strings as class names. Use these lines (conceptually) inside the method:
+   - if v is None:
+       classes.append(type(None))        # ensure None becomes type(None)
+   - elif isinstance(v, str):
+       classes.append(str)               # a string instance -> str
+   - else:
+       classes.append(type(v))           # general case uses type(v)
+3. If your implementation needs to support converting string class-names to classes (a different feature), add an explicit parameter (e.g. resolve_names=False) so the method won't treat string instances as names unless the caller asks for that behavior. Example signature change:
+   def to_class(values, resolve_names=False):
+       ...
+       if isinstance(v, str) and resolve_names:
+           classes.append(resolve_lookup(v))
+       elif isinstance(v, str):
+           classes.append(str)
+4. Run your tests:
+   - pytest path/to/test_file.py::test_name (or the command you use)
+   - Verify the test now returns [str, type(None), float].
+
+What to check if the test still fails
+- Print what to_class actually returns for the test input; that shows which element is wrong.
+- Confirm the code path taken (add a short temporary log or debugger inside to_class on the branches for isinstance(v, str) and v is None).
+- If the method currently returns None for the None input, that confirms the second bug; if it returns some user class or raises for 'Test', that confirms the first.
+
+If you want, paste the implementation of ClassUtils.to_class (the function body) and the test file (or the test line numbers). I will point to the exact line(s) and show the minimal patch to make the test pass.

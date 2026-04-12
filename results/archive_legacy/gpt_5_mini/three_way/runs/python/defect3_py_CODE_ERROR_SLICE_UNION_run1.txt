@@ -1,0 +1,45 @@
+What happened (what failed and where)
+- The IndexError is raised by code_point_at(code_units, pos) when pos equals length (the check at to_utf16_code_units line 35 fails and raises "String index out of range: 2").
+- That call happens inside the loop beginning at the for pt in range(consumed): block:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- In your failing run length == 2 and pos becomes 2 before one of those code_point_at calls; calling code_point_at(code_units, 2) triggers the index check and raises.
+
+Why it happens (root cause)
+- translate_codepoint(...) returns consumed, which by contract (your comment) is the number of UTF-16 code units the translator processed. If it returns 1 or 2, you must advance pos by that many code units.
+- Instead you loop consumed times and in each iteration call code_point_at(code_units, pos) to compute char_count(...) and then add that. That does two things that break the logic:
+  1. code_point_at(...) accesses code_units[pos] and can be called when pos == length (out of bounds), causing the IndexError.
+  2. char_count(code_point_at(...)) yields either 1 or 2 depending on whether the code point is a surrogate pair; but you already know how many code units were consumed from consumed, so recomputing can be redundant and, as above, unsafe when pos reaches the end.
+
+Concrete place to change
+- Problem lines (approximate line numbers from snippet):
+  while pos < length:
+      consumed = self.translate_codepoint(code_units, pos, out)
+      ...
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+  The call to code_point_at(...) inside that loop is where the IndexError originates (the index check at to_utf16_code_units line 35).
+
+Two clear fixes (pick one)
+
+Fix A — Use consumed directly (recommended)
+- Replace the entire for loop with:
+    pos += consumed
+- Why: translate_codepoint returns the number of UTF-16 code units it consumed. Advancing by that many code units is correct, avoids extra calls, and prevents out-of-bounds access.
+
+Fix B — If you must count code units per codepoint, guard bounds and advance safely
+- Replace the loop with:
+    for pt in range(consumed):
+        if pos >= length:
+            break   # or raise a clear error
+        pos += char_count(code_point_at(code_units, pos))
+- Why: this prevents calling code_point_at when pos >= length. This is less direct and still unnecessary because consumed already tells you how many code units to advance.
+
+Summary of recommended change
+- Change:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  to:
+    pos += consumed
+
+This directly follows your comment/contract and will remove the IndexError by not calling code_point_at when pos == length.

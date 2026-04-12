@@ -1,0 +1,43 @@
+What happened (what fails)
+- You create s and add four periods:
+  1. SimpleTimePeriod(0, 100) -> value 1.0
+  2. SimpleTimePeriod(100, 200) -> value 2.0
+  3. SimpleTimePeriod(0, 50) -> value 3.0
+  4. SimpleTimePeriod(50, 100) -> value 4.0
+- The test expects s.get_max_middle_index() == 1, i.e. the period with the largest middle point should be the second entry (100–200). The assertion fails because the internal ordering of periods after the adds is wrong, so get_max_middle_index() returns a different index.
+
+Root cause (why it fails)
+- TimePeriodValues.add uses a binary search / ordered insertion that depends on comparing two SimpleTimePeriod instances.
+- SimpleTimePeriod.compareTo (the comparator used by add) returns 0 whenever two periods have the same start time, without considering the end time (or the middle point). That makes binarySearch treat distinct periods that share a start as equal.
+- When you add SimpleTimePeriod(0,50) after SimpleTimePeriod(0,100), the comparator reports those two periods as equal (compare == 0). The binary-search code therefore does not insert the new (0,50) at the correct sorted position; it treats it as if it already exists and overwrites or places it in the wrong slot. The same happens for the (50,100) vs (0,100) boundaries.
+- Because the insertion result is wrong, the internal list order is corrupted relative to the sort key used by get_max_middle_index; get_max_middle_index then computes the wrong index.
+
+Where it occurs (methods/variables)
+- In your failing code the problem happens inside TimePeriodValues.add(s, period, value). The code path is:
+  - TimePeriodValues.add calls a binary search / insertion routine using SimpleTimePeriod.compareTo.
+  - SimpleTimePeriod.compareTo compares start times only and returns 0 for equal starts.
+  - The broken compareTo causes insertion to choose the wrong index for s.add(SimpleTimePeriod(0,50), 3.0) and s.add(SimpleTimePeriod(50,100), 4.0).
+- The symptom is seen when you later call s.get_max_middle_index(): the internal ordering no longer matches the expected ordering by period middle points, so the maximum middle index is wrong.
+
+How to fix it (concrete steps)
+1. Fix the comparator (SimpleTimePeriod.compareTo):
+   - Change it to impose a total order. Compare start times first; if starts are equal, compare end times (or middle points) next. For example:
+     - If startA < startB: return -1
+     - If startA > startB: return +1
+     - If startA == startB: compare endA vs endB (or compare middleA vs middleB) and return -1/0/+1 accordingly
+   - This ensures two different periods with the same start are not treated as equal by binarySearch.
+
+2. Alternatively, avoid relying on a compareTo that treats equal-start periods as equal:
+   - In TimePeriodValues.add, replace the binary-search insertion that treats compare==0 specially with code that inserts at the correct insertion point when compare==0 by checking end/middle explicitly, or
+   - Insert at the binarySearch negative-insertion-point (Collections.binarySearch contract) and then call Collections.sort(list, periodComparator) after adding if you cannot fix compareTo.
+
+3. Add unit tests for the comparator:
+   - Assert that compare(SimpleTimePeriod(0,100), SimpleTimePeriod(0,50)) != 0 and that the one with the larger middle/end sorts after the other.
+   - After fixing, re-run your test: it should pass and s.get_max_middle_index() should be 1.
+
+Why this fix works
+- Binary search / sort routines require a comparator that implements a consistent total order (no distinct objects should be “equal” under compare unless they are truly equal). By making compareTo consider both start and end (or middle), insertion will preserve the correct sorted order and get_max_middle_index will compute the correct index.
+
+Notes
+- The bug is not in get_max_middle_index itself; it returns the index of the maximum middle point from whatever internal ordering exists. The ordering becomes wrong because compareTo made distinct periods appear equal during insertion.
+- Look at the implementations of SimpleTimePeriod.compareTo (or the comparator passed to the binary search) and TimePeriodValues.add to confirm the comparison logic and where binary search uses it. Fix the comparator as described.

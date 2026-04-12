@@ -1,0 +1,50 @@
+What happened (where it fails)
+- The failure is raised at lines 400–401, inside the code that validates minutes_offset:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check raises ValueError for any negative minutes_offset. So valid timezone offsets that include a negative minutes component (for example a -5:30 offset where minutes_offset is -30) will be rejected here.
+
+Why it fails (root cause)
+- The code treats the sign of the minutes component as invalid. For offsets like -5:30 the minutes component is allowed to be 30 in magnitude but the code sees -30 and rejects it because it requires minutes_offset >= 0. The correct rule is that the magnitude of the minutes must be between 0 and 59; the sign belongs to the overall offset, not to the absolute value of the minutes field.
+
+Concrete examples that trigger the problem
+- minutes_offset = -30 (from offset -05:30) → current check raises ValueError.
+- minutes_offset = 30 (from offset +05:30) → current check passes.
+
+Precise fixes (choose one and apply)
+1) Validate the absolute value of minutes
+   - Replace the current check at lines 400–401 with:
+     if not (0 <= abs(minutes_offset) <= 59):
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Why: this allows negative minute values as long as their absolute value is 0–59.
+
+2) Normalize minutes to a positive magnitude and keep sign on hours
+   - If you intend minutes_offset to always be stored as a non-negative magnitude, normalize earlier and then validate:
+     sign = -1 if total_offset_minutes < 0 else 1
+     hours_offset = abs(total_offset_minutes) // 60 * sign
+     minutes_offset = abs(total_offset_minutes) % 60
+     # then validate
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Why: ensures minutes_offset is always 0..59 and the sign is represented via hours_offset. Use this when later code expects minutes_offset >= 0.
+
+3) If minutes_offset should never be negative by design, fix the caller
+   - Find where minutes_offset is produced (the parser or arithmetic that builds the offset) and make it produce a non-negative minutes component. Then the original check stays correct.
+   - Steps:
+     a) Inspect the function that creates minutes_offset (the caller of the validation around lines 400–401).
+     b) Change its logic to set minutes_offset = abs(minutes) and apply the sign only to the hours value or to a combined offset variable.
+     c) Add unit tests for both positive and negative offsets, e.g. +05:30 and -05:30.
+
+What to change right now (minimal safe change)
+- If you don’t know where minutes_offset is produced, implement fix #1 (use abs in the check) at lines 400–401. That fixes immediate errors for valid negative-minute offsets without needing to refactor callers.
+
+How to verify the fix (tests)
+- Add these unit tests:
+  - parse_offset("-05:30") should succeed and produce hours = -5, minutes = 30 (or combined -330 minutes).
+  - parse_offset("+05:30") should succeed.
+  - parse_offset("-00:30") should succeed.
+  - invalid minutes like 60 or -61 should still raise ValueError.
+
+Summary
+- Root cause: the code rejects negative minutes_offset values even when those negative minutes are valid as part of a negative overall offset.
+- Quick fix: validate abs(minutes_offset) instead of minutes_offset, or normalize minutes to a non-negative magnitude and keep the sign elsewhere. Apply tests to confirm.

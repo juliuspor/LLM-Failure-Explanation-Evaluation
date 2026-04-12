@@ -1,0 +1,40 @@
+What happened (root cause)
+- The code treats the input parameter minutes_offset both as "the minutes part of the offset" and later as "the total offset in minutes". The parameter minutes_offset is validated at line 396 to be in 0..59, but then it is overwritten at lines 402/404 with a calculation that produces the total minutes. Reusing the same variable name makes the code confusing and is the source of the failure.
+
+Why that breaks things
+- Overwriting minutes_offset hides the original meaning of that variable and makes it easy to get the sign wrong. The intended calculation is "total_minutes = hours_in_minutes ± minutes_part", but the code replaces the minutes_part with the total. That is legal in Python, but it is error-prone and in practice caused incorrect offsets (and a hard-to-read stack trace pointing at the minutes validation at line 396 instead of the arithmetic).
+- The conditional uses hours_in_minutes < 0 (line 401) to decide whether to subtract minutes_part. That is correct in intent, but because the code reassigns minutes_offset, any later use of the original minutes_part is lost and debugging points back to the earlier validation (line 396), making diagnosis harder.
+
+Where it occurs (specific lines)
+- Validation: line 396 checks minutes_offset range:
+    if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Overwrite (convert to total minutes): lines 401–404
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset    # line 402
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset    # line 404
+- Use as total minutes: line 405
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Concrete, simple fix (steps)
+1. Stop reusing minutes_offset for two meanings. Introduce a clearly named variable total_minutes.
+2. Compute total_minutes from hours_offset and minutes_offset (the validated minutes part).
+3. Multiply total_minutes by MILLIS_PER_MINUTE.
+
+Suggested code change (replace the block that computes minutes_offset and offset)
+- After the existing validations, replace the try block with this:
+
+    try:
+        hours_in_minutes = hours_offset * 60
+        if hours_in_minutes < 0:
+            total_minutes = hours_in_minutes - minutes_offset
+        else:
+            total_minutes = hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Why this fixes it
+- Keeps the validated minutes_part (minutes_offset) separate from the computed total_minutes so there is no accidental reuse or sign confusion.
+- Makes the code's intent explicit: minutes_offset is the input minutes part, total_minutes is the computed total offset in minutes. This removes the ambiguity that led to the failure and makes stack traces and debugging point to the correct place.

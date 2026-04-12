@@ -1,0 +1,46 @@
+What happened (where it fails)
+- On lines 30–31 you check index like this:
+  if index < 0 or index >= len(s):
+      raise IndexError(f"String index out of range: {index}")
+  That check runs in both the BACKWARD and BLOCK code paths (you show the same two lines in both [SLICE_BLOCK] and [SLICE_BACKWARD]).
+- On line 32 you do:
+  return s[index]
+  If either branch computed an index that is meant to represent a slice boundary (for example index == len(s) when slicing off the end, or a negative index that should be interpreted relative to the end), the guard at lines 30–31 rejects it and raises IndexError before line 32 is reached. If the code intentionally allowed index == len(s) for an empty result, or intended to accept negative indexes after translating them, the guard is wrong and causes the function to fail.
+
+Why it fails (root cause)
+- The guard treats any negative index as invalid and treats index == len(s) as out of range. That is correct for direct element access s[index] but wrong for slice-like semantics:
+  - For slicing, index == len(s) is often a valid boundary (e.g., s[3:3] -> empty string). Rejecting index == len(s) causes legitimate slice endpoints to be treated as errors.
+  - For backward/relative indexing you probably intended to allow negative indexes by translating them to positive positions (index += len(s)). The guard runs before that translation (or prevents it), so valid negative positions are rejected.
+- In short: the code is enforcing strict element-access rules (no negatives, index < len(s)) even when the logic expects slice-boundary rules (allow index == len(s) and allow negative -> translate).
+
+How to fix it (concrete steps with exact lines)
+1. Decide the intended semantics:
+   - If you mean element access (must be 0 <= index < len(s)), keep the current check and do not accept index == len(s) or negatives.
+   - If you mean slice boundary semantics (allow index == len(s) and accept negatives by normalizing), change the guard.
+
+2. To allow slice semantics, change the guard and normalize negatives before raising. For example:
+   - Replace lines 30–31 with:
+       if index < 0:
+           index += len(s)
+       if index < 0 or index > len(s):
+           raise IndexError(f"String index out of range: {index}")
+     (This allows index == len(s) as a valid boundary; it rejects indexes > len(s) only.)
+   - Then keep line 32 behavior but handle the case index == len(s) specially when you intend an empty result:
+       if index == len(s):
+           return ""   # or handle as appropriate for your slice operation
+       return s[index]
+
+3. If you intended to allow negative indexes as Python indexing (e.g. s[-1] means last character), instead normalize like in step 2 but enforce element-access bounds (index must be strictly < len(s) to return a character):
+   - Normalize negatives:
+       if index < 0:
+           index += len(s)
+   - Enforce element-access:
+       if index < 0 or index >= len(s):
+           raise IndexError(f"String index out of range: {index}")
+   - Then return s[index] on line 32.
+
+4. If you intended to support both slice endpoints and element access in the same function, branch explicitly:
+   - After computing index, decide whether you're retrieving a character or a slice-result. If slice-result, allow index == len(s) and return empty string when appropriate. If character, require index < len(s).
+
+Summary
+- The failure is caused by the bounds check on lines 30–31 being too strict for the intended slice behavior: it rejects index == len(s) and negative indexes before they can be interpreted as valid slice boundaries or normalized positions. Fix by normalizing negative indexes (index += len(s)) and changing the second comparison to allow index == len(s) for slice endpoints, or by separating slice vs element-access logic as shown above.

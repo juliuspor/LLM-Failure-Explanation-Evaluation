@@ -1,0 +1,33 @@
+What happened (where it fails)
+- The code that computes minutes_offset executes two conflicting assignments in a row:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Because those lines run one after the other, the second assignment on line 408 always overwrites the result from line 406.
+- That leaves minutes_offset with the wrong sign/value when it is converted to milliseconds on line 409 by FieldUtils.safe_multiply(..., DateTimeConstants.MILLIS_PER_MINUTE).
+- A wrong magnitude or sign then causes the later check to fail and the code to raise ValueError("Offset is too large") on line 411. The method ends up calling cls.for_offset_millis(offset) only if the bad value doesn’t trigger the exception.
+
+Why it fails (root cause)
+- The intended logic was clearly conditional (one of the two computations should be used depending on some earlier condition). But the code has no else or early return between the two assignments, so both run unconditionally.
+- That means the computed offset is not what was intended for either branch; it is simply whatever the second line produces. In particular, if the first line was meant for "negative" hours and the second for "positive" hours (or vice versa), that intent is lost and the resulting offset can be out of the allowed range, triggering the ValueError at line 411.
+- The immediate cause is a missing control-flow statement (an else, or conditional around the second assignment) or a mistaken duplicate assignment. The semantic cause is a logic bug when choosing which formula to apply.
+
+Exactly where to change the code (concrete fixes with steps)
+1. Open the source file containing these lines and locate the method that contains them (the method that later calls FieldUtils.safe_multiply and cls.for_offset_millis).
+2. Inspect the condition directly above line 406. If the code intends a two-way branch, change the code so the second assignment runs only when the first isn’t meant to run:
+   - Fix A (most likely): Add else before line 408, so the code becomes:
+     - line 406: minutes_offset = hours_in_minutes - minutes_offset
+     - else:
+         minutes_offset = hours_in_minutes + minutes_offset
+   - Fix B (if the second line was a typo): Replace line 408 with the correct expression (for example, if both should be subtraction or the sign of minutes_offset should be flipped).
+3. After editing, run the project tests or reproduce the failure case that previously raised ValueError("Offset is too large") to confirm the fix removes the incorrect exception.
+4. Add or update unit tests that cover both branches (e.g., positive and negative hour offsets) so this mistake will be caught in the future.
+
+How to verify the fix (concrete checks)
+- Create inputs that previously triggered the ValueError and confirm they now produce a valid offset and that cls.for_offset_millis(offset) is reached.
+- Add tests that assert the minutes_offset value for representative cases (e.g., hours=+X, minutes=+Y and hours=-X, minutes=-Y) to ensure both branches produce the expected result.
+- Run the tests and ensure FieldUtils.safe_multiply is called with the expected minutes value and that the resulting millis are within allowed bounds.
+
+Summary
+- Root cause: a missing conditional control flow causes line 408 to always overwrite the calculation done on line 406.
+- Effect: incorrect minutes_offset leads to an out-of-range offset and ValueError at line 411.
+- Fix: make the second assignment conditional (add else) or correct the expression, then add tests to cover both branches.

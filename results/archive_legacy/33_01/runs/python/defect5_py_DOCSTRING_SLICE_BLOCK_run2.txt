@@ -1,0 +1,46 @@
+What happened (root cause)
+- At runtime the code hit the check on lines 346–351:
+  - inferred_type is the type deduced from the element(s).
+  - expected_type is the optional type the caller passed in.
+- The code treats inferred_type == object as an irreconcilable mismatch with any expected_type != object and immediately raises TypeError (lines 346–351).
+- That fail happens when the code could only infer object (for example because the element is None or the array is empty), but the caller supplied an expected_type (for example expected_type == str). Because the code unconditionally rejects object -> expected_type, it raises the TypeError even though None (or an empty list element) is allowed to be assigned to any reference type.
+
+Why this is wrong (concise)
+- inferred_type == object is being used as “unknown/undetermined type” (e.g. element was None), but the code treats it as incompatible with a concrete expected_type. In many languages/contexts None (or an element typed as object because it’s unknown) can be assigned to a more specific reference type; rejecting that is too strict and contradicts the docstring behavior that a None element should produce List[object] only when expected_type is not supplied.
+- The condition at line 346 is inverted/overly strict: the code should raise only when the inferred type is concrete and incompatible with expected_type, not when inferred_type is the generic object placeholder.
+
+Exactly where to change (specific lines and suggested replacement)
+- Current code (lines 346–351):
+  if inferred_type == object and expected_type != object:
+      raise TypeError(
+          f"Cannot cast object list to {expected_type.__name__} list "
+          f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+          f"[Ljava.lang.{expected_type.__name__};)"
+      )
+- Replace with a stricter compatibility check that only raises when the inferred type is a concrete, incompatible type. For example:
+  if inferred_type is not object and expected_type is not object and inferred_type is not expected_type:
+      raise TypeError(
+          f"Cannot cast {inferred_type.__name__} list to {expected_type.__name__} list "
+      )
+- Or, if you want to keep the Java-style message, use:
+  if inferred_type is not object and expected_type is not object and inferred_type is not expected_type:
+      raise TypeError(
+          f"Cannot cast {inferred_type.__name__} list to {expected_type.__name__} list "
+          f"(ClassCastException: [Ljava.lang.{inferred_type.__name__}; cannot be cast to "
+          f"[Ljava.lang.{expected_type.__name__};)"
+      )
+
+Concrete rationale for the replacement
+- If inferred_type == object it means "unknown" or "element was None". In that case:
+  - If expected_type is provided, we should accept it (create a list with component type expected_type and put None in it), not raise.
+  - If expected_type is not provided, falling back to object is correct.
+- We should only raise if we have a concrete inferred_type (not object) that cannot be cast to the provided expected_type.
+
+How to verify / tests to add
+1. element=None, array=None, expected_type=None -> returns list with element None and component type object (existing behavior should remain).
+2. element=None, array=None, expected_type=str -> should return list[str] with element None (current code raises TypeError; after fix it should succeed).
+3. array contains ints, element is int, expected_type=int -> succeeds.
+4. array contains ints, expected_type=str -> should raise TypeError (concrete mismatch), confirming the new check raises when it should.
+
+Summary
+The code raises because it treats inferred_type == object as inherently incompatible with any expected_type != object. Change the conditional so you only reject a concrete inferred_type that truly conflicts with expected_type; allow inferred_type == object to be accepted and cast to the requested expected_type (or fall back to object when expected_type is not provided).

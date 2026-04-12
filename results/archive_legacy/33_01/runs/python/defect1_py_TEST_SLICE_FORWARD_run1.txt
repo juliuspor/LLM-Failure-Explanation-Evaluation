@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The failing test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The bug is in for_offset_hours_minutes around the lines you showed (roughly lines 402–404). The code computes hours_in_minutes = hours * 60, then does either
+  - minutes_offset = hours_in_minutes - minutes_offset  (line 402)
+  - minutes_offset = hours_in_minutes + minutes_offset  (line 404)
+- For your input hours = -2 and minutes = -15:
+  - hours_in_minutes = -120
+  - Because minutes is negative, the code takes the first branch and computes minutes_offset = -120 - (-15) = -105
+  - -105 minutes is -1 hour 45 minutes, so the final zone id becomes "-01:45" instead of the intended "-02:15"
+- Root cause: the code assumes the minutes parameter has a uniform sign/meaning and applies subtraction when minutes is negative, but that logic is wrong when both hours and minutes are negative. The code treats a negative minutes value as "subtract minutes" from hours_in_minutes, which flips the intended total offset.
+
+Why it happens (simple)
+- The minutes parameter can be negative. The code uses subtraction when minutes is negative, which effectively cancels part of the hours instead of adding additional negative minutes. The arithmetic at line 402 produces -120 - (-15) = -105, whereas the correct total minutes for -2 hours and -15 minutes is -120 + (-15) = -135.
+
+Exact lines to change
+- for_offset_hours_minutes, around:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+
+Concrete fixes (step-by-step)
+1. Decide a clear rule: either require minutes to be non-negative (0..59) and let the sign be carried by hours, or allow minutes to be negative and combine signs consistently. I recommend normalizing signs so the method accepts negative minutes but computes correctly.
+2. Replace the existing branching with normalization that uses the sign of the whole offset, for example:
+   - Compute sign = -1 if hours < 0 or minutes < 0 else 1
+   - Use absolute values: abs_hours = abs(hours), abs_minutes = abs(minutes)
+   - Validate abs_minutes is in 0..59
+   - total_minutes = sign * (abs_hours * 60 + abs_minutes)
+   - then compute offset = total_minutes * MILLIS_PER_MINUTE and proceed
+3. Alternatively, if you prefer to require minutes non-negative, add an explicit check and raise ValueError for negative minutes; update docs/tests accordingly.
+
+Minimal code patch (illustrative; replace the problematic lines)
+- Replace the branching with:
+
+  sign = -1 if (hours < 0 or minutes < 0) else 1
+  abs_hours = abs(hours)
+  abs_minutes = abs(minutes)
+  if abs_minutes >= 60:
+      raise ValueError("Illegal minutes: must be 0..59")
+  minutes_offset = sign * (abs_hours * 60 + abs_minutes)
+
+- Then keep the existing conversion to milliseconds:
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Tests to add
+- Existing failing test: DateTimeZone.for_offset_hours_minutes(-2, -15) should yield id "-02:15"
+- Additional cases:
+  - for_offset_hours_minutes(-2, 15) → "-02:15" (or error, depending on spec)
+  - for_offset_hours_minutes(2, -15) → "+02:15" or error (decide spec)
+  - for_offset_hours_minutes(0, 0) → "Z" or "+00:00" per project conventions
+  - invalid minutes: for_offset_hours_minutes(1, 60) → raises ValueError
+
+Summary
+- Root cause: incorrect sign handling at line 402 causes subtraction of a negative minutes value, producing the wrong total minutes (-105 instead of -135).
+- Fix by normalizing signs and combining absolute hours and minutes, or by rejecting negative minutes explicitly. The code patch above shows a precise replacement for lines 402–404.

@@ -1,0 +1,47 @@
+What happened (where): at lines 396–397 the code raises ValueError when minutes_offset is outside 0..59:
+
+ 396 |         if minutes_offset < 0 or minutes_offset > 59:
+ 397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why it fails (root cause): minutes_offset carries the signed minute component of a timezone offset (for example -30 for "-00:30" or -330 for a signed total-minute computation). Because the code leaves the sign on the minutes part, valid negative offsets naturally produce minutes_offset < 0 and immediately trigger this guard. In short, the check assumes minutes_offset is always non‑negative, but earlier parsing/assignment allows a negative minute value, so a valid input like "-05:30" or "-00:30" will make minutes_offset negative and the code falsely raises ValueError.
+
+How to reproduce (concrete steps):
+1. Feed the parser a timezone string that has a negative minute component, e.g. "-00:30" or "-05:30".
+2. Observe that execution reaches line 396, minutes_offset is -30, the condition minutes_offset < 0 is true, and ValueError("Minutes out of range: -30") is raised.
+
+Exact fixes (pick one, with exact line changes):
+
+Option A — check absolute minutes (minimal change)
+Replace lines 396–397 with:
+ 396 |         if abs(minutes_offset) > 59:
+ 397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+This accepts negative minute values but still rejects magnitudes > 59.
+
+Option B — normalize before validating (preferred when minutes_offset should represent a magnitude)
+Ensure minutes_offset is stored as the non‑negative minute component before the check. For example, where minutes_offset is parsed set:
+  # after parsing sign and minute token:
+ minutes_offset = int(parsed_minutes)   # parsed_minutes is the numeric minutes string
+ # keep sign separate (e.g. sign = -1 or 1)
+ ...
+ then validate:
+ 396 |         if minutes_offset < 0 or minutes_offset > 59:
+ 397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+But do not assign a signed minutes_offset earlier. In other words, remove any code that sets minutes_offset = sign * parsed_minutes; keep sign separate and apply it to the total offset only.
+
+Option C — compute and validate total minutes instead
+If your code elsewhere expects minutes_offset to be signed, validate as:
+ 396 |         if not (0 <= abs(minutes_offset) <= 59):
+ 397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Tests to add:
+- parse("+05:30") -> minutes_offset == 30, no error
+- parse("-05:30") -> minutes_offset == 30 (or signed total is -330), no error
+- parse("-00:30") -> no error
+- parse("+02:75") -> raises ValueError (75 out of range)
+- parse("...") invalid minute strings -> raises ValueError
+
+Why these fixes work: they either remove the sign before checking the minute component (so valid negative offsets aren't treated as invalid) or validate magnitude with abs(), ensuring minutes are within 0..59 while allowing a negative sign to be applied to the overall offset elsewhere.
+
+If you want, paste the surrounding code where minutes_offset is set and I’ll show the exact minimal edit in context.

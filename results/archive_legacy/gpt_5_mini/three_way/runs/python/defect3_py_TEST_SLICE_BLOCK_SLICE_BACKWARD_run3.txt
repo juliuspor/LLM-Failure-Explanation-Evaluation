@@ -1,0 +1,37 @@
+What happened (where it fails)
+- The IndexError is raised from to_utf16_code_units at these lines:
+  - Line 35-36: the guard `if index < 0 or index >= len(code_units): raise IndexError(...)`.
+- The exception is triggered when CsvEscaper.translate_string calls code_point_at (which uses the list produced by to_utf16_code_units) while iterating a string that contains a UTF‑16 surrogate pair (an emoji) followed by another character (the test input "\U0001F630A").
+- In that scenario the code advances the loop index incorrectly after handling a surrogate pair, so it ends up calling code_point_at with index == len(code_units) (or otherwise out of range), which fails the check at line 35 and raises IndexError.
+
+Why it fails (root cause)
+- The code is working with UTF‑16 code units (the list named code_units returned by to_utf16_code_units) and also treating the surrogate pair as two separate 16‑bit units.
+- When a high surrogate is found, the translator is supposed to consume both the high and low surrogate (advance the index by 2 code units). Instead the translator advances by the wrong amount (usually only by 1) or otherwise mismanages the index that walks code_units.
+- As a result, on a string like "\U0001F630A" (which is two UTF‑16 code units for the emoji plus one for 'A' → total 3 code units), the loop index can be set to a value equal to the length of code_units (or beyond) and then code_point_at is called with that out‑of‑range index.
+- The immediate symptom is the check at lines 35–36 failing: the function defensively raises IndexError because index >= len(code_units).
+
+Where exactly in the code to look
+- to_utf16_code_units: builds the list code_units and contains the index bounds check at lines 35–36.
+- code_point_at: reads code_units at a given index and needs to verify the presence of a following low surrogate when a high surrogate is seen.
+- CsvEscaper.translate_string (the translator loop): is the place that advances the index through code_units; this logic is mishandling the increment when surrogate pairs are encountered.
+
+Concrete fixes (clear steps)
+Pick one of these precise fixes (choose based on how the rest of the code is structured):
+
+1) Correct the index increment in translate_string
+   - When you detect and consume a surrogate pair, make sure you increment the index by 2 code units (e.g., `index += 2`) instead of 1.
+   - Ensure the loop condition uses `while index < len(code_units):` so you never call code_point_at with index == len(code_units).
+
+2) Make code_point_at robust to end-of-data after a high surrogate
+   - In code_point_at, when you see a high surrogate at `index`, check `if index + 1 >= len(code_units):` and handle it gracefully (either treat the high surrogate as a replacement character or return a safe single-unit code point) instead of letting callers drive an out‑of‑range access.
+   - Concretely: before reading the low surrogate, require `index + 1 < len(code_units)` and handle the missing low surrogate case.
+
+3) (Better structural fix) Iterate over Python code points, not UTF‑16 units
+   - Since Python strings use full Unicode code points, simplify: iterate over the string `s` directly (for ch in s) or use ord/chr and avoid manually building UTF‑16 code_units and surrogate bookkeeping. That eliminates the whole surrogate-pair index arithmetic.
+
+Which to choose
+- If the rest of the translator already works at the UTF‑16 code unit level, apply fix (1) and also add the defensive check from (2).
+- If you can change the implementation, (3) is the cleanest: it removes the error-prone manual surrogate handling.
+
+Summary (one-line)
+The code fails because the loop that walks the UTF‑16 code_units mis-advances the index when it encounters a surrogate pair, causing code_point_at to be called with index >= len(code_units) and thus raising the IndexError at lines 35–36; fix by advancing the index correctly (consume two code units for a surrogate pair), or add boundary checks in code_point_at, or iterate over Python code points instead.

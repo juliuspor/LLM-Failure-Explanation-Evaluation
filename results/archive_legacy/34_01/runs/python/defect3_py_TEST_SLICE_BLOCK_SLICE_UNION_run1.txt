@@ -1,0 +1,55 @@
+What happened (what failed)
+- The IndexError is raised at line 36 inside to_utf16_code_units:
+  raise IndexError(f"String index out of range: {index}")
+  That means some caller passed an index value that is not valid for the list code_units.
+
+Root cause (why it failed)
+- to_utf16_code_units builds a list named code_units containing UTF-16 code units (16-bit halves, including surrogate halves for characters U+10000 and above).
+- The rest of your code (the caller that supplies index) is using Python string indices (one index per Python character / Unicode code point).
+- For characters outside the Basic Multilingual Plane (like U+1F630), a single Python character corresponds to two UTF-16 code units (a surrogate pair). That makes the length and indexing of code_units different from the Python string's indexing.
+- The code therefore mixes two incompatible index spaces:
+  - index (from the caller) is a Python string index (0 .. len(s)-1).
+  - len(code_units) is a count of UTF-16 code units (0 .. number_of_code_units-1).
+- Because those index spaces do not match, the caller can pass an index that is invalid for code_units and you get the IndexError at line 36.
+
+Where it occurs (exact names/lines)
+- Function: to_utf16_code_units(s: str)
+- Failure check: lines 35–36
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+- The code that then inspects code_units[index] and the surrogate pair at index+1 (lines 38–44) assumes index addresses positions in code_units, but the index was produced with Python string indexing semantics.
+
+How to fix it (concrete steps)
+Pick one of these definite fixes depending on desired behavior:
+
+1) Operate in Python codepoint (Unicode) space (recommended)
+   - Stop converting s to UTF-16 code units at all.
+   - Iterate over Python characters (for ch in s:) and work with ord(ch) to get the code point.
+   - Remove any use of code_units and the index-vs-code-unit logic.
+   - This avoids surrogate-pair handling because Python characters are full code points.
+
+2) If you must work in UTF-16 code units, convert indices properly
+   - Build a mapping from Python string indices to code_units indices while creating code_units:
+       code_unit_index_for_codepoint_index = []
+       for each codepoint in s:
+           record current len(code_units) into code_unit_index_for_codepoint_index
+           append 1 or 2 UTF-16 units into code_units
+   - When the caller gives a Python index i, translate it with code_unit_index_for_codepoint_index[i] before indexing code_units.
+   - Use that translated index when checking/accessing code_units.
+
+3) Fix the check logic if the code actually wants to index code_units directly
+   - Ensure all callers pass indices that refer to code_units (not Python string indices). That’s brittle and error-prone — prefer option 1 or 2.
+
+Concrete minimal code change option (example for option 1)
+- Replace the UTF-16 based logic and the index checks with:
+    for i, ch in enumerate(s):
+        cp = ord(ch)
+        # handle cp (single code point) directly
+- Remove code_units, the index checks at lines 35–36, and the surrogate-pair handling at 38–44.
+
+Why this fixes your failing test
+- The test calls translate_string('\U0001F630'); Python gives a single character whose ord() is 0x1F630. If you treat characters as full Unicode code points (option 1), the code will see exactly that code point and will not do any wrong indexing into surrogate halves. The IndexError at line 36 will go away and translate_string can return the same character as expected.
+
+If you want I can:
+- Show the exact minimal patch for your file (edit the function to use codepoint iteration), or
+- Show the mapping implementation (option 2) if you must keep a UTF-16 unit array.

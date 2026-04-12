@@ -1,0 +1,41 @@
+What happened (where)
+- Failure occurs in DateTimeZone.for_offset_hours_minutes(hours_offset, minutes_offset).
+- Specifically the ValueError ("Minutes out of range: -15") is raised near the top of that method (around the checks before computing the offset).
+
+Why it happened (root cause)
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method enforces minutes_offset must be between 0 and 59:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This check is on line near the start of for_offset_hours_minutes.
+- The Joda-Time semantics (intended and documented in the method docstring) allow negative minute values when the hours value is negative (e.g., (-2, -15) should be treated as -02:15). The code attempts to implement that behavior later by combining hours and minutes into minutes_offset after sign handling, but it checks minute range too early and rejects negative minutes outright.
+- Concretely: minutes_offset = -15 triggers the guard clause and raises ValueError before the code reaches the sign-adjusting logic (the later branch that would accept negative minutes when hours < 0).
+
+Where to change (precise steps)
+1. Remove or relax the early minutes range check so negative minutes are allowed when hours_offset is negative or zero. Replace it with logic that enforces the documented valid ranges for the final combined minutes value.
+2. Implement validation after you compute the combined minutes value (minutes_total), not before. For example:
+   - Validate hours_offset is in [-23, 23].
+   - Validate minutes_offset is in [-59, 59] (allow negatives), but also enforce the rule that minutes must not be negative when hours_offset is positive (per doc).
+   - Compute minutes_total = hours_offset * 60 + sign-adjusted minutes_offset (as the code already intends).
+   - Validate the final millis offset is within allowed bounds (you already do this in for_offset_millis).
+3. Alternatively, change the current check to:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(...)
+   and add a check to disallow (hours_offset > 0 and minutes_offset < 0).
+
+Minimal code patch example (where to change)
+Replace the existing early check block (around lines where minutes_offset is validated) with:
+
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes is not allowed")
+
+Then keep the existing sign-adjusting and multiplication code that follows.
+
+Result
+- With this change DateTimeZone.for_offset_hours_minutes(-2, -15) will compute an offset of -2 hours and -15 minutes (i.e. -02:15), call for_offset_millis, and return a fixed-offset zone with id '-02:15', so the test will pass.
+
+Exact methods/lines referenced
+- DateTimeZone.for_offset_hours_minutes(...) — the early minutes validation check raises the ValueError.
+- The sign-adjustment and final offset calculation later in for_offset_hours_minutes (where hours_in_minutes and FieldUtils.safe_multiply are used) contains the intended behavior but is never reached because of the premature check.

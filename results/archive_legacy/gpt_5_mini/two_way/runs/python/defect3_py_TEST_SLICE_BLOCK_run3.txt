@@ -1,0 +1,59 @@
+What happened (brief)
+- The test triggers an IndexError coming from code_point_at(code_units, index) when index reaches len(code_units).
+- The raise happens at the shown lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+
+Why it happens (root cause, plain language)
+- Your translator converts the Python string into UTF‑16 code units (variable name code_units) and walks those units with an integer index.
+- When the loop encounters a surrogate pair it advances the index by 2 (to skip both UTF‑16 units). That is correct for a valid pair.
+- But in at least one path the code advances index so that it becomes equal to len(code_units) and then later calls code_point_at(code_units, index) without checking that index < len(code_units) first.
+- code_point_at explicitly rejects index == len(code_units) and raises IndexError (lines 35–36). That is exactly what you see in the failing test where an emoji (a surrogate pair) is followed by another character: the index movement logic lets the loop attempt to read past the end.
+
+Where in the code this happens
+- The exception is raised inside code_point_at when called with index == len(code_units) (lines 35–36).
+- The caller is the loop inside CsvEscaper.translate_string (or similar method that iterates over code_units). That method:
+  - converts to code_units,
+  - calls code_point_at(code_units, index),
+  - then advances index by 1 or 2 depending on whether it saw a surrogate pair.
+- The bug is the loop/call sequence: it doesn't guard the next call to code_point_at after an index advance, nor does it correctly handle the case where a high surrogate is last (or advancing consumed the last unit and the next iteration still tries to read).
+
+Concrete examples of the failing situation
+- Input "\U0001F630A":
+  - UTF‑16 code_units: [high_surrogate, low_surrogate, 'A'] (length 3)
+  - On first iteration index == 0 → code_point_at(..., 0) succeeds (reads pair) and translator advances index by 2 → index becomes 2.
+  - Next iteration should read 'A' at index 2 and succeed. But if the code mistakenly adds another increment (or calls code_point_at prematurely), it can call code_point_at(..., 3) which is out of range and causes the IndexError at lines 35–36.
+
+Clear, actionable fixes (step-by-step)
+1. Make the loop robust: always check index < len(code_units) immediately before calling code_point_at.
+   - Replace occurrences like `while True: cp = code_point_at(code_units, index)` with `while index < len(code_units): cp = code_point_at(code_units, index)` or explicitly check before each call.
+2. When detecting a high surrogate, ensure the low surrogate actually exists:
+   - If index+1 >= len(code_units) then treat the high surrogate as an unpaired unit (advance by 1) or handle it as an error — but do not try to read code_point_at at index+1.
+3. After advancing index by 2 for a valid surrogate pair, do not immediately call code_point_at with the new index without first checking `index < len(code_units)`.
+4. Optionally: change code_point_at to return None (or raise a more descriptive exception) for out‑of‑range reads, and handle that return value in translate_string so you never attempt to process an invalid index.
+
+Minimal code sketch of the correct loop pattern
+- Pseudocode for translate_string loop:
+  index = 0
+  while index < len(code_units):
+      cp = code_point_at(code_units, index)   # safe because of the while condition
+      if is_high_surrogate(code_units[index]):
+          if index + 1 < len(code_units) and is_low_surrogate(code_units[index+1]):
+              # handle surrogate pair
+              index += 2
+              continue
+          else:
+              # unpaired high surrogate — handle and advance 1
+              index += 1
+              continue
+      else:
+          # normal unit
+          index += 1
+
+Why this will fix it
+- These checks prevent any call to code_point_at with index == len(code_units).
+- They ensure surrogate pairs are only read when both halves exist and that advancing never leaves the loop in a state where the next call is out of bounds.
+
+Summary
+- Root cause: translate logic lets code_point_at be called with index == len(code_units) after advancing across surrogate pairs; code_point_at rejects that and raises IndexError at lines 35–36.
+- Fix by guarding calls to code_point_at with index < len(code_units), validating low surrogate existence before treating a pair, and making the advance logic consistent so you never attempt to read past the end.

@@ -1,0 +1,48 @@
+What happened (symptom)
+- The code throws a ValueError either at line 401 ("Minutes out of range: ...") or later raises "Offset is too large" at line 411. The failure is coming from incorrect handling of the minutes component when the code converts hours+minutes into total offset minutes.
+
+Where it happens (lines)
+- The minutes range check is at lines 400–401:
+  - 400: if minutes_offset < 0 or minutes_offset > 59:
+  - 401:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later, the same variable minutes_offset is reused and reassigned at lines 406 and 408:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+- The code then multiplies minutes_offset to get milliseconds (line 409) and may hit the overflow/too-large check at line 411.
+
+Why it fails (root cause, plain language)
+- The variable minutes_offset is being used for two different meanings without proper separation:
+  1. Initially it is treated as the minutes *component* (should be 0..59). The code checks that at lines 400–401.
+  2. Later the same variable is converted into total minutes (hours_in_minutes ± minutes_offset) and keeps the same name.
+- Because of that reuse, the validation either:
+  - Happens at the wrong time (checked before combining with hours), or
+  - Is misleading (the error message reports a total-minute value when it should report a minute-component), or
+  - Is absent for the value that actually gets multiplied, so you can overflow or produce a too-large offset at line 411.
+- Concretely:
+  - If you pass an input where your parsed minutes component is valid but the code path uses the variable as total minutes before the check, you may get a false "Minutes out of range" error.
+  - If the minutes-component check runs but the code later creates a much larger total minutes number by adding hours_in_minutes and then multiplies it, you can exceed allowed limits and hit the "Offset is too large" error because the converted total minutes were not validated as a separate value.
+
+What to change (concrete step-by-step fixes)
+1. Stop reusing minutes_offset for two different meanings. Introduce separate variables:
+   - minutes_component (0..59)
+   - total_minutes (hours * 60 ± minutes_component)
+2. Validate the minute component immediately after parsing:
+   - if minutes_component < 0 or minutes_component > 59: raise ValueError(...)
+   Use the variable minutes_component in the message so the reported value is the actual minute value.
+3. Compute the total minutes using a new variable, after you know the sign and hours:
+   - hours_in_minutes = hours * 60
+   - if negative_offset: total_minutes = hours_in_minutes - minutes_component
+     else: total_minutes = hours_in_minutes + minutes_component
+4. Use total_minutes for multiplication and overflow checks:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - then do the "Offset is too large" check on offset if needed
+5. Optional: add an explicit range check for total_minutes if there is a domain limit (e.g., hours and minutes combined must fit within allowed offset hours); report that error with a clear message like "Total offset minutes out of allowed range".
+
+Exactly where to edit in your code
+- Replace lines 400–401 so they validate minutes_component (and use a dedicated variable).
+- Replace lines 406 and 408 so they assign to total_minutes, not overwrite minutes_offset.
+- Replace line 409 to use total_minutes when computing offset.
+- Keep the "Offset is too large" check at 411, but it will now trigger only when the actual total offset is too large, not because the minute component was misused.
+
+Why this fix works
+- Separating the minute component from the total-minute calculation makes the checks unambiguous: you validate the parsed minutes as 0..59, then compute the actual total minutes and validate/convert that. You avoid misleading error messages and avoid accidental overflow or wrong range checks caused by variable reuse.

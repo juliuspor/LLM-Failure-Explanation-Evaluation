@@ -1,0 +1,10 @@
+@classmethod
+    def to_class(cls, array: Optional[List[Any]]) -> Optional[List[Type]]:
+        if array is None:
+            return None
+        elif len(array) == 0:
+            return ArrayUtils.EMPTY_CLASS_ARRAY.copy()
+        classes = []
+        for elem in array:
+            classes.append(type(elem) if elem is not None else type(None))
+        return classes

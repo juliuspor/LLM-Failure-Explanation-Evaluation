@@ -1,0 +1,42 @@
+What happened (where it failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) triggered validation that rejected the minutes argument with ValueError: "Minutes out of range: -15".
+- That validation happens before the code that applies the hours sign to the minutes. In the slice you showed the code first computes a local minutes value (minutes_offset) and then later tries to combine it with hours:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+  - line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - line 407: raise ValueError("Offset is too large")
+  - line 408: return cls.for_offset_millis(offset)
+- The ValueError you saw ("Minutes out of range: -15") is produced by the validation that runs when the method receives a negative minutes argument. That validation expects minutes to be a non-negative 0..59 value and rejects -15 before the code at lines 402/404 has a chance to combine hours and minutes.
+
+Why it failed (root cause)
+- The API treats the sign of the offset as coming from the hours parameter (or requires minutes to be non-negative). Your call passed hours = -2 and minutes = -15, but the code validates minutes as a standalone value and flags -15 as invalid.
+- In other words, the code does not accept negative minutes values. It expects minutes to be in the range 0..59 and applies the sign from hours when combining them. Because you passed a negative minutes (-15), validation fails immediately and you get the error.
+
+How to fix it (concrete steps)
+1. Quick fix for your call (no code change):
+   - Provide a non-negative minutes and put the sign on hours:
+     - Use DateTimeZone.for_offset_hours_minutes(-2, 15)
+   - That will produce the expected '-02:15'.
+
+2. If you want the method to accept negative minutes as you passed:
+   - Change the method to normalize minutes by taking its absolute value and applying the sign from hours (or require consistent signs). For example, near the start of for_offset_hours_minutes add:
+     - if minutes < 0:
+         minutes = -minutes
+     - (Then validate minutes is between 0 and 59; then combine hours and minutes using the existing logic at lines 402/404.)
+   - Or more robustly:
+     - if hours < 0 and minutes > 0:
+         combined_minutes = hours*60 - minutes
+       else:
+         combined_minutes = hours*60 + minutes
+     - But first validate that abs(minutes) is in 0..59 and that hours and minutes signs are consistent when hours is 0.
+
+3. Exact code patch suggestion (conceptual):
+   - Before existing validation, normalize minutes:
+     - if minutes < 0:
+         minutes = -minutes
+     - if minutes > 59:
+         raise ValueError("Minutes out of range: %d" % minutes)
+     - Then proceed to the existing combination code at lines 402/404.
+
+Summary
+- Root cause: minutes = -15 is rejected by validation because the method expects minutes to be a non-negative number; the sign should come from hours. Fix either by calling the API with minutes positive (DateTimeZone.for_offset_hours_minutes(-2, 15)) or by changing the method to accept negative minutes by normalizing minutes and applying the hours sign before validation.

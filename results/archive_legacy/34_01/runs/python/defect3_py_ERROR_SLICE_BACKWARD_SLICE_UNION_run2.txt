@@ -1,0 +1,54 @@
+What happened (what failed)
+- The function raises IndexError at lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- The error message says "String index out of range: 2". That means index == 2 was passed into this code, but len(code_units) was <= 2 (most likely 2), so the check detected an out-of-range access and raised.
+
+Why it happened (root cause)
+- The code is working with UTF-16 code units stored in code_units (built by to_utf16_code_units at line 10).
+- code_units indexes are 0..len(code_units)-1. Passing index == len(code_units) (or any index >= len(code_units)) is invalid.
+- The immediate cause: the caller passed index = 2 while code_units has only two elements (indices 0 and 1), so the bounds check at line 35 correctly fails and raises the IndexError.
+- A likely higher-level cause: the caller is mixing two different kinds of indexes:
+  - A "character" (Python code point / user-perceived character) index, or a count of Unicode code points, versus
+  - A UTF-16 code unit index used by this function.
+  Surrogate pairs occupy two UTF-16 code units but represent one Unicode code point. If the caller computed an index over code points (e.g., "third character") and passed that into code that expects a UTF-16 code-unit index, the value will be too large for code_units and produce this error.
+
+Where it occurred (lines / variables)
+- to_utf16_code_units(s: str) creates code_units (line 10 and line 12).
+- The bounds check that throws is at line 35–36; variable names involved: index and code_units.
+- The following logic (lines 38–44) expects index to be valid and may read code_units[index] and code_units[index + 1] (checking for a surrogate pair).
+
+Specific, actionable fixes (step-by-step)
+1. Confirm what index represents
+   - Decide whether the caller should pass a UTF-16 code-unit index (index into code_units) or a Unicode code-point/character index.
+   - If caller intended a codepoint/character index, do not pass it directly to this function.
+
+2. If callers should pass code-point indexes: convert to code-unit index before calling
+   - Build a mapping from code-point positions to code-unit positions while creating code_units:
+     - While constructing code_units, also record code_unit_index_for_codepoint[i] = current code_units length before appending the code units for the i-th code point.
+   - Then translate the caller's code-point index to the corresponding code-unit index and pass that to this code.
+
+3. If callers should pass code-unit indexes: validate at call site
+   - Before calling this function, check index < len(code_units). If index may equal len(code_units), adjust the logic or return a clear error earlier.
+
+4. Improve the error message (optional, small change)
+   - Include len(code_units) in the raised error for clearer debugging:
+     raise IndexError(f"String index out of range: {index} (len={len(code_units)})")
+
+5. Defensive API alternative
+   - If you want this function to accept code-point indexes as well, provide an explicit wrapper:
+     def codepoint_to_codeunit_index(s, cp_index): ...
+   - Or provide a safe accessor that returns None or raises a custom error after clearer validation.
+
+Concrete minimal fix example (if the problem is mixing indexes)
+- While building code_units, also build codepoint_to_codeunit list:
+  codepoint_to_codeunit = []
+  for cp in s:                          # iterate Python code points
+      codepoint_to_codeunit.append(len(code_units))
+      ...append UTF-16 code units for cp to code_units...
+- Then, when the caller has a code-point index cp_idx, convert:
+  cu_index = codepoint_to_codeunit[cp_idx]
+  value = read_at_codeunit_index(cu_index)   # this is the function that uses lines 35-44
+
+Summary
+- The IndexError is raised because index (2) is >= len(code_units). The root cause is most likely a mismatch between the caller's idea of "index" (code point/character index) and the function's expectation (UTF-16 code-unit index). Fix by converting code-point indexes to code-unit indexes or by ensuring callers pass a valid code_unit index; add clearer error messages or mapping data to avoid future confusion.

@@ -1,0 +1,37 @@
+What happened (root cause)
+- The code treats -0.0 as an integer at the integer-detection branch (line 176: if x == int(x) ...).
+- That branch immediately does value = int(x) (line 177). int(-0.0) yields 0 with no sign information, so the sign bit of -0.0 is lost right there.
+- Later, the code outputs the integer form using str(value) (line 192). Because value is the plain int 0, the output becomes "0" (or other unsigned integer forms) instead of "-0.0".
+- In short: the test for "integer" (line 176) and the conversion int(x) (line 177) remove the negative-zero sign before any special-case handling can preserve it.
+
+Where it occurs (specific lines)
+- Decision that x is integral: line 176
+- Loss of sign by converting to int: line 177 (value = int(x))
+- Emitting the unsigned integer form: line 192 (self.add(str(value)))
+- If the code eventually falls back to self.add(str(x)) (line 194), that would keep the "-0.0", but the integer branch intercepts -0.0 first and routes it to the integer output path, so line 194 is never reached for -0.0.
+
+Why that causes the failing test
+- The test expects negative zero to be printed as "-0.0" to preserve its sign. Because the integer branch converts to int and then prints that int, the printed result is "0" (no sign, no decimal), so the test fails with the missing "-0." shown in the failure message.
+
+Precise fix (step-by-step)
+1. Detect negative zero before the integer branch runs:
+   - Add a check at the top of the number handling routine (immediately before line 176) such as:
+     - if CodeConsumer.is_negative_zero(x): self.add("-0.0"); return
+   - This ensures -0.0 is handled specially and never converted to int(value).
+2. Use an accurate negative-zero test:
+   - Implement is_negative_zero with math.copysign (recommended) or bit-level inspection. For example:
+     - def is_negative_zero(x): return x == 0.0 and math.copysign(1.0, x) < 0.0
+3. Keep other logic unchanged:
+   - After the early-return above, the integer branch (lines 176–192) can continue to operate for normal integers without losing sign on -0.0 (it will never see -0.0).
+
+Why this fix is safe and minimal
+- It addresses only the special case that current code mishandles (negative zero).
+- It leaves all other numeric-path behavior intact (integers, floats, scientific notation).
+- It relies on CodeConsumer.is_negative_zero already referenced in the test suite, so it matches the intended utility.
+
+Optional alternative (if you prefer not to early-return)
+- Do not convert -0.0 to an int; instead, if x == int(x) and is_negative_zero(x) is True, format explicitly as "-0.0" before formatting value = int(x). But the early-return is simpler and less error-prone.
+
+Summary
+- Root cause: converting -0.0 to int (line 177) removes the sign bit, then printing str(value) (line 192) yields "0" rather than "-0.0".
+- Fix: check for negative zero before the integer-conversion branch and emit "-0.0" explicitly (use math.copysign-based is_negative_zero).

@@ -1,0 +1,65 @@
+What happened (symptom)
+- The test expects get_max_middle_index() to return 1 (the period with midpoint 150), but the test sees 3. That means the code picked the last-added element (index 3) as having the largest midpoint.
+- This happens when you add periods with midpoints [50, 150, 25, 75]; the correct max midpoint is 150 at index 1, but the routine ended up treating some other value (an index number) as the comparator and picked index 3.
+
+Root cause (exactly where and why)
+- The bug is in TimePeriodValues._update_bounds(). Inside the loop that walks the series and updates min/max trackers, the code compares a computed midpoint variable (often named mid) against the wrong variable: it uses the index variable (e.g. max_middle_index) instead of the stored numeric maximum midpoint value (e.g. max_middle).
+- Concretely, the faulty comparison is something like:
+    if mid > max_middle_index:
+        max_middle_index = i
+  Here max_middle_index is an integer index (0,1,2,3...), not the numeric midpoint value. Comparing mid (a timestamp/float) to an index produces meaningless results. After that erroneous comparison the code sets max_middle_index = i — so this logic effectively compares mid to an index and will sometimes treat later items as "bigger" just because their numeric midpoint happens to be greater than the current index value. That explains why index 3 could be chosen.
+- The same mistake is present in the branch that handles non-SimpleTimePeriod ("else" branch) as the test's MockTimePeriod hits it.
+
+Why that produces the observed output
+- When the loop reaches elements it compares mid to max_middle_index (an index like 0 or 1) instead of comparing to max_middle (the numeric midpoint from the previously recorded max). Because mid values (25, 75, 150, ...) can be greater than these small index numbers, the comparisons succeed at wrong times and the index variable gets overwritten incorrectly. The final stored max_middle_index becomes the index of the last item that satisfied the wrong comparison, here 3.
+
+Where it occurs (what to inspect)
+- Open TimePeriodValues._update_bounds() in hit04_timeperiod.py.
+- Look for comparisons that mention "mid", "max_middle_index", "min_middle_index", "max_middle", or "min_middle".
+- Specifically inspect statements that look like:
+    if mid > max_middle_index:   # <-- wrong
+    if mid < min_middle_index:   # <-- wrong
+  and the subsequent assignments that set max_middle_index = i or min_middle_index = i.
+
+How to fix (concrete steps and a minimal patch)
+1. In TimePeriodValues._update_bounds(), find the block where you compute the midpoint for each period, e.g.:
+       mid = (start_ts + end_ts) / 2
+   and where you maintain both the numeric extremes and their indices:
+       max_middle, max_middle_index, min_middle, min_middle_index
+2. Replace incorrect comparisons that use the index variable with comparisons against the numeric extreme. Change:
+       if mid > max_middle_index:
+           max_middle_index = i
+   to:
+       if mid > max_middle:
+           max_middle = mid
+           max_middle_index = i
+3. Similarly, change:
+       if mid < min_middle_index:
+           min_middle_index = i
+   to:
+       if mid < min_middle:
+           min_middle = mid
+           min_middle_index = i
+4. Do this for both branches of the code (the SimpleTimePeriod path and the generic TimePeriod "else" path) so both kinds of TimePeriod objects are handled correctly.
+5. Ensure that max_middle and min_middle are initialized from the first element’s midpoint before comparisons (or initialize them to -inf/+inf appropriately).
+
+Example of the problematic and corrected lines
+- Wrong:
+    # inside loop
+    mid = ...
+    if mid > max_middle_index:
+        max_middle_index = i
+- Correct:
+    # inside loop
+    mid = ...
+    if mid > max_middle:
+        max_middle = mid
+        max_middle_index = i
+
+Why this fix works
+- The corrected code compares a numeric midpoint value to the currently recorded numeric maximum midpoint (max_middle), so the condition means exactly what you intend: "if this midpoint is larger than the largest midpoint seen so far, record this midpoint and its index."
+- This prevents index values (like 0,1,2,3) from being misused as comparators and producing wrong indices.
+
+Final notes
+- After this change, rerun the test suite. The test with midpoints [50,150,25,75] should now yield get_max_middle_index() == 1.
+- Also scan other min/max comparisons (start and end min/max) to ensure the code always compares against the numeric extreme variable (e.g., max_start, min_end) and not against the corresponding index variable.

@@ -1,0 +1,55 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method validates the minutes with this check at lines 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects -15, so the method raises ValueError instead of returning a zone with id "-02:15".
+
+Why it failed (root cause)
+- The validation assumes minutes must be non‑negative (0..59). That does not match the test usage where the caller supplies a negative hours and a negative minutes to mean -2 hours 15 minutes.
+- The code never normalizes or permits negative minute values paired with negative hours, so the intended offset (-2h15m) is rejected at the minutes range check.
+
+Where it occurred
+- Method: DateTimeZone.for_offset_hours_minutes
+- Exact lines: 400–401 (the minutes validation and the raised ValueError)
+
+Concrete fixes (pick one and implement exactly as described)
+1) Prefer canonical API: require minutes to be non‑negative and compute sign from hours
+   - Change the caller contract or enforce it in the function.
+   - Implementation steps:
+     a. Update the docstring for for_offset_hours_minutes to say "minutes must be between 0 and 59; sign is taken from hours."
+     b. Keep the existing minutes check but make callers pass minutes as positive: for_offset_hours_minutes(-2, 15) instead of (-2, -15).
+     c. If you must accept the old negative-minute form for backward compatibility, add a compatibility branch (see option 2).
+
+2) Accept negative minutes consistently and normalize to total minutes
+   - Modify the validation and computation so minutes can be -59..59 and the final offset is hours*60 + minutes.
+   - Code changes to make:
+     - Replace the current check at lines 400–401 with:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+     - After validation compute total_offset_minutes = hours * 60 + minutes_offset
+     - If you want to enforce a consistent sign (no mixing +hours with -minutes), add:
+       if (hours > 0 and minutes_offset < 0) or (hours < 0 and minutes_offset > 0):
+           raise ValueError("Hours and minutes must have the same sign")
+     - Use total_offset_minutes for the rest of the logic (constructing the id and offset).
+   - This accepts (-2, -15) and returns id "-02:15".
+
+3) Normalize input to absolute minutes with sign derived from hours
+   - Implementation steps:
+     a. Require minutes in 0..59. If minutes < 0, convert minutes = abs(minutes) and flip hours sign or reject mixed sign.
+     b. Compute total_offset_minutes = abs(hours) * 60 + minutes
+     c. Apply sign = -1 if hours < 0 else +1
+     d. total_offset_minutes *= sign
+   - This is similar to option 1 but auto-fixes negative minutes from callers.
+
+Which fix to choose
+- If you control callers and can change tests, use option 1 (make callers pass positive minutes).
+- If callers may pass negative minutes and you want to accept that, use option 2 (allow -59..59 and normalize).
+- If you want to be permissive but clear, use option 3 (normalize negative minutes to a positive magnitude and use hours sign).
+
+Example minimal patch for option 2 (replace lines 400–401 and use total_offset):
+- Replace the minutes validation with: if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+- Add a same-sign check if desired as shown above
+- Compute total_offset_minutes = hours * 60 + minutes_offset and proceed
+
+This explains why your test fails (minutes -15 is rejected at lines 400–401) and gives explicit, testable ways to fix it.

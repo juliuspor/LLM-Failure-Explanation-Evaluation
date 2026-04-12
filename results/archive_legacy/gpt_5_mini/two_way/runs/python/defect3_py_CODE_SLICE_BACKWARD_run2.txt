@@ -1,0 +1,51 @@
+What goes wrong
+- The loop that updates pos after a translator consumes something is wrong. After
+  consumed = self.translate_codepoint(code_units, pos, out)
+  the code does:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- That calls code_point_at(code_units, pos) repeatedly while mutating pos. When pos reaches the end (or when a surrogate pair was already consumed by translate_codepoint), the next call to code_point_at is given an index that is out of bounds and raises IndexError from to_utf16_code_units (see the index check at lines 35–36 in your slice).
+- Concretely: translate_codepoint has already handled a surrogate pair (the comment says translators “just took care of a surrogate pair”). But the code still calls code_point_at at the same position, which will try to read a low surrogate or read past the end. That makes code_point_at hit the index check (index >= len(code_units)) and throw IndexError.
+
+Where it happens (specific names/locations)
+- The failing call is code_point_at(code_units, pos) in the for loop after consumed != 0.
+- The exception is raised in to_utf16_code_units at the index check (slice shows the IndexError being thrown at lines 35–36).
+- The variables involved: pos, length, consumed, code_units, and the helper code_point_at.
+
+Why this is the root cause
+- The translator indicates (via consumed) that it consumed some codepoints (and handled surrogate pairs). The loop then tries to re-examine the same positions with code_point_at to figure out how many UTF-16 code units to advance. That both repeats work the translator already did and can try to read past the end of code_units, producing an IndexError.
+- You should not call code_point_at at positions that have already been consumed or might be at the buffer end.
+
+Exact fixes (step‑by‑step)
+1. Confirm the contract of translate_codepoint:
+   - Does it return the number of UTF‑16 code units consumed, or the number of Unicode code points consumed?
+   - The fix depends on that. If it already returns the number of UTF‑16 code units, you should simply add that to pos. If it returns code points, you must convert code points to UTF‑16 code units safely.
+
+2. Replace the buggy for-loop with a single safe advancement. Two safe options:
+
+   A — If consumed is the number of UTF‑16 code units:
+      Replace
+          for pt in range(consumed):
+              pos += char_count(code_point_at(code_units, pos))
+      with
+          pos += consumed
+
+   B — If consumed is the number of Unicode code points (not code units):
+      Replace the for-loop with code that advances pos using a safe function that does not read past the end. For example:
+          for _ in range(consumed):
+              # read code_point_at only when pos < length and we have a valid sequence
+              cp = code_point_at(code_units, pos)   # only call when pos is valid
+              pos += char_count(cp)
+      But only use this if you guarantee code_point_at(pos) is safe at the current pos (i.e., the translator did not already advance/consume bytes beyond pos). If translate_codepoint already handled surrogate pairs at pos, this approach will still fail — so prefer option A unless you change the translator contract.
+
+3. Short, recommended change (most likely correct given the comment that translator “just took care of a surrogate pair”):
+   Replace the whole for-loop with:
+       pos += consumed
+
+Why this fix works
+- It avoids re-reading codepoints at positions that have already been handled by translate_codepoint.
+- It prevents calling code_point_at on an index equal to or past len(code_units), avoiding the IndexError you observed at lines 35–36.
+
+Summary
+- Root cause: pos is advanced by calling code_point_at repeatedly after translate_codepoint already consumed codepoint(s). That leads to code_point_at being called at an out-of-range index and throwing IndexError.
+- Fix: advance pos by the number of UTF‑16 code units consumed (pos += consumed) or otherwise compute the advance without calling code_point_at on positions that might be out of range — and verify translate_codepoint’s contract first.

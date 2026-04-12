@@ -1,0 +1,74 @@
+What happened (root cause)
+- At line 336 the code sets inferred_type = type(array). But array is the list object itself, so type(array) is list, not the element/component type you want to reason about. That makes inferred_type wrong whenever you pass a non-None list.
+- When both array and element are None the code falls through to inferred_type = object (line 340). Then the code checks:
+  if inferred_type == object and expected_type != object: raise TypeError (lines 346–347).
+  If expected_type is not supplied (None) or even when it is a real type like str, that comparison expected_type != object is True, so you raise TypeError erroneously in the case ArrayUtils.add(None, None, expected_type=str) or ArrayUtils.add(None, None).
+- Consequences:
+  - Calling ArrayUtils.add(None, None, expected_type=str) raises a TypeError instead of returning [None] with element type str (this is your test failure).
+  - Calling ArrayUtils.add(existing_list, element) will have inferred_type == list rather than the element type; later type checks that compare element types vs inferred_type will be wrong and can raise or mis-handle types.
+
+Where it occurs (specific lines/variables)
+- Line 336: inferred_type = type(array) — wrong because array is a list, not an element type.
+- Line 337: elif element is not None: inferred_type = type(element) — okay for the element case.
+- Line 340: inferred_type = object — used when both are None.
+- Lines 346–347: if inferred_type == object and expected_type != object: raise TypeError — this check is both wrong and too aggressive given expected_type can be None or a real type.
+
+Why that causes the failure for your test case
+- Test calls ArrayUtils.add(None, None, expected_type=str).
+- Flow: array is None, element is None → inferred_type = object (line 340).
+- Then code checks inferred_type == object (True) and expected_type != object (True because expected_type is str), so it raises TypeError (line 347). The test expects [None], not an exception.
+
+Clear, actionable fixes (step-by-step)
+1. Infer the element/component type correctly when array is provided:
+   - Replace inferred_type = type(array) (line 336) with code that inspects array's contents for a non-None element type. Example:
+     inferred_type = next((type(x) for x in array if x is not None), None)
+   - This yields None if the array has only None elements or is empty, and yields the first non-None element type otherwise.
+
+2. Use expected_type sensibly before deciding to raise:
+   - If no type can be inferred from array or element (both None or array contains only None), and expected_type is provided, use expected_type as inferred_type rather than raising.
+   - Only raise TypeError when you have two concrete, incompatible types (e.g., inferred element type vs expected_type or vs new element type) that cannot be reconciled.
+
+   Concretely:
+   - After attempting inference from array or element, do:
+       if inferred_type is None and expected_type is not None:
+           inferred_type = expected_type
+       elif inferred_type is None:
+           inferred_type = object
+   - Replace the current check at lines 346–347 with a compatibility check only when both inferred_type and expected_type are concrete and incompatible. For example:
+       if expected_type is not None and inferred_type is not object and not issubclass(inferred_type, expected_type) and not issubclass(expected_type, inferred_type):
+           raise TypeError("Incompatible expected_type and inferred element type")
+     (Adjust subclass logic to your exact compatibility rules.)
+
+3. Handle element == None correctly:
+   - If element is None, do not treat that as a source of concrete type; allow expected_type or array contents to determine the component type.
+   - When returning the new list, you can safely append None regardless of inferred component type — the type system decision is only for checking/validation, not for representing runtime lists in Python.
+
+Short code sketch to replace the problematic block (illustrative, adjust to your code style/lines):
+
+  if array is not None:
+      # infer from first non-None element, if any
+      inferred_type = next((type(x) for x in array if x is not None), None)
+  elif element is not None:
+      inferred_type = type(element)
+  else:
+      inferred_type = None
+
+  # if caller expects a specific type, prefer it when nothing concrete inferred
+  if inferred_type is None and expected_type is not None:
+      inferred_type = expected_type
+
+  if inferred_type is None:
+      inferred_type = object
+
+  # now perform actual compatibility checks only when both sides are concrete
+  if expected_type is not None and inferred_type is not object:
+      # only raise if definitely incompatible — adjust logic to your rules
+      if not issubclass(inferred_type, expected_type) and not issubclass(expected_type, inferred_type):
+          raise TypeError(...)
+
+Why this solves it
+- You stop treating the list object as the element type (fixes wrong inferred_type when array != None).
+- You don't raise simply because both array and element are None — you allow expected_type to determine the intended component type.
+- You only raise when real, incompatible types are known, avoiding false positives for None cases (like ArrayUtils.add(None, None, expected_type=str)).
+
+If you want, I can produce a small patched diff replacing lines 335–347 with the exact code to paste into your file.

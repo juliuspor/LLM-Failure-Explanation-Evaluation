@@ -1,0 +1,53 @@
+What happened (root cause)
+- The code uses type(array) to "infer" the element type when array is not None (see the first if: inferred_type = type(array)). That is wrong: type(array) returns the list class (<class 'list'>), not the type of the elements stored in the list.
+- Because of that wrong inference, two bad things happen:
+  1. When both array and element are None and expected_type=str (test_add_null_to_null_with_expected_type): the code falls through to inferred_type = object (line in your snippet) and later the check at lines 346–351 sees inferred_type == object and expected_type != object and raises the TypeError. The test expected [None], but the function raised a TypeError instead.
+  2. When array is non-empty, inferred_type becomes <class 'list'>, which is not the element type. That will make ArrayUtils._copy_list_grow1 receive the wrong "component" type and can cause incorrect behavior or type checks further down.
+
+Where it happens (specific lines and variables)
+- Lines 3–9 in your snippet: the inferred_type assignment logic
+  - if array is not None:
+      inferred_type = type(array)
+  - elif element is not None:
+      inferred_type = type(element)
+  - else:
+      inferred_type = object
+- Line creating new_list: new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — _copy_list_grow1 is being called with the wrong type value.
+- Lines 346–351 (slice block) perform the check:
+  - if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  This raises the error in test_add_null_to_null_with_expected_type because inferred_type ended up object.
+
+Why this causes the failing test
+- test_add_null_to_null_with_expected_type calls ArrayUtils.add(None, None, expected_type=str).
+- With the current inference logic, inferred_type becomes object (because array is None and element is None).
+- The code then raises at the explicit check for casting an object list to a narrower expected_type (lines 346–351), producing the TypeError that the test does not expect.
+
+Concrete fixes (step-by-step)
+1. Infer the component (element) type, not the list type:
+   - If expected_type is provided, prefer it as the inferred component type.
+   - Else, if array is not None and len(array) > 0, infer from the first element: inferred_type = type(array[0]).
+   - Else, if element is not None, inferred_type = type(element).
+   - Else, inferred_type = object.
+   This ordering ensures expected_type overrides, non-empty arrays give element type, and only fully unknown cases fall back to object.
+
+2. Replace the current block with something like:
+   if expected_type is not None:
+       inferred_type = expected_type
+   elif array is not None and len(array) > 0:
+       inferred_type = type(array[0])
+   elif element is not None:
+       inferred_type = type(element)
+   else:
+       inferred_type = object
+
+3. Keep or adjust the TypeError check if you still want to prevent creating an object[] when the caller expected a specific type. With the corrected inference, that check will only trigger when you truly cannot infer a more specific type but expected_type requests one.
+
+Why these steps work
+- Using type(array) returned the list class, not the element class — fixing that makes _copy_list_grow1 receive the correct element/component type.
+- Preferring expected_type first prevents the function from raising an error when caller explicitly asked for String (str) even though both array and element are None.
+- Inferring from array[0] yields the actual element type for non-empty arrays, avoiding incorrect behavior when extending existing arrays.
+
+Short summary
+- Bug: inferred_type = type(array) is wrong — it infers the list type instead of the element type. This makes the code raise the TypeError in lines 346–351 for ArrayUtils.add(None, None, expected_type=str) and leads to incorrect behavior for non-empty arrays.
+- Fix: infer from expected_type (if provided), else from array[0] when array is non-empty, else from element, else object.

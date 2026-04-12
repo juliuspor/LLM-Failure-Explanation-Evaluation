@@ -1,0 +1,37 @@
+What happened (where):
+- At LocaleUtils.to_locale (start shown at line 193) the code computes length = len(locale_str) (line 227) and then immediately uses the condition if length == 2: (line 236).
+- Inside that block the code reads characters at indices 3 and 4 (ch3 = locale_str[3], ch4 = locale_str[4]) and later accesses locale_str[5] (lines 242–251).
+- For the input 'fr__POSIX' the length is 9, so the condition if length == 2 is false and that whole parsing block is skipped. The method falls through and returns None (the function returns Optional[Locale]), so result is None and the assertion fails.
+
+Why it failed (root cause):
+- The condition at line 236 is wrong. The code only executes the logic that inspects positions 3..5 when length == 2, which will never be true for any string that actually has a country or variant. In short, the code never reaches the parsing branch for multi-part locale strings because of the wrong length check.
+- There is also an implicit assumption in that block that indices 3..5 exist; those index accesses require length >= 6, so the block should only run when the string is long enough. The current check (length == 2) is the opposite of what is needed.
+
+Exactly where to change and how (concrete steps):
+1. At line 236 replace the incorrect condition if length == 2: with properly ordered checks. A simple, correct structure is:
+   - if length == 2: return Locale(locale_str[0:2])    # language only
+   - elif length >= 3 and locale_str[2] == '_':      # there is at least the underscore after language
+       - if length == 5: parse and return Locale(language, country)
+       - elif length > 5 and locale_str[5] == '_': parse and return Locale(language, country, variant)
+       - else: raise ValueError for invalid format
+2. Concretely, change lines as follows:
+   - Replace the single branch starting at 236 with explicit branches:
+     - line 236: if length == 2: return Locale(locale_str[0:2])
+     - elif length >= 5:
+         ch3 = locale_str[3]
+         ch4 = locale_str[4]
+         (validate ch3/ch4)
+         if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+         if locale_str[5] != '_': raise ValueError(...)
+         return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+     - elif length == 3 and locale_str[2] == '_': return Locale(locale_str[0:2], '')  # language + empty country and maybe variant handled later
+     - else: raise ValueError(...)
+
+Why this fixes it:
+- The right checks ensure the code:
+  - returns immediately for plain "fr" (length == 2),
+  - only reads indices 3..5 when the string is long enough (avoids out-of-range),
+  - recognizes the pattern "fr__POSIX" where the country is empty and a variant follows after the second underscore, so it actually returns Locale('fr', '', 'POSIX') instead of None.
+
+Short verification:
+- With these changes, calling LocaleUtils.to_locale('fr__POSIX') will go into the branch that handles a language followed by underscores+variant and will return Locale('fr', '', 'POSIX'), making your assertion pass.

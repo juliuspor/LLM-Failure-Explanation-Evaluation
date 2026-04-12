@@ -1,0 +1,60 @@
+What happened (where, exactly)
+- At lines 396–397 your code checks minutes_offset and raises a ValueError when it is outside 0..59:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The exception message shows the actual value was -15, so minutes_offset was set to -15 and triggered the check.
+
+Why it happened (root cause)
+- The code that computes minutes_offset produced a negative value (-15). The check at line 396 expects minutes_offset to be a non‑negative minute count in the range 0–59, but whatever logic created minutes_offset did not normalize the sign correctly.
+- Common ways this happens:
+  - You computed minutes_offset from a signed total offset (for example total_minutes = sign * (hours*60 + minutes)) but then extracted minutes as total_minutes % 60 (or by subtracting hours*60) without preserving or applying the sign correctly. That can yield a negative remainder like -15 rather than a non‑negative 0–59.
+  - You subtracted minute components (e.g. minutes_offset = local_minutes - reference_minutes) and did not borrow/normalize when the result was negative.
+- The failure occurs exactly at the range check (lines 396–397). The code is correct to reject negative minutes if it expects 0–59, but the real bug is upstream where minutes_offset is computed with the wrong sign/normalization.
+
+How to find the exact upstream code (where to look)
+1. Search for assignments or calculations of minutes_offset before line 396. Example patterns:
+   - minutes_offset = total_minutes % 60
+   - minutes_offset = total_offset - hours_offset*60
+   - minutes_offset = some_value - other_value
+2. Look at parsing code for time zone offsets or deltas (strings like "+01:30" or "-00:15") — these commonly produce signed totals and then split into hours/minutes.
+3. Put a quick trace/log right before the check to see the inputs used to compute minutes_offset:
+   - log total_minutes, sign, hours, minutes, any intermediate values.
+
+Concrete fixes (specific steps you can apply)
+1. If minutes_offset comes from a signed total in minutes (total_minutes):
+   - Compute sign and absolute minutes first:
+     - sign = 1 if total_minutes >= 0 else -1
+     - abs_minutes = abs(total_minutes)
+     - hours = abs_minutes // 60
+     - minutes_offset = abs_minutes % 60
+     - Then apply sign to hours only (or to the composed offset), not to minutes. Keep minutes_offset in 0..59.
+   - Example correction:
+     - total = signed_total_minutes
+     - s = 1 if total >= 0 else -1
+     - h = (abs(total) // 60) * s
+     - m = abs(total) % 60   # now m is 0..59
+2. If minutes_offset is a difference of minute fields (local_minutes - ref_minutes):
+   - Normalize by borrowing:
+     - if minutes_offset < 0:
+         minutes_offset += 60
+         hours_offset -= 1
+3. If parsing a string like "-00:15":
+   - Treat the sign separately and only attach it to the whole offset, not to the minutes field:
+     - parsed_sign = -1
+     - parsed_hours = 0
+     - parsed_minutes = 15
+     - minutes_offset = parsed_minutes  # 15, not -15
+     - final_offset = parsed_sign * (parsed_hours*60 + parsed_minutes)
+
+Tests to add
+- Unit tests that exercise signed negative small offsets, e.g. "-00:15", "-01:30", and positive offsets "+00:15".
+- Edge cases: "-00:00", "+00:00", minutes exactly 0 and 59.
+- Roundtrip test: parse -> compose -> parse again yields same total minutes.
+
+Short checklist you can apply now
+- Find where minutes_offset is assigned (upstream of line 396).
+- Log the intermediate values that lead to minutes_offset being -15.
+- Apply one of the concrete fixes above (separate sign from components or borrow normalization).
+- Re-run unit tests that include negative minute offsets.
+
+This explains the immediate cause (minutes_offset is -15 so the range check fails at lines 396–397), the likely upstream logic error (sign/normalization when splitting a signed total into hours/minutes), where to look, and specific fixes and tests to implement.

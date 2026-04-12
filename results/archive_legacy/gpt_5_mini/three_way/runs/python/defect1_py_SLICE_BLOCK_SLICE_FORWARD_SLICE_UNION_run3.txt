@@ -1,0 +1,42 @@
+What happens
+- The code checks minutes_offset for being between 0 and 59 at lines 396–397 before it applies the sign/combination logic at 402–405.
+- If the caller provides a negative minutes field (for example parsing "-02:-30" the minutes value can be -30 at this point), the early check at line 396 sees minutes_offset < 0 and immediately raises ValueError("Minutes out of range: -30").
+- But the code later (lines 402 and 404) is supposed to combine hours and minutes into a signed total (hours_in_minutes ± minutes_offset) and then multiply to millis (line 405). Because the validation occurs too early, valid inputs that represent negative offsets are rejected incorrectly.
+
+Where this happens
+- The failing check is at 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The code that needs to run before the check is at 402 and 404, where minutes_offset is adjusted relative to hours:
+  minutes_offset = hours_in_minutes - minutes_offset
+  minutes_offset = hours_in_minutes + minutes_offset
+- After that the code computes offset and returns (lines 405, 408).
+
+Why it fails (root cause)
+- The validator assumes minutes_offset is an unsigned minute value (0..59), but the parser produces a signed minutes_offset that must be combined with the hours sign first. The check therefore rejects valid signed-minute inputs because it tests the raw minutes_offset too early.
+
+Concrete fix (step-by-step)
+Option A — Move the validation after minutes is combined:
+1. Remove lines 396–397.
+2. After the block that computes minutes_offset relative to hours (after lines 402–405, before safe_multiply on line 405), validate that the minute component used was in 0..59. Concretely, compute an absolute-minute variable before combining or recover the minute component and check 0 <= abs(minutes_component) <= 59.
+   - This ensures you validate the minute magnitude, not its temporary signed representation.
+
+Option B — Validate the absolute value up front:
+1. Replace the early check with a check of the absolute value:
+   - if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Keep the sign/combining logic at 402–405 as-is. That prevents rejecting negative minutes like -30 while still rejecting values whose magnitude exceeds 59.
+
+Which to pick
+- Option A is the cleanest if the code intends to validate the minute field after the sign/combination logic (keeps responsibilities in the same place where minutes and hours are combined).
+- Option B is the simplest minimal patch: change the check to use abs(minutes_offset) so you validate magnitude immediately.
+
+Example minimal patch (Option B):
+- Change lines 396–397 from:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  to:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+That resolves the immediate failure: negative minutes like -30 will not trigger the erroneous early ValueError, and out-of-range magnitudes like 75 still will be rejected.

@@ -1,0 +1,79 @@
+Short answer: the test failed because the code produced a positive zero (0) while the test expected a negative zero (-0.0). Positive zero and negative zero are numerically equal, so ordinary equality checks can hide the difference; the test framework’s equality/printing revealed the sign mismatch. I can’t point to the exact file/line in your repo without the stack trace and source, but below I explain exactly what happens, where to look, and precise fixes you can apply.
+
+What happened (root cause)
+- Floating-point numbers have a sign bit. -0.0 and 0.0 are distinct at the bit level even though most arithmetic treats them as equal.
+- Your test assertion compared an expected value that was signed negative zero (-0.0) against an actual value that was positive zero (0.0).
+- The equality used by your assertion either: (a) checked bit-level identity or (b) compared stringified/output values that included the sign, so the framework reported “Expected -0.0, got 0”.
+- The code that produced positive zero likely lost the negative sign earlier (an operation that yields +0.0 from -0.0, e.g., division by Infinity, negation of zero being lost by conversion, or formatting), so the actual value no longer had the sign bit.
+
+Where to look (exact places in your code/tests)
+1. Open the stack trace that came with the AssertionError. The topmost test file and line are the failing assertion — note the file and line number (e.g., tests/foo_test.py:42 or test/foo.test.js:27).
+2. In that test file, find the assertion line. Common assertion calls to inspect:
+   - Python unittest / pytest: self.assertEqual(expected, actual) or assert actual == expected
+   - Node/Jest: expect(actual).toBe(expected) or expect(actual).toEqual(expected)
+   - Node/assert: assert.strictEqual(actual, expected)
+3. Note the variable names used on that line — typically expected and actual (or a specific variable name like result). Those are the two values compared.
+4. Trace backward from the actual value: open the function under test and find where the floating-point value is computed/returned. Search for operations that can produce +/-0.0: negation, division, rounding steps, conversions, or any explicit sign handling.
+
+Why this exact assertion failed (concrete examples)
+- Example A (JavaScript/Jest):
+  - Test line: expect(result).toBe(-0.0)
+  - result was 0  (positive zero). In JS, -0 === 0 is true but Object.is(-0, 0) is false. Jest’s message prints the differing signs.
+- Example B (Python/pytest):
+  - Test line: assert result == -0.0
+  - result is 0.0. Python prints “Expected -0.0, got 0.0” if the test frameworks prints the expected literal; the sign bit was lost before the assertion.
+
+How to confirm (exact commands / checks)
+- In JavaScript, run near the failing assertion:
+  - console.log('result:', result, 'Object.is(result, -0)', Object.is(result, -0));
+  - console.log('Math.sign(result):', Math.sign(result));
+  If Object.is(result, -0) is false and Math.sign(result) is 1 (or 0), result is +0.
+- In Python, run:
+  - import math, struct
+  - print(result, math.copysign(1.0, result))  # will show -1.0 for negative zero
+  - Or check sign bit: struct.pack('!d', result) to inspect bits.
+
+Concrete fixes (choose the one appropriate and follow steps)
+1. If the test should not require negative zero
+   - Change the test to accept numeric equality rather than sign-sensitive equality.
+   - JS: use expect(result).toEqual(expectedValue) or compare with === but avoid expecting -0 unless sign matters.
+   - Python: assert result == expected_value (and if you compared string representations, compare numbers instead).
+   Steps:
+     a. Edit the test file at the failing line (see stack trace).
+     b. Replace expect(...).toBe(-0) with expect(...).toBeCloseTo(0) or remove the explicit negative sign.
+     c. Re-run tests.
+
+2. If the sign of zero is important
+   - Make the assertion check the sign explicitly.
+   - JavaScript fix (exact code):
+     - Replace expect(result).toBe(-0) with:
+         expect(Object.is(result, -0)).toBe(true);
+       or:
+         expect(Math.sign(result)).toBe(-0 ? -1 : -0); // simpler: expect(Object.is(result, -0)).toBe(true)
+   - Python fix (exact code):
+     - Use math.copysign or struct to check sign:
+         import math
+         assert math.copysign(1.0, result) == -1.0
+       or compare bit representation:
+         import struct
+         assert struct.pack('!d', result) == struct.pack('!d', -0.0)
+   Steps:
+     a. Edit the failing test assertion line to one of the replacements above.
+     b. Re-run tests.
+
+3. If the function under test should preserve negative zero but doesn’t
+   - Fix the implementation to preserve the sign bit where required. Common culprits:
+     - Converting to integer and back (e.g., parseFloat/string conversions can drop sign)
+     - Using Math.abs, Math.round, or similar which may drop sign for zero
+     - Replacing -0 with 0 by normalization logic
+   Steps:
+     a. In the function file (trace back using stack trace), find the line(s) where the value becomes zero.
+     b. Add explicit handling to keep sign when needed (e.g., avoid Math.abs, ensure negation is applied properly).
+     c. Add unit tests that assert Object.is(result, -0) or Python math.copysign to prevent regression.
+     d. Run test suite.
+
+If you want I can point to the exact line and show the minimal code edit. Please paste:
+- the failing test file with the exact assertion line (or the failing stack trace showing file:line),
+- and the implementation function that produces the value (the function that the test calls).
+
+With those I will give an exact one-line change you can apply to either the test (if sign shouldn't matter) or the implementation (if sign must be preserved).

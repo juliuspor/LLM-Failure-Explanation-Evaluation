@@ -1,0 +1,43 @@
+What happened (where it fails)
+- At the top of for_offset_hours_minutes you check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This rejects any negative minutes_offset (line shown in your slice is the check just before the arithmetic). Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15). Because minutes_offset is -15 the method raises ValueError immediately and never reaches the code that builds the offset. That is why the test fails.
+
+Why that check is wrong (root cause)
+- The method later expects to be able to handle negative minute values (the later arithmetic tries to combine a negative hours value with minutes), so forbidding negative minutes is inconsistent with the rest of the function and with the API the test expects.
+- The arithmetic after that validation (lines around 402–405) also assumes minutes_offset is non-negative: it branches on hours_in_minutes < 0 and either subtracts or adds minutes_offset. That logic only works when minutes_offset is non-negative; if minutes_offset is allowed negative, the branch produces the wrong total (and the current validation prevents negative inputs anyway).
+
+Precise places to change
+1) Validation (remove the current rejection of negative minutes). Replace
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with a range that allows negative minute values, e.g.:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2) Combining hours and minutes (lines in your slice)
+- Replace the branching logic
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  with a simple, clear addition of signed minute values:
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why the fix works
+- Allowing minutes_offset to be negative lets callers express offsets like -2 hours and -15 minutes.
+- Adding signed minutes (hours_in_minutes + minutes_offset) produces the correct total minutes for all sign combinations:
+  - hours=-2, minutes=-15 -> -120 + (-15) = -135 -> -02:15 as expected
+  - hours=+2, minutes=15 -> 120 + 15 = 135 -> +02:15
+  - mixed-sign inputs (if you want to forbid oppositely signed hour/minute combos, add a check) will be computed consistently; if mixed-sign inputs should be invalid then add an explicit check requiring minutes_offset to have same sign as hours_offset (or allow zero).
+
+Suggested minimal code change (lines to modify)
+- Change minutes validation to: if minutes_offset < -59 or minutes_offset > 59: raise ...
+- Replace the branching combine with total_minutes = hours_in_minutes + minutes_offset and then use safe_multiply(total_minutes, ...)
+
+That will make DateTimeZone.for_offset_hours_minutes(-2, -15) return an ID of '-02:15' as your test expects.

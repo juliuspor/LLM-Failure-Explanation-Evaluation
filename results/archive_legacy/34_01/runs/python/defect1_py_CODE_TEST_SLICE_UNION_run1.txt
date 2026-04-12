@@ -1,0 +1,41 @@
+What happened (where it fails)
+- The method DateTimeZone.for_offset_hours_minutes rejects any negative minutes at the validation on lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15). Because minutes_offset is -15 the method raises ValueError before it ever computes the combined offset. The failure therefore occurs at that validation (lines 396–397).
+
+Why it fails (root cause)
+- The code does not allow negative minutes even when the hours argument is negative. The method intends to support offsets like -02:15, but the strict minutes check forbids negative minute values, so valid inputs such as (-2, -15) are treated as invalid.
+- The later logic (lines 401–405) assumes minutes_offset may be combined with hours_in_minutes to produce a signed total, but validation prevents negative minutes from reaching that code path.
+
+Exactly where to change it (concrete steps)
+1. Accept minute arguments whose sign is consistent with the hours sign (or accept signed minutes and interpret appropriately). Do not unconditionally reject minutes < 0.
+2. Normalize minutes by using its absolute value for range checking and then apply the sign of hours (or the explicit sign of minutes if you want to allow a zero hours with negative minutes).
+3. Compute total_minutes explicitly instead of reusing minutes_offset for both validation and accumulation.
+
+Suggested replacement implementation (clear steps + code)
+- Validate hours: keep existing check.
+- Validate minutes: require 0 <= abs(minutes_offset) <= 59.
+- Require that minutes_offset has the same sign as hours_offset, unless hours_offset == 0 (decide policy — below I allow a signed minutes when hours == 0).
+- Compute total_minutes = hours_offset*60 + sign * abs(minutes_offset), where sign is -1 if hours_offset < 0 or minutes_offset < 0 (if hours == 0).
+- Convert to millis and return.
+
+Example corrected body (conceptual code you can paste in)
+    if hours_offset == 0 and minutes_offset == 0:
+        return cls.UTC
+    if hours_offset < -23 or hours_offset > 23:
+        raise ValueError(f"Hours out of range: {hours_offset}")
+    # Accept signed minutes but check absolute range
+    abs_minutes = abs(minutes_offset)
+    if abs_minutes > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    # Ensure minute sign is consistent with hour sign, unless hours == 0
+    if hours_offset != 0 and (hours_offset > 0) != (minutes_offset >= 0):
+        raise ValueError("Minutes sign must match hours sign")
+    # Compute total minutes
+    total_minutes = hours_offset * 60 + (minutes_offset if hours_offset == 0 else (abs_minutes if hours_offset > 0 else -abs_minutes))
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    return cls.for_offset_millis(offset)
+
+Why this fixes the test
+- With (-2, -15) abs_minutes = 15 (<=59), signs match (hours < 0 and minutes < 0), total_minutes = -2*60 + -15 = -135, which becomes -02:15 once converted to millis and to the zone id.

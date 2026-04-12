@@ -1,0 +1,51 @@
+What happened (root cause)
+- At line 176 your code tests "if x == int(x) ..." to detect integer-valued floats.
+- For x = -0.0 this comparison is True because Python treats -0.0 == 0 as True.
+- Then at line 177 you do value = int(x), which produces 0 (losing the negative sign).
+- Later (line 192) you call self.add(str(value)), which adds "0".
+- Result: the negative zero's sign is lost before you ever check for or preserve it, so "-0.0" becomes "0".
+
+Where it occurs
+- The loss happens between line 176 and 177: the equality check and the int() conversion collapse -0.0 to 0 and therefore you never output the negative sign.
+
+Why the equality test is unsafe for distinguishing -0.0
+- x == int(x) only checks numeric equality; it does not preserve IEEE-754 sign bit. Negative zero compares equal to positive zero, so the test cannot distinguish them.
+
+Concrete fixes (ordered, specific, and minimal)
+1. Detect negative zero before you enter the integer branch (before line 176).
+   - Add a guard like:
+     if CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+         return
+   - This ensures -0.0 is handled immediately and never converted to int.
+
+2. Alternatively, exclude negative zero from the integer branch at line 176:
+   - Change line 176 to:
+     if x == int(x) and not CodeConsumer.is_negative_zero(x) and not math.isinf(x) and not math.isnan(x):
+   - Then add a separate case (above or after) to emit "-0.0" when is_negative_zero(x) is True.
+
+3. Implementation details for is_negative_zero if missing:
+   - A robust is_negative_zero implementation is:
+     @staticmethod
+     def is_negative_zero(x):
+         return x == 0.0 and math.copysign(1.0, x) < 0.0
+   - Or using 1.0/x == float('-inf') also works: x == 0.0 and math.copysign(1.0, x) < 0.0 is preferred.
+
+Exact place to change
+- Add the negative-zero guard immediately before line 176 (the branch that starts integer handling), or update the condition on line 176 as shown above.
+
+Why these fixes work
+- They detect the sign bit before any int() conversion or stringification that would collapse -0.0 to 0, so you can emit "-0.0" explicitly and preserve the sign.
+
+Minimal code example (replacement around lines 174–178)
+- Before:
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        value = int(x)
+- After (option A: early guard):
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        value = int(x)
+
+This addresses the failing test "Expected -0.0, got 0" by ensuring -0.0 is recognized and printed as "-0.0" before any int() conversion removes the sign.

@@ -1,0 +1,50 @@
+What happened (where it failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) raised ValueError: "Minutes out of range: -15".
+- The exception is thrown at line 396 by this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15, that condition is true and the method errors out before it ever reaches the sign-handling code at lines 402–405 that would have converted the minutes to a negative combined offset.
+
+Why it failed (root cause)
+- The method validates minutes_offset too early and only accepts non-negative minutes (0..59).
+- Later, at lines 402–405, there is logic intended to handle negative hours by converting minutes_offset into a negative total when hours are negative. But that logic is never reached because the early validation has already rejected negative minutes.
+- In short: the validation at line 396 assumes minutes must be non-negative, but the caller passed a negative minutes value. The sign-handling code exists but is unreachable because of the prior check.
+
+Exactly where to change it
+Two clear, concrete fixes (pick one):
+
+Option A — require callers to pass non-negative minutes (no code change, change usage)
+- Change your call to use a positive minutes argument and use the sign on hours:
+  zone = DateTimeZone.for_offset_hours_minutes(-2, 15)
+- This requires no code changes; it conforms to the current validation that minutes must be 0..59.
+
+Option B — accept signed minutes and normalize inside the method (code change)
+- Allow minutes_offset to be negative before normalization and move/adjust the validation so the sign-handling code runs first. Replace the check at line 396 with a range check that allows signed minutes, or move the check after lines 402–405.
+- Concretely, change lines around 396–405 like this (pseudo-edit showing the minimal change):
+
+  # remove or change the early rejection of negative minutes
+  # OLD (lines ~396–397):
+  # if minutes_offset < 0 or minutes_offset > 59:
+  #     raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  # NEW (allow signed minutes up front; validate absolute value later)
+  if minutes_offset > 59 or minutes_offset < -59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  # existing sign-handling code (402–405) then converts minutes_offset to the proper signed
+  # total minutes when hours are negative:
+  if hours_offset < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+  # proceed to compute offset milliseconds...
+
+- This ensures a minutes_offset of -15 passes initial check and then is combined with negative hours to produce a -135 minute offset (-2 hours and -15 minutes = -135 minutes).
+
+Which to choose
+- If the public API is intended to accept signed minutes (your test expects it), implement Option B so for_offset_hours_minutes(-2, -15) works.
+- If the API is intended to accept only non-negative minutes, use Option A and change calls/tests to pass positive minutes with the negative hours.
+
+Summary
+- The method rejects negative minutes at line 396 before the sign-conversion at lines 402–405 can run. Either make callers pass positive minutes, or change the validation so negative minutes are allowed and normalized (see exact code change above).

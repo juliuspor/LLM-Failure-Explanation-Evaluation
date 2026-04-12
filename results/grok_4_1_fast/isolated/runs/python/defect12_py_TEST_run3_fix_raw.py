@@ -1,0 +1,34 @@
+@staticmethod
+def abbreviate(
+    text: Optional[str], lower: int, upper: int, append_to_end: Optional[str]
+) -> Optional[str]:
+    if text is None:
+        return None
+    if len(text) == 0:
+        return StringUtils.EMPTY
+
+    str_len = len(text)
+    if upper == -1 or upper > str_len:
+        upper = str_len
+    if upper < lower:
+        upper = lower
+
+    # Adjust lower to string length if beyond
+    if lower > str_len:
+        lower = str_len
+
+    # Validate: offset can't be greater than maxWidth
+    if lower > upper:
+        raise ValueError(f"Offset ({lower}) can't be greater than maxWidth ({upper})")
+
+    index = StringUtils.index_of(text, " ", lower)
+    if index == -1:
+        result = substring_java(text, 0, upper)
+        if upper != str_len:
+            result += StringUtils.default_string(append_to_end)
+        return result
+
+    if index > upper:
+        return substring_java(text, 0, upper) + StringUtils.default_string(append_to_end)
+
+    return substring_java(text, 0, index) + StringUtils.default_string(append_to_end)

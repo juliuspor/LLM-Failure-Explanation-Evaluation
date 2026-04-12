@@ -1,0 +1,49 @@
+What happened (root cause)
+- At line 344 you set inferred_type = type(array). That returns the list object’s class (e.g. built-in list), not the type of the list’s elements. The code is trying to decide the element type, but it is using the container’s type.
+- Because of that wrong inference, later logic and the call to ArrayUtils._copy_list_grow1 receive an incorrect inferred_type. That leads to a mismatch with expected_type and the TypeError raised at lines 346–351.
+- Concretely: if array is None and element is None you explicitly set inferred_type = object (line 346 in your slice). That triggers the raise at lines 346–351 when expected_type is not object. But you likely intended to detect element-type, not container-type, so the function ends up treating the list as an object-list and complains it cannot cast to the expected element type.
+
+Where it fails (exact lines)
+- Wrong inference: line 344: inferred_type = type(array)
+- Fallback to unknown element type: line 346: inferred_type = object
+- Exception thrown when inferred_type == object and expected_type != object: lines 346–351 (the TypeError you see)
+
+Why this is wrong (short)
+- type(array) gives the class of the list object, not the element type.
+- If you have an empty array or both array and element are None you fall back to object and then you reject casting to a concrete expected_type even when it would be valid.
+- The code assumes it can determine element type from the container with type(array), which it cannot.
+
+Concrete fixes (step-by-step)
+1. Decide what you really want to infer:
+   - If you want the element type, inspect the element argument first, then inspect contents of array if element is missing.
+2. Replace the inference lines with logic that picks an element-type, not the container class:
+   - If element is not None: inferred_type = type(element)
+   - elif array is not None and len(array) > 0: inferred_type = type(array[0])
+   - elif expected_type is not None: inferred_type = expected_type
+   - else: inferred_type = object
+3. Update the equality check (optional but clearer): use "is" to check against object rather than ==:
+   - if inferred_type is object and expected_type is not object: raise ...
+4. Ensure ArrayUtils._copy_list_grow1 expects the element type. If it expects a container class, change the API or pass the correct value.
+
+Example replacement for the inference block
+- Replace:
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+- With:
+    if element is not None:
+        inferred_type = type(element)
+    elif array:
+        inferred_type = type(array[0]) if len(array) > 0 else (expected_type or object)
+    else:
+        inferred_type = expected_type or object
+
+Why this will fix it
+- You now infer the element type (from element, then from existing array contents, then from expected_type), so the later TypeError is raised only when you truly cannot know the element type and expected_type requires a stricter type than object.
+
+If you want, I can:
+- Propose a full replacement of the function using these fixes, or
+- Show tests that reproduce the original failure and confirm the corrected behavior.

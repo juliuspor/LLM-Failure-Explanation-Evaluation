@@ -1,0 +1,37 @@
+What happened (where it failed)
+- The code throws ValueError("Minutes out of range: ...") at lines 400–401:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects the minutes value before the sign of the whole offset has been applied. Later (lines 406–409) the code assumes the minutes part is a non‑negative quantity that will be added to or subtracted from the hour component:
+  406 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 408 |                 minutes_offset = hours_in_minutes + minutes_offset
+ 409 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code treats the minutes field inconsistently:
+  - The validation at 400–401 expects minutes_offset to be in the range 0..59 or else it throws immediately.
+  - But the parsing/representation that reaches this check sometimes produces a negative minutes_offset (for example when the sign was applied to the minutes token instead of being kept as an overall sign), making the check fail even though the overall timezone offset is valid.
+- In short: the code validates minutes before normalizing/signing them to the final offset. If the minutes token carries a negative sign, the check at line 400 incorrectly treats that as an invalid minutes value, so valid offsets like "-05:30" (or inputs where the minutes token was parsed with a negative sign) can be rejected.
+
+Exactly where to change it (concrete steps)
+1. Decide a single representation for the minutes part before validation:
+   - Option A (preferred): Parse minutes as a non‑negative value (0..59) and carry the sign separately (from the hours/token sign). Validate minutes against 0..59 after you strip any sign (i.e., validate absolute minutes).
+   - Option B: If minutes may be negative in the parser, accept negative minutes but validate its absolute value is <= 59 and then apply the overall sign consistently.
+2. Implement the change in the method containing lines 400–409:
+   - Before the check at line 400, ensure minutes_offset is normalized to a non‑negative value and that an explicit sign variable (e.g., offset_sign) holds the intended sign of the whole offset.
+   - Replace the current check with one that uses the absolute minutes value:
+       if abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Then when composing the final minutes total (lines 406/408), use the offset_sign (or the sign of hours_in_minutes) to add or subtract the minutes consistently:
+       if offset_is_negative:
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+       else:
+           total_minutes = hours_in_minutes + abs(minutes_offset)
+   - Finally compute offset from total_minutes at line 409.
+3. Add/fix unit tests:
+   - Tests that exercise positive offsets (e.g., +05:30), negative offsets (e.g., -05:30), zero-hour negative-minute cases (e.g., -00:30 if your format allows), and any malformed minute inputs (>59 or <-59). Verify ValueError only for genuinely out‑of‑range minute magnitudes.
+
+Why this fixes it
+- Normalizing the minutes sign (step 2) ensures the range check tests the magnitude of the minute component (0..59) rather than rejecting valid offsets whose parsed minutes token happened to be negative. Composing the final offset using a single sign variable ensures hours and minutes get the same sign and avoids the inconsistent behavior that caused the ValueError at lines 400–401.
+
+If you paste the surrounding function (parsing and sign extraction lines) I can give an exact patch for the few lines to change.

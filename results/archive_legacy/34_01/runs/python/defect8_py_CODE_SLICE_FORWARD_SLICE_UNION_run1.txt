@@ -1,0 +1,43 @@
+What happens
+- The failure comes from the length check at line 222:
+  if length != 2 and length != 5 and length < 7:
+  That expression is wrong for the intent and lets invalid values slip or rejects valid ones in surprising ways, causing subsequent indexing/validation to run on strings of the wrong length (and then raise IndexError or ValueError later).
+
+Why it fails (root cause)
+- The code intends to accept three length classes:
+  - length == 2 (language only)
+  - length == 5 (language + "_" + country)
+  - length >= 7 (language + "_" + country + "_" + variant)
+- The current boolean expression does not correctly express "not (length == 2 or length == 5 or length >= 7)". Instead it evaluates as ((length != 2) and (length != 5) and (length < 7)). That has different truth table behavior and leads to incorrect acceptance/rejection for some inputs.
+- Concretely, the condition as written can let lengths that should be rejected reach the later code or wrongly reject others, and then the later indexing (e.g. locale_str[3], locale_str[4], locale_str[5], locale_str[6:]) runs on strings that are too short, raising IndexError or letting malformed strings pass deeper checks and producing ValueError further down.
+
+Where it occurs (lines and variables)
+- Line 222: length = len(locale_str)
+- Line 223 (the problematic check): if length != 2 and length != 5 and length < 7:
+- Later reads that will fail when the length check is wrong:
+  - line 237: ch3 = locale_str[3]
+  - line 238: ch4 = locale_str[4]
+  - line 245: if locale_str[5] != '_':
+  - line 247: return Locale(..., locale_str[6:])
+
+How to reproduce quickly
+- Call to_locale("en_U") (length 4) — the length check will raise (expected).
+- Call to_locale("en_US") (length 5) — should succeed.
+- Call to_locale("en_USX") (length 6) — currently the condition rejects it, but note that length 6 is invalid anyway; the real problem shows up when someone changes acceptance rules or when off-by-one variants appear and indexing errors appear.
+- The general symptom in your stack traces will be IndexError at one of the lines that index into locale_str (e.g. ch3 = locale_str[3]) or unexpected ValueError messages caused by the wrong branch being taken.
+
+Exact fix (step-by-step)
+1. Replace the length-check expression with one that clearly encodes the intended accepted lengths. Two safe, clear forms:
+   - Using subset-of-allowed-lengths:
+     if not (length == 2 or length == 5 or length >= 7):
+         raise ValueError(f"Invalid locale format: {locale_str}")
+   - Or using De Morgan's law equivalently:
+     if length != 2 and length != 5 and length < 7:  # current, confusing — replace with above
+2. Keep the rest of the checks the same (underscore at index 2, uppercase country letters at 3 and 4, underscore at 5 if variant present).
+3. Add unit tests for edge cases: lengths 1..8, exact valid samples ("en", "en_US", "en_US_POSIX"), and invalid samples ("en-US", "e", "en_U", "en_US_").
+
+Why the suggested replacement is correct
+- if not (length == 2 or length == 5 or length >= 7): directly and unambiguously rejects any length that is not allowed, so the later fixed-index accesses (locale_str[3], [4], [5], [6:]) are only performed when the string is long enough.
+
+Small note
+- Keep the initial "if locale_str is None: return None" if callers may pass None, otherwise consider removing the None check and changing the type annotation to avoid mixing None and str.

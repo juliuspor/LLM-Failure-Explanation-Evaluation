@@ -1,0 +1,35 @@
+What happened (where)
+- The code raises ValueError at line 396:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- This happens while building the total offset millis just before it multiplies minutes_offset by MILLIS_PER_MINUTE (line 405) and calls cls.for_offset_millis. The minutes value being validated is minutes_offset, which is also used later in these lines:
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 404 |                 minutes_offset = hours_in_minutes + minutes_offset
+ 405 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code treats minutes_offset as if it must always be in the non-negative range 0..59 (line 396). That assumption is wrong for negative-hour offsets, because earlier logic produces a negative minutes_offset for offsets like "-00:30" or "-0:30".
+- Concretely: if you pass an offset with a negative sign and a nonzero minute component (for example "-00:30"), minutes_offset will be -30. The check at line 396 flags minutes_offset < 0 and throws "Minutes out of range: -30" even though "-30 minutes" is a valid part of a negative offset.
+- In short: the code validates minutes_offset before normalizing/applying the sign, so valid negative minute parts get rejected.
+
+Exactly where to change it (step-by-step fixes)
+1. Normalize or apply the sign before validating the minute magnitude:
+   - Ensure minutes_offset reflects the absolute minute magnitude for the range check, or
+   - Move the range check until after you have computed the signed minutes (after you apply hours_in_minutes ± minutes_offset at lines 402/404).
+2. Two concrete code options:
+   Option A (apply absolute for validation)
+   - Replace line 396 with:
+       if abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+     Or compute minutes_abs = abs(minutes_offset) and use that in the later math.
+   Option B (validate after sign handling)
+   - Remove lines 396–397.
+   - After you compute the final signed minutes at lines 402/404, validate that the minute component used in the arithmetic was within 0..59 (use abs on the minute component if needed).
+3. Add a unit test that reproduces the failure:
+   - Parse offsets like "-00:30" and "-0:30" and assert the code accepts them and returns the expected millis.
+
+Why these fixes work
+- They ensure only the magnitude of the minute component is constrained to 0..59, while allowing that magnitude to carry a negative sign when the whole offset is negative. This prevents false positives (raising for -30) while preserving the intended range check (reject values like 75).
+
+If you want, paste the surrounding parsing code and I’ll show the exact minimal patch to apply.

@@ -1,0 +1,49 @@
+What happened (where it failed)
+- The exception is raised in Locale.to_locale (method to_locale), lines 237–240:
+  - At line 237 the code does: ch3 = locale_str[3]; ch4 = locale_str[4]
+  - At line 239 it checks: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(f"Invalid locale format: {locale_str}")
+- The input string was "fr__POSIX". For that string:
+  - locale_str[0:2] == "fr" (language)
+  - locale_str[2] == '_' (separator)
+  - locale_str[3] == '_' (there is an empty country, so index 3 is another underscore)
+  - locale_str[4] == 'P' (start of variant)
+- Because ch3 is '_' (underscore), the test ch3 < 'A' or ch3 > 'Z' is true, so the code raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it failed (root cause)
+- The parser assumes the pattern after the first underscore is always a two-letter uppercase country code (positions 3 and 4).
+- It does not handle the valid form where the country is empty and a variant follows (language + "__" + variant), which produces two underscores in a row (e.g. "fr__POSIX").
+- Concretely: the code rejects any character that is not 'A'..'Z' at locale_str[3] and locale_str[4]; an underscore at locale_str[3] is a valid situation for a language-with-empty-country but the code does not special-case it, so it raises the ValueError at lines 239–240.
+
+How to fix it (concrete steps and exact changes)
+1. Add a branch to detect an empty country (double underscore) before the strict A..Z checks:
+   - Check locale_str[3] == '_' to mean "no country; variant starts at index 4".
+2. Return a Locale with country = '' and variant = locale_str[4:] in that case.
+
+Exact change (pseudo-patch you can apply around lines 237–247):
+
+Replace this block (lines ~237–240):
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+With this logic:
+  ch3 = locale_str[3]
+  ch4 = locale_str[4] if len(locale_str) > 4 else None
+  # handle empty country: "xx__variant" -> country = '', variant = rest after second underscore
+  if ch3 == '_':
+      # variant begins at index 4
+      return Locale(locale_str[0:2], '', locale_str[4:])
+  # otherwise expect two uppercase letters for country
+  if ch4 is None or ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+(Adjust indices/length checks to match the surrounding code style.)
+
+Notes and edge cases to consider
+- Ensure you only test locale_str[3] after confirming len(locale_str) > 3.
+- Decide whether empty country should produce country='' or None; above uses empty string to match common Locale signatures.
+- Also consider validating the variant (e.g., non-empty) if required by your API.
+
+Summary
+The parser rejects "fr__POSIX" because it expects a two-letter uppercase country at locale_str[3:5]. In "fr__POSIX" locale_str[3] is '_' (empty country), so the A..Z check fails. Add an explicit branch to accept the double-underscore form and return Locale(language, '', variant) to fix the error.

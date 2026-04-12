@@ -1,0 +1,58 @@
+What happened
+- The assertion fails because GrayPaintScale.get_paint(-0.5) does not return (0, 0, 0) for a negative input.
+- Root cause: get_paint treats the input value as an index or position inside the valid range but does not guard against values < 0. The code that converts the value to an array index (or to a 0..1 scale) produces a negative index, and that negative index is then used to index the color array — in Python a negative index wraps from the end. So instead of returning the first color (black) you get a color from the end of the array (likely white or some other color), causing the assert to fail.
+
+Where it occurs
+- Inside the GrayPaintScale.get_paint(...) method: the conversion step from the input numeric value to an internal index/position is un-checked. Typical problematic line patterns are:
+  - index = int(value * (len(colors) - 1))
+  - color = colors[index]
+  Because value is -0.5, index becomes negative, and colors[index] picks an element from the array end.
+
+Why that exact behavior happens
+- In Python, list[-1] returns the last element. So a negative index does not raise an error — it silently returns the wrong element.
+- The method assumed inputs are in-range (e.g. 0..1) but the test passes -0.5 and get_paint lacks input validation or clamping.
+
+How to reproduce reliably
+- Call get_paint with any negative value, e.g. get_paint(-0.5) or get_paint(-1.0). The returned color will correspond to colors[-N] instead of the first color.
+
+Concrete fixes (pick one)
+1) Clamp the input to the valid range at the start of get_paint
+   - Where: at the top of GrayPaintScale.get_paint(self, value)
+   - Code to add:
+     value = max(0.0, min(1.0, value))
+   - Effect: negative values become 0.0 and get_paint(-0.5) will return the color for 0.0 (black).
+
+2) Validate and raise an error for out-of-range inputs
+   - Where: top of get_paint
+   - Code to add:
+     if not (0.0 <= value <= 1.0):
+         raise ValueError(f"value out of range: {value!r} (expected 0.0..1.0)")
+   - Effect: caller must pass only valid inputs; failing the test will raise ValueError instead of silently returning the wrong color.
+
+3) Protect index computation (if you prefer to keep mapping code unchanged)
+   - Where: right after computing index
+   - Code to add:
+     if index < 0:
+         index = 0
+     elif index >= len(colors):
+         index = len(colors) - 1
+   - Effect: prevents negative or out-of-range indexing into colors.
+
+Suggested minimal change for your test
+- Add clamping at function start (option 1). That matches the test’s expectation that negative values map to black.
+
+Example patch (modify get_paint):
+- Replace start of method with:
+  def get_paint(self, value):
+      # ensure value is in 0..1
+      value = max(0.0, min(1.0, value))
+      # ...rest of existing code that computes index/color...
+
+Verification
+- After adding clamping, the test you showed:
+  gps = GrayPaintScale()
+  color = gps.get_paint(-0.5)
+  assert color == (0, 0, 0)
+  will pass, because -0.5 is clamped to 0.0 and returns the black color.
+
+If you want, paste the current GrayPaintScale.get_paint implementation and I will produce an exact diff showing where to insert the clamp or the validation and run through edge cases.

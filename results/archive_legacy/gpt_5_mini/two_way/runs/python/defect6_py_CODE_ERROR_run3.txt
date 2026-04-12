@@ -1,0 +1,45 @@
+What happened (root cause)
+- The code goes into the integer branch when x == int(x). For x == -0.0 that is True, so the code executes:
+      value = int(x)
+  That converts -0.0 to the integer 0 and loses the negative sign. Later you call self.add(str(value)) and get "0" instead of "-0.0".
+- Two facts cause this:
+  1. int(-0.0) == 0 (conversion discards the negative-zero sign).
+  2. The test x == int(x) is True for -0.0, so you take the integer path instead of preserving the float sign.
+
+Where it occurs in your code
+- The problem occurs at the lines
+      if x == int(x) and not math.isinf(x) and not math.isnan(x):
+          value = int(x)
+  (the cast to int causes the sign loss), and the result is later added with self.add(str(value)).
+
+Why the sign is lost but x is negative
+- IEEE-754 floats have a distinct negative zero; comparisons treat -0.0 == 0.0 as True, and int(-0.0) yields 0. Also -0.0 < 0 is False, so your earlier spacing logic (if x < 0 and prev == '-') also does not detect negative zero.
+
+Concrete fixes (step-by-step)
+1) Detect negative zero before converting to int and handle it explicitly. Because you already use math, use math.copysign to detect sign:
+   - Insert this check before "value = int(x)":
+       if x == 0.0 and math.copysign(1.0, x) < 0:
+           # preserve negative zero representation expected by your tests
+           self.add("-0.0")
+           return
+   This keeps the current flow and immediately emits "-0.0" for negative zero.
+
+2) (Optional) If you want a more general approach to preserve a leading '-' when appropriate:
+   - Use math.copysign(1.0, x) < 0 to detect negativity instead of x < 0 (because -0.0 < 0 is False).
+   - Only convert to int when you are sure you can discard sign (e.g., positive integers).
+
+Complete small patch showing where to put it
+- Replace the start of the integer branch with:
+
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        # preserve negative zero sign (x == 0.0 is True for both 0.0 and -0.0)
+        if x == 0.0 and math.copysign(1.0, x) < 0:
+            self.add("-0.0")
+            return
+
+        value = int(x)
+        ...
+
+Notes
+- This exact check emits "-0.0" because your test expects "-0.0". If you prefer a different negative-zero formatting (e.g., "-0"), adjust the string inside self.add accordingly.
+- Also consider replacing other uses of x < 0 with math.copysign(1.0, x) < 0 when you need to detect a negative sign even for -0.0.

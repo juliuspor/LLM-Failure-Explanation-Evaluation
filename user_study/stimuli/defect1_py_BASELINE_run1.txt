@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The code raises ValueError: "Minutes out of range: -15" at the validation on lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes (minutes_offset < 0), so calling DateTimeZone.for_offset_hours_minutes(0, -15) triggers the exception immediately.
+
+Why it fails (root cause)
+- The docstring (and the tests) allow minutes in the range -59..+59, including negative minutes when hours == 0 (see "zero    -ve    (0, -15)   -00:15") and also allow negative minutes when hours are negative.
+- But the code enforces minutes only in 0..59. This mismatched validation at line 396 prevents valid inputs such as (0, -15) or (-2, -15).
+- Later code (lines 402 and 404) expects to handle negative minutes:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  This arithmetic assumes minutes_offset can be negative; however the earlier check never lets those values through.
+
+Where in the code to look
+- Validation that fails: lines 396–397 (minutes range check).
+- Subsequent computation that expects negatives: lines 402–405 (hours_in_minutes and combining hours/minutes), and final conversion at line 405.
+
+Clear, actionable fixes (step-by-step)
+1. Allow minutes to be in -59..+59 instead of 0..59:
+   Replace the failing check
+     if minutes_offset < 0 or minutes_offset > 59:
+   with
+     if minutes_offset < -59 or minutes_offset > 59:
+   This change permits negative minute values like -15.
+
+2. Enforce the docstring rule that positive hours cannot be combined with negative minutes:
+   Add a check after the minutes-range check:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes must be non-negative when hours are positive")
+   (Alternatively raise the same style ValueError as elsewhere.)
+
+3. (Optional sanity) Ensure the handling of mixed signs matches intended behavior:
+   - The current combining logic at lines 402–404 aims to produce a single total minutes value; once (1) and (2) are applied, that logic should work for the allowed combinations:
+     - positive hours with positive minutes,
+     - zero hours with either sign minutes,
+     - negative hours with either sign minutes treated as additional negative minutes.
+
+Example minimal patch (illustrative)
+- Change lines near 396–397 to:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours are positive")
+
+Why this fixes the failing test
+- The failing test calls (0, -15). With switch (1) the minutes check no longer rejects -15. Condition (2) does not trigger because hours_offset == 0, so the method proceeds to the combination logic that produces -15 minutes and ultimately returns the expected -00:15 zone.
+
+Summary
+- The immediate bug is the minutes validation restricting minutes to 0..59 (line 396). Change it to -59..59 and add a check to forbid positive hours with negative minutes. This aligns the code with the docstring and the tests and prevents the ValueError for (0, -15).

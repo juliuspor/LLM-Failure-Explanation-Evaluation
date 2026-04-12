@@ -1,0 +1,46 @@
+What happens
+- At line 396 the code rejects any negative minutes_offset:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That makes any negative minutes_offset immediately throw "Minutes out of range".
+
+- Later, at line 402 the code expects to be able to handle negative minute offsets:
+  minutes_offset = hours_in_minutes - minutes_offset
+  That line is only meaningful if minutes_offset can be negative (the code is trying to combine negative hour and minute parts into a single minutes value). But because of the earlier check (line 396), negative minute inputs never reach line 402 — they already caused the ValueError.
+
+Root cause (exact and concrete)
+- The conditional on line 396 uses the sign of minutes_offset directly. It treats negative minutes as invalid, but the later logic (line 402) assumes minutes_offset may be negative and adjusts accordingly. In short: the range check at line 396 is wrong for negative offsets. The code should validate the magnitude of the minute component, not its signed value.
+
+Where it occurs
+- Validation: line 396.
+- Expected handling of negative minutes: line 402 (and the alternative path at line 404 for positive minutes).
+- Symptom: ValueError("Minutes out of range: ...") raised for valid inputs that include negative minute offsets.
+
+Why this causes failure
+- A negative minute component of a timezone offset (for example hours = -5, minutes = -30) is valid representation when combined with hour sign. Because the code rejects negative minutes immediately, such valid combined offsets are rejected rather than being converted to total minutes and then to milliseconds at line 405.
+
+How to fix it (step-by-step, exact changes)
+1. Change the range check at line 396 to validate the absolute value of minutes_offset instead of its sign. Replace:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with:
+     if minutes_offset < 0 or minutes_offset > 59:   <-- bad: rejects negative minutes
+   or better, explicitly check magnitude:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This ensures -0..-59 and 0..59 are allowed by magnitude.
+
+2. Ensure downstream logic uses the minute sign consistently:
+   - If hours_in_minutes carries the sign for the hour component, then when minutes_offset is negative you should subtract the absolute minute part:
+       if minutes_offset < 0:
+           minutes_offset = hours_in_minutes - abs(minutes_offset)
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+   - Or normalize sign earlier: determine a sign = -1 or +1 from the hour sign and apply minutes_offset = sign * abs(minutes_offset) before combining.
+
+3. After fixing the validation, keep the conversion to milliseconds at line 405:
+     offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+   and preserve the "offset too large" check already present (line 407).
+
+Summary
+- The code fails because line 396 rejects negative minute components even though lines 402/404 expect to handle negative minutes. Change the validation to check magnitude (abs(minutes_offset) <= 59) and make sure the minute combination logic applies the correct sign when producing the final minutes_offset before conversion to milliseconds.

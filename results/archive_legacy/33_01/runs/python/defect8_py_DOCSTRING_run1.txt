@@ -1,0 +1,82 @@
+I can’t see the function body you’re running, so I can’t point to the exact failing line number in your file. But I can explain, precisely and concretely, the single set of root causes that always breaks an implementation matching your docstring and what to change. I’ll refer to the names you used in the docstring/summary so you can map them to your code: LocaleUtils.to_locale, locale_str, language, country, variant.
+
+What actually fails (root cause)
+- Most implementations that follow this docstring fail when they parse and validate locale_str because they assume parts exist or check case/length incorrectly. The typical concrete failure modes are:
+  1. IndexError or ValueError thrown when locale_str does not contain the expected underscores (e.g. "en" or "en-GB" or ""). This happens because the code slices by fixed indices or accesses array elements without checking the number of parts after split.
+  2. False negatives when validating language/country case because the code uses language.islower() or country.isupper() on empty strings or on strings that include non-letter characters (digits, hyphens). Those methods return False for the empty string or for strings with non-letters, causing an unexpected ValueError.
+  3. Incorrect separator handling: code accepts hyphen ('-') or other separators but then later enforces underscore, or vice versa, producing inconsistent validation and throwing ValueError.
+  4. Variant handling mistakes: code uppercases or lowercases the variant incorrectly, or assumes a variant is always present when splitting into three parts, causing index errors or wrong output.
+  5. Off-by-one length checks: code checks the wrong length (for example, requiring country length == 3 instead of 2) and raises ValueError for valid input.
+
+Where this happens (what lines to inspect)
+Locate these places in LocaleUtils.to_locale and inspect the exact statements:
+
+- The split/parsing line(s)
+  - e.g. parts = locale_str.split('_') or language = locale_str[0:2]
+  - Problem: accessing parts[1] or parts[2] without checking len(parts) (IndexError)
+- The case/length validation for language
+  - e.g. if len(language) != 2 or not language.islower(): raise ValueError(...)
+  - Problems:
+    - language could be "" (empty) if locale_str starts with '_'
+    - islower() returns False for "" or for strings containing non-letters
+- The case/length validation for country
+  - e.g. if len(country) != 2 or not country.isupper(): raise ValueError(...)
+  - Problem: country may be missing or contain digits; .isupper() returns False for non-letter characters
+- Variant handling
+  - e.g. variant = parts[2] or variant = locale_str[3:]
+  - Problem: assuming variant exists causes IndexError; altering case may conflict with JDK behaviour
+- Early return for None
+  - e.g. if locale_str is None: return None
+  - Ensure this check appears before any operations on locale_str
+
+What happened in plain language
+- The code assumes a strict format (language, optional country, optional variant) but does not robustly handle the shorter valid forms (like "en") or inputs that use the wrong separator ("en-GB"). When the code tries to read a part that isn’t present (parts[1] or parts[2]) or calls .islower()/.isupper() on an empty or non-letter string, Python raises IndexError or the validation branch raises ValueError and your function rejects a valid locale or crashes.
+
+Concrete steps to reproduce and confirm the failure
+1. Call LocaleUtils.to_locale("en") and see whether an IndexError or ValueError occurs.
+2. Call LocaleUtils.to_locale("en-GB") and see whether it rejects the input because of the hyphen.
+3. Call LocaleUtils.to_locale("") and see whether it raises ValueError or IndexError.
+4. Call LocaleUtils.to_locale(None) to ensure it returns None and does not crash.
+
+Precise fixes (step-by-step)
+1. Add an early None/empty guard (line near start of to_locale):
+   - if locale_str is None: return None
+   - if not locale_str: raise ValueError("Empty locale string")
+2. Parse safely:
+   - parts = locale_str.split('_')
+   - language = parts[0]
+   - country = parts[1] if len(parts) > 1 else ""
+   - variant = parts[2] if len(parts) > 2 else ""
+   This avoids IndexError from direct indexing.
+3. Validate properly:
+   - For language:
+     - require 2 <= len(language) <= 3? (docstring says language code must be lowercase — typically 2 letters)
+     - Prefer: if len(language) not in (2,3) or not language.isalpha() or not language.islower(): raise ValueError(...)
+       (use .isalpha() to reject digits/hyphens)
+   - For country:
+     - if country:
+         - if len(country) != 2 or not country.isalpha() or not country.isupper(): raise ValueError(...)
+   - For variant:
+     - if variant:
+         - if not all(c.isalnum() or c == '_' for c in variant): raise ValueError(...)
+         - Do not change case of variant (docstring notes JDK differences; preserve input)
+4. Enforce separator rule only at parse time:
+   - If the input used hyphen and you want to reject it, check for '-' and raise ValueError early.
+5. Return a Locale constructed with exactly the language, country, variant you derived (even if country or variant are empty strings).
+
+Example of the exact fixes to look for in your file (replace the existing lines):
+- Replace fragile indexing like:
+  - language = locale_str[0:2]
+  - country = locale_str[3:5]
+  with the safe parts[] approach above.
+- Replace naive case checks like:
+  - if not language.islower(): raise ValueError(...)
+  with:
+  - if not language or not language.isalpha() or not language.islower() or len(language) not in (2,3): raise ValueError(...)
+
+Why this will stop the failure
+- Using parts and checking len(parts) eliminates IndexError from missing parts.
+- Using .isalpha() plus explicit length checks avoids false negatives from .islower()/.isupper() on empty strings or strings with non-letters.
+- Preserving variant case and only validating characters avoids altering behaviour across JDK versions and prevents accidental rejection.
+
+If you want, paste the full body of your LocaleUtils.to_locale function and I’ll mark the exact failing line numbers and show the smallest patch to fix it.

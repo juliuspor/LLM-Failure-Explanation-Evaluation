@@ -1,0 +1,58 @@
+What happened
+- The failing test calls LocaleUtils.to_locale("fr__POSIX") from test_locale_with_empty_country_variant (the line that does this is the call result = LocaleUtils.to_locale("fr__POSIX")).
+- LocaleUtils.to_locale raises ValueError("Invalid locale format: fr__POSIX") while validating the country part.
+- Root cause: the parser in LocaleUtils.to_locale assumes that if there is an underscore after the 2-letter language code then the country must be two uppercase letters at fixed positions, and it checks a character at a fixed index (the character after the first underscore) for being an uppercase letter. For the input "fr__POSIX" that character is '_' (because the country is empty and the string has a double underscore), so the validation code treats that as an invalid country and raises the ValueError.
+
+Why that check fails on "fr__POSIX"
+- The method is checking positions rather than logical parts. It expects the layout:
+  - language = s[0:2]
+  - separator = s[2] must be '_'
+  - country = s[3:5] must be uppercase letters
+  - maybe variant after another '_' at s[5]
+- For "fr__POSIX" the bytes are: 'f' 'r' '_' '_' 'P' ...
+  - s[3] is '_' not an uppercase letter, so the code triggers the “invalid country” path.
+- The Java test comment even expects to accept language__variant (empty country) form: Java equivalent assertValidToLocale("fr__POSIX", "fr", "", "POSIX"). The Python parser is missing that special-case.
+
+Where in the code this is happening
+- The failure originates inside LocaleUtils.to_locale when it validates the country part. The immediate caller is test_locale_with_empty_country_variant in the test file (the line result = LocaleUtils.to_locale("fr__POSIX")).
+- The problematic validation is the code path that inspects fixed string indices (for example checking s[3].isupper() or similar) instead of inspecting split parts.
+
+How to fix it (specific, actionable steps)
+1. Do not rely on fixed character indexes for country/variant. Parse into parts and handle empty country explicitly.
+2. Use split with a maxsplit of 2: parts = locale_str.split('_', 2). This yields:
+   - parts[0] => language
+   - parts[1] => country (may be "" if double underscore)
+   - parts[2] => variant (if present)
+3. Validate each part logically:
+   - language: must be length 2 and lowercase (or allowed empty behavior per your spec)
+   - country: allow either empty string or length 2 uppercase
+   - variant: allow any non-empty string when present
+4. Return Locale(language, country, variant) with country="" when parts[1] == "".
+
+Concrete code sketch to replace the fragile index-based logic in LocaleUtils.to_locale:
+
+- Start of to_locale:
+  - if locale_str is None: return None
+  - parts = locale_str.split('_', 2)
+  - language = parts[0]
+  - country = parts[1] if len(parts) > 1 else ""
+  - variant = parts[2] if len(parts) > 2 else ""
+- Validation:
+  - if not (len(language) == 2 and language.islower()): raise ValueError(...)
+  - if country != "" and not (len(country) == 2 and country.isupper()): raise ValueError(...)
+  - if variant and '_' in variant: (optional) handle or reject depending on spec
+- Return Locale(language, country, variant) (if variant is "", you can omit third arg if your Locale constructor supports it; tests expect Locale("fr", "", "POSIX") for the variant case).
+
+Why this fix solves the failing test
+- For "fr__POSIX", split('_', 2) produces ["fr", "", "POSIX"]. country becomes "", which is accepted by the updated validation, and variant becomes "POSIX". The function returns Locale("fr", "", "POSIX") instead of raising ValueError.
+
+Minimal code example (two-line change approach)
+- If you prefer minimal surgery: before the country-character check, add an explicit check for double underscore:
+  - if len(s) > 3 and s[2] == '_' and s[3] == '_':
+      - treat as language + empty country + variant starting at s[4:]
+      - skip the country uppercase-letter validation
+- That is less robust than splitting, but fixes the immediate bug while changing fewer lines.
+
+Summary
+- The failure is a validation bug in LocaleUtils.to_locale: it assumes a non-empty country at a fixed index and does not allow the legal language__variant form (empty country, double underscore).
+- Fix by parsing on underscores (split('_', 2)) and allowing country == "" or by explicitly handling the double-underscore case before the fixed-index validation. Either approach will make the test that calls LocaleUtils.to_locale("fr__POSIX") pass.

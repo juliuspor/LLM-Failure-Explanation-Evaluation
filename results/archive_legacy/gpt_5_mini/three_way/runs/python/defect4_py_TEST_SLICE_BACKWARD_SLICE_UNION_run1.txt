@@ -1,0 +1,42 @@
+What happened (root cause)
+- The bug is in TimePeriodValues._update_bounds: the code compares or assigns the wrong thing when updating the stored index for extremes. Instead of comparing numeric values (start, end, middle), it ends up using index variables (or unconditionally overwriting the stored index). That produces wrong indices (e.g. get_max_middle_index() returning 3 instead of 1).
+
+Where it occurs
+- Method: TimePeriodValues._update_bounds
+- Problem lines (from the slice you provided): lines 340–349 and the same pattern appears for the other bounds (max/min middle, max/min end):
+  - 340: if self._min_start_index >= 0:
+  - 341:     min_start_period = self.get_data_item(self._min_start_index).get_period()
+  - 342–345: code handles SimpleTimePeriod and generic TimePeriod to set min_start (numeric)
+  - 346:     if start < min_start:
+  - 347:         self._min_start_index = index
+  - 349:     self._min_start_index = index
+
+Why that causes the failure
+- Wrong comparison target: The code correctly computes start (line ~335) and retrieves min_start (lines 341–345). But elsewhere in _update_bounds (the same pattern used for middle/end), the code compares the current value against the wrong variable — comparing to an index instead of the stored numeric value — or mixes up the stored numeric value and the stored index variable.
+- Unconditional overwrite: After the conditional update at line 346–347, line 349 unconditionally assigns self._min_start_index = index, which defeats the conditional above. That means the stored min index always becomes the latest index, regardless of whether the new start is actually smaller. The same unconditional-assignment pattern is what makes get_max_middle_index return the last index instead of the correct max-middle index.
+
+Concrete example (from your test)
+- Test adds items with midpoints: indices 0(50), 1(150), 2(25), 3(75).
+- Correct max middle is at index 1 (value 150).
+- Because _update_bounds uses the wrong comparison/assignment, it ends up overwriting the stored index with index 3 (the last processed), or otherwise comparing numeric middle values to an index variable, producing wrong decisions. That's why get_max_middle_index() returns 3 instead of 1.
+
+What to change (specific fixes and steps)
+1. In _update_bounds, always compare numeric values to numeric values. For example:
+   - Compute current numeric value (e.g. start, end, middle) and store it in a local variable (start, end, middle).
+   - Retrieve the stored numeric extreme from the currently stored index (e.g. use get_data_item(self._min_start_index).get_period() and compute its start in milliseconds), store in min_start (numeric).
+   - Compare current numeric to min_start using if start < min_start:.
+
+2. Only assign the index when the comparison indicates it should change. Remove any unconditional assignment that follows the conditional. Concretely, remove line 349 (the unconditional self._min_start_index = index) so the index only updates inside the if block.
+
+3. Make sure for max/min middle and max/min end you use consistent variable names:
+   - Use e.g. max_middle_value (numeric) and self._max_middle_index (index) — do not compare an index variable to a numeric value.
+   - When updating, do: if middle > max_middle_value: self._max_middle_index = index; max_middle_value = middle.
+
+4. Repeat the above for min_start, max_start, min_end, max_end, min_middle, max_middle. Ensure you initialize the numeric reference correctly when the stored index is -1 (first item) and set both the stored numeric value and stored index at that time.
+
+Quick code-level checklist
+- Remove unconditional assignments (line 349 pattern).
+- Ensure comparisons use min_start, max_start, min_end, max_end, min_middle, max_middle (numeric), not index variables.
+- Update only the corresponding index variable (e.g. self._min_start_index) when the numeric comparison dictates.
+
+If you want, paste the full _update_bounds method here and I will produce a corrected version applying those exact changes.

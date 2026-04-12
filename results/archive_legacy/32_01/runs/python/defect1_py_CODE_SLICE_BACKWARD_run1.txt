@@ -1,0 +1,51 @@
+What happened
+- The failure comes from the validation at lines 400–401 in for_offset_hours_minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects negative minute values. But callers can (and do) pass a negative minutes_offset when the hours_offset is negative (for example hours_offset = -1, minutes_offset = -30 to represent -1:30).
+- Later in the method the code expects to combine hours and minutes with a sign-aware calculation:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  ...
+- That calculation assumes minutes_offset can be a positive magnitude that is subtracted when hours are negative (or that callers can pass a negative minutes_offset). Because the earlier check disallows negative minutes, a valid intent like -1 hour and -30 minutes never gets past the validation and the method raises "Minutes out of range".
+
+Why this is the root cause (short)
+- The validation is inconsistent with the rest of the method and with the intended input semantics. Either callers should be allowed to pass a signed minute value, or the method should treat minutes as a magnitude and accept only 0..59 and combine it using the sign of hours. As written, the code rejects inputs the later logic expects to handle.
+
+Where it happens
+- Method: for_offset_hours_minutes (the code shown)
+- Failing lines: the minutes validation check (lines 400–401 in your slice) triggers the exception before the combination logic runs.
+
+How to fix it (concrete steps)
+Option A — treat minutes as a signed value (allow negative minutes):
+1. Change the validation to allow -59..59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Ensure the combination logic uses minutes_offset's sign correctly (current code subtracts minutes when hours_in_minutes < 0, which will double-negate if minutes_offset itself is negative — so adjust the combination to a single expression shown in option B if you prefer clarity).
+
+Option B — treat minutes as an unsigned magnitude and make the sign come only from hours:
+1. Keep minutes_offset constrained to 0..59 (as current).
+2. Replace the in-place reuse of minutes_offset with a new variable total_minutes and compute it from the sign of hours:
+   hours_in_minutes = hours_offset * 60
+   if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+   else:
+       total_minutes = hours_in_minutes + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Return cls.for_offset_millis(offset)
+   This makes intent explicit and avoids confusing reuse of the minutes parameter.
+
+Recommended: use Option B if the API should accept minutes as 0..59 and the sign comes only from hours. If the API is supposed to accept signed minutes, use Option A and then compute total_minutes = hours_in_minutes + minutes_offset (no extra subtract).
+
+Example concrete replacement (Option B) for the block around the combination (replace lines after the minutes check):
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+This resolves the contradiction between validation and use and prevents the "Minutes out of range" error for valid negative offsets.

@@ -1,0 +1,83 @@
+I can’t tell exactly which line in your source is failing because you didn’t paste the code, but I can explain the single, predictable root cause that matches this docstring and gives the failure you describe, show where in the factory to look, and give a concrete, correct implementation and tests you can copy.
+
+Summary of the root cause
+- The factory must allow a negative minute value when hours == 0 (to produce offsets like -00:15). A common bug is a validation that rejects any negative minutes when hours are non‑positive (hours <= 0) or when hours are not positive (hours >= 0), or conversely, a check that rejects negative minutes whenever hours is not negative.
+- In other words: the code that enforces “minutes must not be negative when hours are positive” is implemented incorrectly and ends up rejecting the (0, negative) combination that should be allowed. That causes a ValueError at the validation block in the factory.
+- Another common related mistake is applying the sign incorrectly when combining hours and minutes into a single offset (e.g., doing hours*3600 + minutes*60 without applying the minutes sign relative to hours), which produces wrong offsets or out‑of‑range values and triggers the final range check.
+
+Where to look in your code
+- The validation block near the top of the factory (the function whose docstring you posted) that checks ranges and sign rules for hours and minutes.
+- The code that converts hours and minutes into a single integer offset (seconds or milliseconds). Look for the expressions that multiply hours and minutes and add them together.
+- The final range check that enforces the +/- 23:59:59 limit — if you computed the sign incorrectly, this check will fail.
+
+Why this happens (concrete example)
+- Suppose you pass (hours=0, minutes=-15). The docstring says the result should be -00:15.
+- Faulty validation code often uses a condition like:
+    if minutes < 0 and hours >= 0:
+        raise ValueError("minutes must be non-negative when hours are non-negative")
+  That rejects (0, -15) incorrectly because it treats zero hours as “non-negative” in the same sense as “positive”.
+- If conversion to seconds is done without normalizing sign, e.g.:
+    total_seconds = hours * 3600 + minutes * 60
+  then for (hours=-2, minutes=15) you get -7200 + 900 = -6300 (correct), but for (hours=2, minutes=-15) you get 7200 - 900 = 6300 (which is positive and should have been rejected per the docstring), or you may accidentally accept a wrong sign. The sign logic must be explicit.
+
+Correct validation rules (clear steps)
+1. Verify ranges:
+   - hours in [-23, 23]
+   - minutes in [-59, 59]
+2. Enforce sign rule:
+   - If hours > 0 and minutes < 0: reject (ValueError).
+   - If hours < 0 and minutes > 0: reject (ValueError).
+   - If hours == 0, minutes may be positive, zero, or negative — negative minutes are allowed (they give a negative offset).
+   - If minutes == 0, any hour sign is allowed.
+3. Convert to a single signed offset consistently:
+   - Compute total_seconds = abs(hours) * 3600 + abs(minutes) * 60.
+   - Determine sign:
+       - If hours < 0 or (hours == 0 and minutes < 0): sign = -1
+       - Else sign = +1
+   - Apply sign: total_seconds *= sign
+4. Check magnitude limit:
+   - Ensure abs(total_seconds) <= 23*3600 + 59*60 + 59 (or the millisecond equivalent if you use ms). If exceeded, raise ValueError.
+
+Concrete corrected implementation (Python)
+- Use this to replace your factory body (adjust names to your code):
+
+def timezone_from_hours_minutes(hours, minutes):
+    # 1) range checks
+    if hours < -23 or hours > 23:
+        raise ValueError("hours must be in -23..23")
+    if minutes < -59 or minutes > 59:
+        raise ValueError("minutes must be in -59..59")
+    # 2) sign rule
+    if hours > 0 and minutes < 0:
+        raise ValueError("minutes cannot be negative when hours are positive")
+    if hours < 0 and minutes > 0:
+        raise ValueError("minutes cannot be positive when hours are negative")
+    # 3) combine correctly
+    total_seconds = abs(hours) * 3600 + abs(minutes) * 60
+    if hours < 0 or (hours == 0 and minutes < 0):
+        total_seconds = -total_seconds
+    # 4) magnitude limit: 23:59:59
+    max_seconds = 23 * 3600 + 59 * 60 + 59
+    if abs(total_seconds) > max_seconds:
+        raise ValueError("resulting offset exceeds +/-23:59:59")
+    # Create and return your DateTimeZone object using total_seconds
+    # (replace the next line with your constructor)
+    return DateTimeZone(seconds=total_seconds)
+
+Unit tests to check correctness
+- timezone_from_hours_minutes(2, 15) -> +02:15
+- timezone_from_hours_minutes(2, 0) -> +02:00
+- timezone_from_hours_minutes(2, -15) -> raises ValueError
+- timezone_from_hours_minutes(0, 15) -> +00:15
+- timezone_from_hours_minutes(0, -15) -> -00:15
+- timezone_from_hours_minutes(-2, 15) -> -02:15
+- timezone_from_hours_minutes(-2, 0) -> -02:00
+- timezone_from_hours_minutes(-2, -15) -> -02:15
+- timezone_from_hours_minutes(24, 0) -> raises ValueError
+- timezone_from_hours_minutes(23, 60) -> raises ValueError
+
+If you want exact line-level diagnosis
+- Paste the factory function (or the file) here. Tell me:
+  - the function name and the line number where the exception is raised (your traceback is most useful),
+  - the call arguments that caused the failure.
+I’ll point to the exact line(s) and give a minimal patch (diff) you can drop into your code.

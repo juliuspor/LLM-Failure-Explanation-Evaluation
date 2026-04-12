@@ -1,0 +1,56 @@
+What failed
+- Tests that pass a negative minutes value (for example test_zero_hours_negative_minutes: DateTimeZone.for_offset_hours_minutes(0, -15), and test_negative_hours_negative_minutes: (-2, -15)) raise ValueError.
+- Root cause is the minutes range check at lines 396–397:
+
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  This rejects any negative minutes (minutes_offset < 0), so -15 is flagged out of range immediately. That is why tests that expect -00:15 or -02:15 fail.
+
+Where it happens (specific names and lines)
+- Variable minutes_offset is validated at lines 396–397 and must be in [0,59]. That validation is too strict for the intended API.
+- Later code (lines 402 and 404) tries to adjust minutes_offset based on hours sign:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+  Those lines indicate the code attempts to combine hours_in_minutes and minutes_offset to compute the total minutes, then (line 405) multiplies by DateTimeConstants.MILLIS_PER_MINUTE and passes to FieldUtils.safe_multiply. But because negative minutes were rejected earlier, the combinational logic never sees negative minute inputs.
+
+Why that is wrong
+- The API and tests expect minutes to be allowed in the range -59..+59 (so you can express -00:15, +00:15, and combine signs to produce -02:15 when hours is -2).
+- By disallowing negative minute values up-front, valid inputs such as (0, -15) or (-2, -15) are treated as invalid and ValueError is raised prematurely.
+- Additionally, the later combination logic must handle sign combinations correctly (for example, (-2, 15) and (-2, -15) should both result in -02:15 by treating the minutes as extending the magnitude when hours is negative, whereas (2, -15) should be invalid).
+
+Concrete fixes (step-by-step)
+1. Change the minutes range check (lines 396–397) to accept negative minutes:
+   - Replace the check with something like:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   This permits -59..+59, rejecting values outside that inclusive range.
+
+2. Compute total minutes using clear rules and explicit sign handling (replace the ambiguous lines 402–404):
+   - Let hours_minutes = hours * 60  (the code already has hours_in_minutes)
+   - If hours > 0:
+       - if minutes < 0: raise ValueError("Mixed signs: positive hours and negative minutes not allowed")
+       - total_minutes = hours_minutes + minutes
+   - Else if hours < 0:
+       - total_minutes = hours_minutes - abs(minutes)    # treat minutes as extending the negative offset
+   - Else (hours == 0):
+       - total_minutes = minutes   # sign comes from minutes
+
+   Concretely, with variable names from your file:
+   - Use hours_in_minutes (already present) and minutes_offset (after allowing negative range).
+   - If hours_in_minutes > 0 and minutes_offset < 0: raise ValueError
+   - If hours_in_minutes < 0: total_minutes = hours_in_minutes - abs(minutes_offset)
+   - If hours_in_minutes == 0: total_minutes = minutes_offset
+   - Then compute offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE).
+
+3. Keep the overflow check that follows (line 407 / "Offset is too large") to protect against excessive offsets.
+
+Why these fixes satisfy tests
+- They allow inputs like (0, -15) and (-2, -15) by permitting negative minutes and then computing total_minutes so (-2, -15) becomes -(2*60 + 15) = -135 minutes.
+- They preserve the intended invalid case (2, -15) by explicitly rejecting positive hours with negative minutes.
+- They avoid the premature ValueError produced by the old minutes validation.
+
+Summary
+- The failure comes from the minutes validation at lines 396–397 rejecting negative minutes (minutes_offset < 0).
+- Fix: allow minutes in [-59, 59] and replace the later combination logic (lines 402 and 404) with clear sign-handling rules so total_minutes is computed correctly for the combinations expected by the tests.

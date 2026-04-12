@@ -1,0 +1,28 @@
+What happened (where)
+- In this code path starting at line 38 you detect a UTF-16 surrogate pair (lines 39–41) and compute the Unicode code point (line 43).
+- You never advance the caller's index/position to skip the low surrogate. The function returns the combined code point but the next loop iteration (or the caller) will still process the low surrogate value as a separate code unit.
+
+Why it failed (root cause)
+- The code consumes two code units logically but only the caller’s index was advanced by one. That leaves the low surrogate still in the input stream and it will be processed again. This produces wrong output (duplicate or invalid characters) or downstream errors when the low surrogate is treated as a standalone code point.
+- Concretely: you read high = code_units[index] (line 38) and low = code_units[index + 1] (line 40). You compute the composed code point and return it (line 43) without incrementing index. The missing index increment is the root cause.
+
+How to fix it (concrete steps)
+Choose one of these fixes depending on your API contract:
+
+1) If this function should advance index itself:
+   - On the surrogate-pair branch (before line 43) increment the index so the caller won’t re-process the low surrogate. For example, add:
+     index += 1
+     return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+   - Make sure index is a mutable object the caller sees (e.g. store index in an object or return the new index), otherwise return both value and consumed-count.
+
+2) If the function must not mutate index but must tell the caller how many code units were consumed:
+   - Change the return to a tuple: (code_point, 2) on the surrogate branch (and (high, 1) otherwise).
+   - Update call sites to use the consumed count and advance index by that amount.
+
+3) If the caller should detect pairs:
+   - Remove the surrogate-handling from this function and let the caller detect and skip the low surrogate itself.
+
+What to change and where (line numbers)
+- At or just before line 43, add index += 1 (if the function is supposed to move the index), or change the return to return both the code point and consumed count. Also update all callers accordingly so they do not re-process the low surrogate.
+
+This exact missing index advance (lines 39–43: you read two units but never skip the second) is the single clear cause; fixing it as above will stop the duplicate/invalid processing of the low surrogate.

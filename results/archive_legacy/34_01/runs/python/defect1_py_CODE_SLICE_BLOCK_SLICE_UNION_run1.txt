@@ -1,0 +1,57 @@
+What went wrong (short):
+
+- The code reuses the parameter minutes_offset as the place to store the combined minutes total (lines 402 and 404). That hides the original meaning and leads to a wrong sign being applied when hours_offset is negative. The combined-minutes calculation is incorrect for negative hour offsets, so the produced millisecond offset is wrong.
+
+Where it happens (line references from your snippet):
+
+- You validate the input minutes at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Then you compute hours_in_minutes and overwrite minutes_offset with the total minutes at lines 402 and 404:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset     <-- line 402
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset     <-- line 404
+
+Why that is wrong (concrete example):
+
+- Suppose hours_offset == -1 and minutes_offset == 30 (valid because 30 ∈ [0,59]).
+- hours_in_minutes becomes -60.
+- Your code takes the negative branch and does minutes_offset = hours_in_minutes - minutes_offset → -60 - 30 = -90.
+- The intended total minutes for "-1 hour 30 minutes" is -90 — so this example seems to give the intended numeric result. But the logic is fragile and misleading because it mixes the sign of hours and the positive minutes without explicitly applying a sign to minutes. In more complex uses (or if you intended minutes_offset to carry the sign of hours) this will produce the wrong result.
+
+Why this causes failures in practice:
+
+- Reusing the input variable minutes_offset hides intent and is a source of logic mistakes. If the intent was "apply minutes with the same sign as hours," the code should explicitly apply that sign. If the intent was "hours and minutes are separate signed components," the code is wrong because it always treats minutes as positive and then subtracts for negative hours — that is easy to misinterpret and easy to get wrong in edge cases.
+- The mutation also makes the early range check (lines 396–397) confusing: you validate minutes as a 0..59 quantity, then immediately convert it into total minutes with sign. That works only if you intend minutes to be an unsigned part of a signed hour, but there's nothing in the code that documents or enforces that intent.
+
+How to fix it (concrete steps):
+
+1. Do not overwrite the input minutes_offset. Introduce a new local variable for the total minutes, e.g. total_minutes.
+2. Explicitly apply the sign to minutes so the logic is obvious. Two safe options:
+
+   a) If minutes is always an unsigned part of the signed hours:
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          total_minutes = hours_in_minutes - minutes_offset
+      else:
+          total_minutes = hours_in_minutes + minutes_offset
+
+   b) Preferably clearer: compute sign = 1 if hours_offset >= 0 else -1
+      total_minutes = hours_offset * 60 + sign * minutes_offset
+
+3. Use total_minutes in the multiplication and return. For example:
+      total_minutes = hours_offset * 60 + (1 if hours_offset >= 0 else -1) * minutes_offset
+      offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Keep the same input validation (minutes ∈ [0,59]) but make the intended interpretation explicit in a comment or by naming the variables (e.g. minutes_part).
+
+Why this fix works:
+
+- It avoids mutating the input variable, so the code is clearer and less error-prone.
+- It guarantees minutes get the correct sign relative to hours, and makes the intended behavior explicit.
+- It avoids subtle bugs that come from mixing signed and unsigned quantities in-place.
+
+If you want, tell me which interpretation you expect for negative offsets (are minutes always positive and follow the sign of hours, or can minutes be negative independently?), and I will give the exact corrected code for your codebase.

@@ -1,0 +1,50 @@
+What happened (where it fails)
+- The test that calls DateTimeZone.for_offset_hours_minutes(..., -15) fails because the method immediately raises ValueError for negative minutes.
+- The check causing this is at lines 396–397 in hit01_timezone.py:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That condition rejects any negative minutes (minutes_offset < 0), so calls like for_offset_hours_minutes(0, -15), ( -2, -15), or (0, -15) never reach the later logic that adjusts sign and combines hours and minutes. The test error message "Minutes out of range: -15" comes directly from that raise.
+
+Why this is wrong (root cause)
+- The later code (lines 402–405) expects minutes_offset to sometimes be negative and contains logic to combine hours and minutes depending on the sign of hours. In other words, the method is supposed to accept minute values in the range -59..+59 and then apply sign rules; but the upfront validation incorrectly restricts minutes to 0..59 only.
+- So the validator is too strict and contradicts the subsequent sign-handling logic: negative minutes should be allowed and processed instead of being rejected.
+
+Exactly where to change it (concrete steps)
+1. Replace the range check at lines 396–397 so minutes are allowed in -59..+59 instead of 0..59. Concretely:
+   - Change:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - To:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Ensure sign-handling is correct afterwards:
+   - After allowing negative minutes, compute the total minutes consistently. For example:
+     - If hours < 0: total_minutes = hours * 60 - abs(minutes_offset)
+     - Else: total_minutes = hours * 60 + minutes_offset
+   - Or more simply:
+     total_minutes = hours * 60 + (minutes_offset if hours >= 0 else -abs(minutes_offset))
+   - Then convert total_minutes to milliseconds:
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+3. Keep the out-of-range checks for hours and final offset overflow (line 407) as before.
+
+Minimal code example to replace the problematic fragment
+- Replace the check and combination logic with something like:
+
+  # validate minutes in [-59, 59]
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  # combine hours and minutes into total minutes, honoring negative hours sign
+  if hours_offset < 0:
+      total_minutes = hours_offset * 60 - abs(minutes_offset)
+  else:
+      total_minutes = hours_offset * 60 + minutes_offset
+
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix works
+- It allows negative minute inputs (like -15) to pass validation and then ensures the minutes contribute to the total offset with the intended sign rules. Tests that expect -00:15, -02:15, etc., will no longer be blocked by the premature ValueError.
+
+If you want, I can produce a patch with exact line replacements for hit01_timezone.py.

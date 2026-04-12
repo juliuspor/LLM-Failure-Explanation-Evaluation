@@ -1,0 +1,37 @@
+What happened (root cause)
+- The code at lines 400–401 treats minutes_offset as the minute *component* and enforces 0 <= minutes_offset <= 59:
+  - 400–401: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later, the same variable name minutes_offset is reused to hold the *total minutes* (hours_in_minutes ± minutes_offset) at lines 406 and 408:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+- Reusing minutes_offset for two different meanings (minute component vs total minutes) causes the code to apply the wrong checks and transformations to the wrong value. That leads to incorrect behavior and thrown exceptions (or incorrect offsets) because the variable no longer holds the thing the earlier checks assumed.
+
+Where it fails
+- The invalid assumption and reuse happen between lines 400–401 and 406–408. The ValueError at lines 400–401 checks the minute component before the code computes the total minutes; later assignments overwrite that variable with a different semantic meaning, confusing validation and the multiplication at line 409:
+  - 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because minutes_offset has been repurposed, the multiplication may be applied to a value that should have been kept separate (or validated differently), causing wrong offsets or the later "Offset is too large" exception at line 411.
+
+Why this is the real bug (not just a symptom)
+- The code’s logic mixes two distinct values in one variable:
+  - minute_component (0..59) — what the first check is about
+  - total_minutes (hours*60 ± minute_component) — what the later calculations need
+- Mixing them means checks and math are applied to the wrong representation. That’s a deterministic programming error (variable shadowing/reuse), not a boundary arithmetic issue.
+
+Concrete steps to fix (exact changes)
+1. Keep the minute component separate. Introduce a new variable name for total minutes. For example:
+   - Leave lines 400–401 as the validation on minute_component (rename incoming variable to minute_component if possible).
+   - Replace lines 406 and 408 with:
+     - 406: total_minutes = hours_in_minutes - minute_component
+     - 408: total_minutes = hours_in_minutes + minute_component
+   - Replace line 409 with:
+     - 409: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+2. Ensure the range checks are applied to the correct values:
+   - Validate minute_component is 0..59 at lines 400–401 (as already written).
+   - If you have an additional "offset too large" check (line 411), apply it to total_minutes (or to offset in millis), not to the minute component.
+3. Optionally, rename parameters and local variables to make the two meanings explicit:
+   - minute_component, hours_in_minutes, total_minutes (or minutes_from_hours), offset_millis.
+
+Why these steps fix it
+- They prevent the program from validating or multiplying the wrong value. Each check and calculation uses the right variable meaning, so the code no longer confuses the minute part with the full offset in minutes and will produce correct offsets or the correct error messages.
+
+If you want, paste the surrounding method (the few lines above 400 and below 412). I can show an exact corrected code snippet with the variable renames applied.

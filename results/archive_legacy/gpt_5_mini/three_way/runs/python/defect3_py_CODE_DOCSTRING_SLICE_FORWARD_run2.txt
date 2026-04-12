@@ -1,0 +1,48 @@
+What happens
+- At runtime the while loop sometimes never advances pos correctly and you get wrong/skipped characters or an infinite loop. The bug is in the branch that runs when a translator handled some codepoints (consumed > 0) — the code advances pos the wrong way.
+
+Where it occurs (lines / variables)
+- In translate, after consumed = self.translate_codepoint(code_units, pos, out) (just before the for loop) the code assumes consumed counts codepoints and then runs:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- code_point_at is the helper shown in the slice (lines 38–44). It returns a full codepoint only when called on a high surrogate followed by a low surrogate; otherwise it returns the single 16-bit code unit value.
+
+Why that fails (root cause)
+- The translator contract comment says translators "have to understand codepoints and they just took care of a surrogate pair." The translate method treats consumed as a count of codepoints — but then advances pos by re-reading code_point_at at the current pos and calling char_count on that result.
+- If the translator consumed a surrogate pair (a single codepoint comprised of two UTF-16 code units) but the code increments pos incorrectly, you can end up calling code_point_at on a low surrogate index (not the high surrogate). When code_point_at is invoked at a low-surrogate index it will return the raw low-surrogate code unit (a value in 0xDC00..0xDFFF), not a full codepoint. char_count(low_surrogate) returns 1, so pos is advanced by 1 instead of 2. That leaves pos pointing at the low surrogate again (or advances too little), and the loop repeats — pos doesn't move past the pair, producing incorrect behavior or an infinite loop.
+- In short: the code re-reads the code units to decide how many UTF-16 code units to skip, but if it lands on the low half of a surrogate pair the helper returns the wrong thing and the computed increment is wrong.
+
+Concrete places to look
+- The for-loop that advances pos after consumed > 0 (the loop uses code_point_at and char_count).
+- The code_point_at implementation (slice lines 38–44), which only returns a combined scalar if the index points at the high surrogate; otherwise it returns the single code unit.
+
+Exact fixes (step-by-step)
+You must make the unit-of-measure consistent (codepoints vs UTF-16 code units) and advance pos using the same unit the translator reports.
+
+Option A — make translators return number of UTF-16 code units consumed (preferred because pos is an index into code_units):
+1. Change the translate_codepoint contract so it returns how many UTF-16 code units it consumed (1 or 2 per codepoint it handled), not how many codepoints.
+2. Replace the for-loop with simply: pos += consumed
+3. Update any translator implementations to count code units (if they handled a surrogate pair they return 2, otherwise 1 per codepoint handled).
+
+Option B — keep consumed as number of codepoints but advance safely:
+1. In the advancing loop, do not call code_point_at at an index that might be a low surrogate. Instead read the codepoint only at the start of each iteration and advance by its UTF-16 length:
+   for pt in range(consumed):
+       cp = code_point_at(code_units, pos)   # guaranteed to start at a valid codepoint because translator consumed whole codepoints
+       pos += char_count(cp)
+2. This assumes translate_codepoint consumed full codepoints starting at pos (so the first call to code_point_at(pos) will see a high surrogate if the current codepoint is a pair). It avoids reading at a low-surrogate index because pos is moved forward by the scalar's char_count each iteration.
+
+Option C — compute code unit length directly without code_point_at:
+1. Check the code unit at pos:
+   high = code_units[pos]
+   if 0xD800 <= high <= 0xDBFF and pos + 1 < length and 0xDC00 <= code_units[pos+1] <= 0xDFFF:
+       pos += 2
+   else:
+       pos += 1
+2. Repeat this for consumed times.
+
+Which to choose
+- If translators currently think in code units, pick Option A (simpler: pos += consumed).
+- If translators truly return codepoint counts and you can't change them, pick Option B or C. Option B is minimal code change; Option C is fastest and explicit.
+
+Summary
+The loop advances pos by reading code_point_at at potentially invalid indexes (low surrogates), causing it to under-advance. Resolve it by making the unit (codepoints vs code units) consistent and advancing pos using code-unit counts (pos += consumed) or by reading the length of each codepoint safely (compute char_count from a codepoint read only at a high-surrogate boundary or inspect the code_units pair directly).

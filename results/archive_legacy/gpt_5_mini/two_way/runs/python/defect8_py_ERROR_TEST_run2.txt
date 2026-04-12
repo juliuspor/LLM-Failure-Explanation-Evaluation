@@ -1,0 +1,46 @@
+What happened
+- The failure comes from LocaleUtils.to_locale("fr__POSIX") raising ValueError("Invalid locale format: fr__POSIX").
+- to_locale is correctly identifying "fr" as the language and "POSIX" as the variant, but it rejects the input before it can build the Locale because of how it validates the country-position characters.
+
+Why it happens (root cause)
+- The code in LocaleUtils.to_locale validates characters at fixed positions when it expects a language/country/variant format. It looks at the underscore(s) and then assumes that if there's a second segment it must be a two-letter country code composed of uppercase letters.
+- For the input "fr__POSIX" the string layout is:
+  index: 0 1 2 3 4 5 ...
+  chars: f r _ _ P O ...
+  - language = "fr" (indices 0-1)
+  - index 2 is '_' (separator)
+  - index 3 is also '_' (empty country)
+- The validator checks locale[3].isupper() (or equivalent) to confirm a two-letter country, but here locale[3] == '_' so the isupper() check fails. The code treats that as an invalid format and raises ValueError("Invalid locale format: " + locale).
+- In short: the code assumes a country is always present when a second '_' exists and does not handle the valid Java-style form language__variant (empty country, double underscore) — so the check that reads/validates characters at index 3/4 incorrectly rejects an underscore at index 3 instead of treating it as "empty country".
+
+Where it occurs
+- In the method LocaleUtils.to_locale (the method called by the tests).
+- Specifically at the conditional that inspects the characters after the first underscore (the country-validation branch). That conditional reads characters by index (e.g., locale[3], locale[4]) and expects uppercase letters; when locale[3] == '_' the check fails and a ValueError is raised.
+
+Concrete fix (one clear step-by-step approach)
+1. Change the parsing to split on underscores with a maximum of 2 splits rather than validating fixed index positions. Example logic:
+   - parts = input_str.split('_', 2)
+   - language = parts[0]
+   - country = parts[1] if len(parts) > 1 else ""
+   - variant = parts[2] if len(parts) > 2 else ""
+2. Validate language/country per the rules:
+   - language must be length 2 and lowercase (if non-empty)
+   - if country is non-empty, it must be length 2 and uppercase
+   - variant may be any non-empty string if present
+3. Return Locale(language, country, variant) (or Locale(language, country) if variant empty).
+
+Minimal patch example (replace the index-based validation with split-based parsing):
+- Before (problematic index checks):
+  - if locale[2] == '_' and (not locale[3].isupper() or not locale[4].isupper()):
+      raise ValueError("Invalid locale format: " + locale)
+- After (robust parsing):
+  - parts = locale.split('_', 2)
+  - language = parts[0]
+  - country = parts[1] if len(parts) > 1 else ""
+  - variant = parts[2] if len(parts) > 2 else ""
+  - validate language and country only when they are non-empty; allow country == "" when parts has an empty middle element (this makes "fr__POSIX" produce language="fr", country="", variant="POSIX").
+
+Why this fixes the reported test
+- Splitting preserves the empty middle segment: "fr__POSIX".split('_', 2) -> ["fr", "", "POSIX"]. That yields country == "" and variant == "POSIX", which matches the expected Locale("fr", "", "POSIX") and avoids the erroneous uppercase-letter check at locale[3].
+
+If you want, I can produce the exact one-file patch (diff) replacing the index-based validation with the split-based code in LocaleUtils.to_locale.

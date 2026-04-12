@@ -1,0 +1,48 @@
+What happened (where it failed)
+- The error is raised at to_locale(...) when it checks the two-letter country code (lines 237–240).
+- For the input "fr__POSIX" the code does:
+  - ch3 = locale_str[3] → '_'  (indexing shown in the slice)
+  - ch4 = locale_str[4] → 'P'
+  - Then it checks if ch3 and ch4 are between 'A' and 'Z' (line 239). ch3 == '_' fails that test.
+- Because that test fails, the method raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it failed (root cause)
+- The method expects the pattern "ll_CC" (language + '_' + two uppercase country letters) or "ll_CC_modifier".
+- The input "fr__POSIX" uses an empty country (two underscores between language and modifier): language = "fr", empty country, modifier = "POSIX".
+- The code does not accept an empty country. It always requires two A–Z letters at positions 3 and 4, so the underscore at index 3 triggers the ValueError.
+
+Exactly where to change it
+- The relevant code is in to_locale:
+  - line 237: ch3 = locale_str[3]
+  - line 238: ch4 = locale_str[4]
+  - line 239: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- This logic should allow the special case of an empty country (double underscore at positions 2–3) before enforcing the A–Z check.
+
+Concrete fixes (step-by-step)
+1. Detect the empty-country case before the A–Z validation:
+   - If locale_str[2:4] == '__' then treat country as an empty string and set modifier = locale_str[4:].
+   - Return Locale(locale_str[0:2], '', locale_str[4:]) (or handle absence of modifier if length == 4).
+2. Otherwise keep the current validation (require two uppercase A–Z letters at 3 and 4) and existing returns.
+
+Example patch (pseudo-code showing exact placement)
+- Replace the block starting at line 237 with:
+
+  if locale_str[2:4] == '__':
+      # empty country, modifier follows at index 4
+      if length == 4:
+          return Locale(locale_str[0:2], '')
+      return Locale(locale_str[0:2], '', locale_str[4:])
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  ...
+
+3. Add unit tests:
+   - to_locale("fr__POSIX") → Locale(language='fr', country='', modifier='POSIX')
+   - to_locale("fr__") → Locale(language='fr', country='', modifier='') or raise depending on desired behavior
+   - Existing tests for "fr_FR" and "fr_FR_POSIX" to ensure no regressions.
+
+Notes
+- This change preserves the current requirement that non-empty country codes must be two uppercase letters.
+- If you instead want to accept lowercase country codes, add a normalization step (e.g., .upper()) before validation — but do that intentionally and test.

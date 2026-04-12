@@ -1,0 +1,65 @@
+What fails
+- The code mis-detects “integer floats” and then mangles negative or very large integer-valued floats when it tries to strip trailing zeros. The root cause is the combination of:
+  1. using x == int(x) to detect integer-valued floats, and
+  2. using // and % on possibly negative mantissa values together with the check_val calculation, which relies on floor-division semantics and can give wrong behavior for negative numbers (and is fragile for very large floats).
+
+Where it happens (lines and variables)
+- Line: if x == int(x) and not math.isinf(x) and not math.isnan(x)
+  - Problem: x == int(x) is unreliable for floats because of rounding/precision and because Python provides float.is_integer() which is the proper test.
+- Lines: value = int(x); mantissa = value; exp = 0 and the while loop:
+    while mantissa % 10 == 0:
+        check_val = (mantissa // 10) * (10 ** (exp + 1))
+        if check_val == value:
+            mantissa //= 10
+            exp += 1
+        else:
+            break
+  - Problem: mantissa //= 10 uses floor division. For negative values floor division does not behave like truncating division (it rounds toward -inf), so the intermediate arithmetic used to compute check_val can differ from the original value and the loop logic becomes incorrect (it may stop early or produce the wrong mantissa/exp). Also the whole check_val expression is more complicated than necessary and easy to get wrong.
+
+Concrete examples showing the failure
+- Negative integer-valued float:
+  - x = -1000.0
+  - value = int(x) == -1000, mantissa = -1000
+  - mantissa //= 10 uses floor-division semantics; combining % and // with negatives is error-prone and makes the loop fragile (it may not consistently remove trailing zeros the way you expect).
+- Large floats near the precision limit:
+  - x that is very large may compare equal to int(x) even though the float doesn't exactly represent that integer; the code then takes int(x) and attempts the trailing-zero logic which can lead to incorrect formatting.
+
+Why this is the root cause (simple explanation)
+- x == int(x) is not the canonical, reliable way to test that a float has no fractional part; use float.is_integer().
+- Using % and // with negative integers and relying on an elaborate check_val rebuild is fragile: // is floor division for negatives, so mantissa // 10 is not the arithmetic inverse of multiplying by 10 for negative mantissa the way you assume. The combination leads to incorrect mantissa/exp or wrong loop termination.
+
+How to reproduce quickly
+1. Call add_number(-1000.0) (or other negative integer-valued floats). Observe incorrect/mangled output.
+2. Construct very large integer floats near float precision limits and call add_number on them; observe wrong detection/formatting.
+
+How to fix (step-by-step, specific)
+1. Replace the integer test with float.is_integer():
+   - Change
+       if x == int(x) and not math.isinf(x) and not math.isnan(x):
+     to
+       if isinstance(x, float) and x.is_integer() and not math.isinf(x) and not math.isnan(x):
+   - This avoids equality surprises from float rounding and is the intended semantic test.
+
+2. Simplify and make the trailing-zero stripping correct and sign-safe:
+   - Work with the absolute integer value, count trailing zeros using simple integer division, and preserve the sign separately. For example:
+       value = int(x)
+       sign = -1 if value < 0 else 1
+       unsigned = abs(value)
+       mantissa = unsigned
+       exp = 0
+       while mantissa % 10 == 0 and mantissa != 0:
+           mantissa //= 10
+           exp += 1
+       mantissa *= sign
+     - This avoids mixing floor-division on negatives and eliminates the fragile check_val computation.
+
+3. Only use "E" notation when exp > 2 (as you already do). Example final addition:
+       if exp > 2:
+           self.add(f"{mantissa}E{exp}")
+       else:
+           self.add(str(value))
+
+4. Optional: add safety for huge exponents if performance or memory is a concern (10**exp may be huge). But that is a separate performance/query consideration.
+
+Summary
+- The immediate failure comes from using x == int(x) and from mixing % and // on negative numbers with a complicated reconstructive check (check_val). Replace the integer test with x.is_integer() and simplify the trailing-zero stripping by operating on the absolute integer and preserving sign; that fixes the incorrect behavior and removes the fragile check_val logic.

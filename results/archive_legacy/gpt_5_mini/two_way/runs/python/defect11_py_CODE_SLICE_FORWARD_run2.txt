@@ -1,0 +1,63 @@
+What happened (where it fails)
+- After you compute gap = end - start (line shown just before the comment), the code immediately checks if gap <= 0 and raises ValueError("bound must be positive").
+- That check triggers whenever end <= start. So the function fails at that point (the check is right after the gap calculation, before the while loop). In your slice that is the line marked by the comment "# BUG: missing validation when end <= start (mirrors Random#nextInt message)".
+
+Why it fails (root cause)
+- The function assumes end > start. If the caller passes end <= start (including equal), gap becomes 0 or negative and you raise an error. The code never validates the relationship between start and end earlier, and the error message ("bound must be positive") is vague and comes from your explicit check, not from randrange. Concrete cases that cause the failure:
+  - Caller passes start and end in the wrong order (start >= end).
+  - Caller passes start == end (no range to pick from).
+  - Any code path that leaves start and end unchanged such that end <= start (including non-default values).
+
+Where it occurs in the code
+- The problem occurs right after you set gap = end - start (the line with the comment), and before the chr(...) call inside the loop. The raise happens at that conditional: if gap <= 0: raise ValueError("bound must be positive").
+
+How to reproduce quickly
+- Call random(count=1, start=5, end=5, letters=False, numbers=False) — this yields end == start so gap == 0 and the ValueError is raised.
+- Call random(count=1, start=10, end=5, letters=False, numbers=False) — end < start so gap < 0 and you get the same error.
+
+Concrete fixes (exact steps)
+1. Decide intended behavior when end <= start:
+   - If it's an error: validate early and raise a clear message with values.
+   - If you want to accept swapped parameters: swap them when start > end.
+2. Replace the current vague check with a clear validation or a swap. Two concrete options:
+
+Option A — raise a clear error:
+- Immediately after computing gap (or before), do:
+  if end <= start:
+      raise ValueError(f"end ({end}) must be greater than start ({start})")
+- This tells callers exactly what was wrong and which values caused it.
+
+Option B — accept and correct reversed inputs by swapping:
+- Before computing gap:
+  if start > end:
+      start, end = end, start
+- Then continue as before. (If you do this, consider whether start == end should still be an error.)
+
+3. Keep the existing special-case defaulting (when start==0 and end==0) but ensure it runs before any validation that would reject valid defaults.
+
+Minimal corrected code example (option A — explicit error):
+    if start == 0 and end == 0:
+        if letters or numbers:
+            end = ord("z") + 1
+            start = ord(" ")
+        else:
+            end = 127
+            start = 0
+
+    if end <= start:
+        raise ValueError(f"end ({end}) must be greater than start ({start})")
+
+    gap = end - start
+    # ...rest unchanged
+
+Option B (auto-swap):
+    if start == 0 and end == 0:
+        ...
+    if start > end:
+        start, end = end, start
+
+    gap = end - start
+    if gap == 0:
+        raise ValueError(f"No range to generate characters: start==end=={start}")
+
+Which to pick depends on whether you want silent correction (swap) or strict validation (raise). Either fix makes the failure explicit and prevents the ambiguous "bound must be positive" message.

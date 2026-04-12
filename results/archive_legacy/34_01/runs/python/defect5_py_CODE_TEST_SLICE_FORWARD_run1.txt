@@ -1,0 +1,71 @@
+What happened (what fails)
+- In this call: result = ArrayUtils.add(None, None, expected_type=str) the code raises the TypeError in the final check instead of returning [None].
+
+Why it failed (root cause, by variable and line)
+1. The inferred_type selection block:
+   - array is None and element is None, so this code sets inferred_type = object.
+     (the branch: "elif element is not None: ... else: inferred_type = object")
+2. After creating and filling the new list, the code runs the expected_type validation:
+   - if expected_type is not None:
+       if inferred_type == object and expected_type != object:
+           raise TypeError(...)
+   - Because inferred_type == object and expected_type is str, the code always raises TypeError when both array and element were None but expected_type was provided.
+
+That is the direct cause: the function treats "unknown element type" (object) as incompatible with any requested expected_type and raises, even though creating a list containing a single None and returning it is perfectly valid and expected.
+
+Other related problems to note
+- type(array) is used when array is not None. type(array) returns the list object type (i.e. <class 'list'>), not the element type. If the goal is to infer the element type from an existing list, you need to inspect its elements (for example, array[0] if present), not call type(array) on the list itself.
+
+How to fix it (concrete steps)
+Option A — when both array and element are None, use expected_type to create the list and do not raise:
+- Change the inferred_type selection block to prefer expected_type when both inputs are None:
+  - if array is not None:
+        inferred_type = <element-type derived from array>   # see note below
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+- Keep the TypeError check but it will no longer trigger because inferred_type will be expected_type.
+
+Option B — do not treat unknown (object) as an immediate incompatibility; only raise when you have concrete evidence of incompatible types:
+- Replace the final raise condition with something like:
+    if expected_type is not None and inferred_type is not object and inferred_type is not expected_type:
+        raise TypeError(...)
+  This prevents raising when inferred_type == object (unknown) but expected_type is set.
+
+Fix the array element-type inference (important)
+- If you want to infer element type from array, calling type(array) is wrong. Instead:
+  - If array is not None and len(array) > 0: use type(array[0]) (or inspect elements consistently).
+  - If array is not None and empty, fall back to element or expected_type as above.
+
+Minimal concrete patch (example implementing Option A plus correct array inference):
+
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])   # element type from existing list
+        else:
+            inferred_type = None
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+    if inferred_type is None:
+        inferred_type = object
+
+    # ... create list and set element ...
+
+    # only raise when we have a concrete mismatch
+    if expected_type is not None and inferred_type is not object and inferred_type is not expected_type:
+        raise TypeError(...)
+
+Why this fixes the failing test
+- With either fix, when array and element are both None but expected_type=str, inferred_type becomes str (Option A) or we avoid raising when inferred_type is object (Option B). The TypeError will not be thrown and the function will return [None] as the test expects.
+
+Summary
+- The code raises because inferred_type becomes object when both array and element are None, and the function treats object as incompatible with any non-object expected_type and raises. Fix by using expected_type when nothing else is available (or by only raising on definite type mismatches), and correct the array-element-type inference (type(array) is wrong).

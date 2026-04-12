@@ -1,0 +1,42 @@
+What happened
+- The failure is caused by a mismatch between two different index spaces: UTF-16 code units vs Python string (Unicode code points).
+- The function code_point_at(index) (lines shown) expects index to address the list code_units created by to_utf16_code_units(), i.e. an index into UTF-16 code units.
+  - It checks index against len(code_units) (line 35) and then reads high = code_units[index] (line 38) and maybe low = code_units[index + 1] (line 40).
+- The translator (CsvEscaper.translate_string) walks the input using Python string indices (i over the Python str), where a surrogate pair in UTF-16 is a single Python character (one code point).
+- Because to_utf16_code_units expands a Unicode character outside the BMP into two UTF-16 code units, the code_units list is longer than the Python string. The translator still passes the Python-string index into code_point_at. That index can be >= len(code_units) (or otherwise wrong for the UTF-16 list), triggering the check at line 35 and raising IndexError.
+
+Where it occurs in the snippet you provided
+- Index check raising IndexError: line 35 (if index < 0 or index >= len(code_units): raise IndexError(...)).
+- The UTF-16 surrogate detection/consumption happens at lines 38–44 (high, low, combine into a code point), but the crash happens before that because the index passed in was out of range for code_units.
+
+Why that leads to the observed failure
+- Example: input_str = "\U0001F630A" (emoji + 'A')
+  - In Python str: len(input_str) == 2 (emoji is one code point).
+  - In UTF-16 code units: the emoji is two code units, so to_utf16_code_units(...) has length 3.
+  - If CsvEscaper iterates i from 0..1 (Python indices) and then passes i to code_point_at expecting it to be a UTF-16 index, the mapping is wrong. At some step the passed index doesn't match the code_units layout (and can be out of range), so the IndexError check at line 35 fires.
+
+Concrete fixes (explicit steps)
+Pick one of these, depending on intended design:
+
+Option A — Work entirely in Python code points (simplest and preferred for Python)
+1. Remove UTF-16 indexing and surrogate-handling logic. Treat each Python str index as a full Unicode code point.
+2. Replace code_point_at(...) with simply ord(s[index]) (no surrogate math). For characters > U+FFFF, Python stores them as single code points, so no surrogate manipulation is needed.
+3. Ensure the translator advances index by 1 for every Python character it processes.
+   - Example change inside CsvEscaper.translate_string loop:
+     - cp = ord(s[i])
+     - handle cp, append translated text
+     - i += 1
+
+Option B — If you must operate on UTF-16 code units
+1. Make the caller and callee agree on the same index space:
+   - Either translate the Python-string index to the UTF-16 code-unit index before calling code_point_at, or
+   - Iterate over code_units instead of the Python string so the index you pass to code_point_at is in the UTF-16 space.
+2. When you detect a high surrogate at code_units[index] and consume a surrogate pair, advance the index by 2 (not 1).
+3. Keep all indices consistently referring to code_units; never mix Python str indices and UTF-16 indices.
+
+Which to choose
+- In Python, Option A is recommended: Python strings are already Unicode code points, so you gain correctness and simplicity by operating on ord(s[i]) and not dealing with UTF-16 surrogate arithmetic at all.
+
+Summary of the immediate bug and the fix
+- Root cause: mixing Python-string indices with UTF-16 code-unit indexing (index variable points to the wrong sequence), which makes the index check at line 35 fail.
+- Fix: use the same indexing everywhere. Best fix in Python: stop using UTF-16 code units; use ord(...) per-character and advance index by 1. If you must use UTF-16 units, map indices correctly and advance by 2 when consuming a surrogate pair.

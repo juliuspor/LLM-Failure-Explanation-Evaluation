@@ -1,0 +1,46 @@
+What happened (what fails)
+- The test IndexError comes from the check in to_utf16_code_units at line 35–36:
+  > if index < 0 or index >= len(code_units): raise IndexError(...)
+- That IndexError is triggered because some code (the translator's main loop) advances the variable index incorrectly after handling a surrogate pair, then tries to access code_units[index] when index == len(code_units). In short: the loop walks past the end of the utf-16 code unit array.
+
+Where it happens (exact names & lines)
+- Function: to_utf16_code_units (slice shows lines ~10–36).
+  - code_units is the list produced there.
+  - The exception is raised when some caller uses an index that is >= len(code_units) (lines 35–36).
+- Caller: CharSequenceTranslator.translate / translate_string (your test calls CsvEscaper.translate_string). In that translate loop the local variable index is advanced incorrectly when it encounters a surrogate pair (a code point represented by two UTF-16 code units, e.g. U+1F630).
+  - Variable names involved: input_seq (the input string), code_units (UTF-16 units), index (the loop position), and out (the output list).
+
+Why it happens (root cause)
+- Surrogate pairs occupy two UTF-16 code units. The translator uses to_utf16_code_units to produce a list of code_units and then iterates by index over that list.
+- When the translator detects a surrogate pair it treats the pair as a single logical character, but it only increments index by 1 (skipping one code unit) instead of by 2 (skipping both code units), or otherwise fails to check bounds before the next access.
+- As a result, after processing the last surrogate pair in the string, index is incremented to len(code_units). The next time the code attempts to read code_units[index] (or calls code_point_at with that index), the bounds check in to_utf16_code_units triggers IndexError because index is out of range.
+
+Concrete example (from your failing test)
+- input_str = "\U0001F630A" → UTF-16 code_units length = 3 (two units for 😰, one unit for 'A').
+- After processing the emoji (should advance index by 2) the translator advances index by only 1, leaving index == 2 (pointing to the low surrogate), then next iteration increments or accesses again and eventually tries index == 3 when reading a code unit — this makes the to_utf16_code_units bounds check fail.
+
+Exact fixes (step-by-step, no vagueness)
+1. In the translate loop (CsvEscaper.translate_string / CharSequenceTranslator.translate):
+   - When you detect a surrogate pair (high surrogate followed by low surrogate), advance index by 2, not by 1.
+   - Better: have the code_point_at helper return both the Unicode code point and how many code units were consumed (1 or 2). Use that consumed count to increment index (index += consumed).
+   - Also ensure you always check that index + 1 < len(code_units) before assuming a low surrogate exists.
+   Files/locations to change: the translate method in hit03_translator.py where index is updated after reading a code point.
+
+2. Alternatively (and more robust), stop iterating over UTF-16 code units manually:
+   - Iterate over Python characters (for ch in input_seq:) and use ord(ch) and str handling. Python strings use abstract code points, so surrogate-handling is automatic and you won’t split pairs. This eliminates the whole UTF-16 index arithmetic.
+   - If you must use UTF-16 code units (for compatibility with some Java-like behavior), encapsulate the logic in a small helper:
+     - def code_point_at(code_units, index) -> (code_point, units_consumed)
+     - Always use units_consumed to advance the index.
+
+3. Add defensive checks and tests:
+   - Before forming a surrogate pair, check index + 1 < len(code_units). If not, treat the high surrogate as standalone (or raise a clear ValueError).
+   - Add unit tests that your provided suite includes (emoji followed by character, emoji at end, multiple emoji) to validate the fixes.
+
+Why these fixes work
+- Advancing index by the number of code units actually consumed prevents reading past the end of code_units, so the bounds check in to_utf16_code_units will no longer be violated.
+- Returning consumed count centralizes correct advancement and prevents off-by-one errors.
+- Using Python characters avoids UTF-16 level complexity entirely.
+
+Summary (short)
+- Root cause: index is advanced incorrectly when a surrogate pair is encountered, so later access uses index >= len(code_units) and to_utf16_code_units raises IndexError (lines 35–36).
+- Fix: when handling a surrogate pair, advance index by 2 (or use a helper that returns units_consumed), add bounds checks (index + 1 < len(code_units)), or iterate at Python code-point level. Apply the change in CsvEscaper.translate_string / CharSequenceTranslator.translate where index is updated.

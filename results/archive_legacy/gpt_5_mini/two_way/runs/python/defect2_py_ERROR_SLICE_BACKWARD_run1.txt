@@ -1,0 +1,56 @@
+What happened (where it fails)
+- The exception is raised inside ColorMap.get_paint at the check on lines 71–75.
+  - Line 71 computes g:
+    g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - Line 74 checks g and at line 75 raises:
+    raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- The raised ValueError means g < 0 or g > 255. That happens because the computed ratio (value - _lower_bound) / (_upper_bound - _lower_bound) produced a number < 0 or > 1, so multiplying by 255 pushed g outside 0..255.
+
+Why it happened (root causes)
+1. The code assumes the caller always passes value inside [self._lower_bound, self._upper_bound]. If the caller passed a value outside that range, the mapping yields g < 0 or g > 255 and the ValueError is raised at lines 74–75.
+2. _lower_bound and _upper_bound may be configured incorrectly (for example _lower_bound >= _upper_bound). If _lower_bound == _upper_bound you would get a ZeroDivisionError at line 71; if _lower_bound > _upper_bound the denominator is negative and the ratio flips sign, producing out-of-range g.
+3. The error message is not helpful because it does not show which channel or what values caused the failure.
+
+Exactly where to look
+- __init__ (lines 30–44): check how lower_bound and upper_bound are set.
+- get_paint (lines 54, 71–75): the ratio calculation at line 71 and the range check + raise at lines 74–75.
+
+Concrete fixes (step-by-step)
+1. Validate bounds in __init__:
+   - Add a check that lower_bound < upper_bound and raise a clear ValueError if not.
+   Example:
+     if lower_bound >= upper_bound:
+         raise ValueError(f"lower_bound must be < upper_bound (got {lower_bound} >= {upper_bound})")
+
+2. Decide whether get_paint should accept out-of-range values or reject them. Two safe approaches:
+
+   Option A — Clamp inputs (recommended if you want graceful behavior):
+   - Compute denom = self._upper_bound - self._lower_bound.
+   - Compute ratio = (value - self._lower_bound) / denom.
+   - Clamp ratio into [0.0, 1.0] before converting to 0..255:
+       ratio = max(0.0, min(1.0, ratio))
+       g = int(ratio * 255.0)
+   - This prevents g from going outside 0..255 and avoids the ValueError.
+
+   Option B — Validate and raise a clear error (if out-of-range input is a programmer error):
+   - Before computing g, check if value < self._lower_bound or value > self._upper_bound and raise a descriptive ValueError that shows the offending value:
+       if not (self._lower_bound <= value <= self._upper_bound):
+           raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+
+3. Improve the error message if you keep the existing check:
+   - Include which channel failed and the actual numeric values so the caller can debug (e.g. "Color parameter out of range: g=..., expected 0..255").
+
+Minimal code changes to implement the clamp option
+- In __init__ add bounds check.
+- Replace the computation/check at lines 71–75 with:
+    denom = self._upper_bound - self._lower_bound
+    ratio = (value - self._lower_bound) / denom
+    ratio = max(0.0, min(1.0, ratio))   # clamp into [0,1]
+    g = int(ratio * 255.0)
+
+How to reproduce the failure
+- Call get_paint with value < lower_bound or > upper_bound (e.g., lower_bound=0.0, upper_bound=1.0 and value = -0.5 or 2.0).
+- Or construct the object with lower_bound >= upper_bound and call get_paint (this may raise ZeroDivisionError or produce inverted values).
+
+Summary
+- The failure occurs because get_paint maps value to 0..255 without ensuring value is inside [_lower_bound, _upper_bound] (line 71), so g can be <0 or >255 and triggers the check at lines 74–75. Fix by validating bounds in __init__ and either clamping value/ratio in get_paint or raising a clearer error that includes the offending values.

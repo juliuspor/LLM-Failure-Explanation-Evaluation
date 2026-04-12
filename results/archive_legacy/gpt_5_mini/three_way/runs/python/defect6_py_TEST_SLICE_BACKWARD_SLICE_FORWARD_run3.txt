@@ -1,0 +1,50 @@
+What happened (root cause)
+- At line 176 the code tests if x == int(x) to treat exact integers specially:
+  - 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - 177:     value = int(x)
+- int(-0.0) yields 0, so the comparison x == int(x) is True for x == -0.0, and value becomes 0 (sign lost).
+- Later the integer branch prints the integer form (line 192): self.add(str(value)) which produces "0".
+- Because the branch converts -0.0 to an integer 0 before any negative-zero check, the negative zero sign is discarded and the output becomes "0" instead of the required "-0.0".
+- In other words, the integer-special-case code (lines 176–194) runs for -0.0 and loses the sign; there is no earlier check to detect and preserve negative zero.
+
+Where it occurs (specific lines/variables)
+- Trigger/test point: Test calls self.cc.add_number(-0.0).
+- Problem enters at line 176: the condition x == int(x) evaluates True for x == -0.0.
+- value = int(x) (line 177) sets value = 0 (losing the negative sign).
+- The code path that prints the integer (line 192: self.add(str(value))) outputs "0".
+- No call to CodeConsumer.is_negative_zero or any math.copysign check happens before the integer branch to preserve sign.
+
+Why int(-0.0) causes the bug
+- Converting to int removes the floating-point sign bit; int(-0.0) == 0 and has no negative sign to carry to str(value).
+- Negative zero is a distinct floating-point sign bit, not preserved by integer casting; so the sign must be checked on the float before casting.
+
+Concrete, actionable fixes (exact steps & code snippets)
+Option A — Short and least invasive (preferred):
+1. Add a negative-zero check before the integer-special-case branch.
+2. If detected, emit "-0.0" and return.
+
+Insert immediately before line 176:
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+Option B — Use math.copysign inline if is_negative_zero is not available:
+    if x == 0.0 and math.copysign(1.0, x) < 0.0:
+        self.add("-0.0")
+        return
+
+Option C — More thorough: preserve sign for zeros across all branches
+- At the top of add_number, detect negative zero and canonicalize its textual form (e.g. "-0.0") before any int() conversion or str(x) formatting.
+
+Why these fixes work
+- They detect the float sign bit while x is still a float (before int(x) removes it), so you can produce the required "-0.0" text.
+- They avoid the integer branch that would otherwise produce "0".
+
+Extra notes / gotchas
+- Don’t rely on comparisons like x == 0.0 alone; use math.copysign or an is_negative_zero helper to distinguish -0.0 from +0.0.
+- The same approach preserves negative infinity or NaN behavior only if you check not math.isinf(x) and not math.isnan(x) as the code already does.
+- Make sure to return (or otherwise skip the integer branch) after handling negative zero so no later code overwrites the output.
+
+Summary
+- Root cause: the integer-special-case branch (lines ~176–192) runs for -0.0 because x == int(x) is True; int(-0.0) becomes 0 and the sign is lost, so code prints "0" instead of "-0.0".
+- Fix: detect negative zero before casting to int (e.g. using CodeConsumer.is_negative_zero or math.copysign) and output "-0.0" immediately.

@@ -1,0 +1,69 @@
+What failed
+- The failing assertion is on this snippet (lines numbered for reference):
+  1. gps = GrayPaintScale()
+  2. color = gps.get_paint(-0.5)
+  3. assert color == (0, 0, 0)
+
+- The assertion failed because color is not equal to the tuple (0, 0, 0). That is the concrete symptom: color != (0, 0, 0).
+
+Why this happens (root causes you must check)
+1. get_paint returned the wrong numeric values
+   - Maybe get_paint(-0.5) returned (0.0, 0.0, 0.0) (floats) instead of (0, 0, 0) (ints). In Python (0.0, 0.0, 0.0) != (0, 0, 0).
+   - Maybe get_paint returned a different gray value because the method clamps wrong (e.g., maps -0.5 to 0.5 or to 1.0), so you got (128, 128, 128) or (255, 255, 255).
+2. get_paint returned a different type (not a 3-tuple of ints)
+   - It could return a 4-tuple with alpha: (0, 0, 0, 1) or (0, 0, 0, 255).
+   - It could return a Color object (e.g., Color(r=0,g=0,b=0)) or a numpy array or PIL color type — then equality to (0,0,0) is False.
+3. get_paint uses a different input domain
+   - Maybe GrayPaintScale expects input in [0,255] or expects a normalized 0..1 but treats negatives by wrapping or normalizing differently. If -0.5 is interpreted as a valid value that does not map to 0, you get a nonzero color.
+4. Floating-point rounding
+   - get_paint might compute a float like (1e-17, 0.0, 0.0) which compares unequal to integer tuple.
+5. Hidden mutation or side effects
+   - Rare, but get_paint might return a reference to an internal mutable structure that was changed elsewhere before the assert.
+
+How to prove the exact cause (concrete steps)
+1. Inspect the real return value and type at the failing site — replace the assert with:
+   print("color repr:", repr(color))
+   print("color type:", type(color))
+   print("color elements and types:", [ (repr(x), type(x)) for x in color ] if hasattr(color, '__iter__') else "not iterable")
+   Then run the test and observe the output. That will immediately tell you whether color is floats, ints, has an alpha channel, or is some object.
+2. If it’s a numeric tuple with floats, print decimal repr precisely:
+   import math
+   print("values close to 0?:", [math.isclose(x, 0.0, abs_tol=1e-9) for x in color])
+3. If it’s an object (not a tuple), inspect its attributes:
+   print(dir(color))
+   print(getattr(color, 'r', None), getattr(color, 'red', None))
+4. Inspect GrayPaintScale.get_paint implementation at its definition (open that file and find the method). Look for:
+   - How negative inputs are treated (clamping, wrapping, normalization).
+   - Whether it returns floats or ints, 3 or 4 components, or an object.
+   - Any conversion lines like int(value * 255) or tuple(map(int, ...)).
+   Add line numbers or paste the function here if you want help reading it.
+
+Concrete fixes (pick the one that matches what you discover)
+- If get_paint returns floats but you expect ints:
+  - Fix: convert to ints before returning, or compare using floats. Example change in get_paint:
+      return (int(r), int(g), int(b))
+  - Or change test assertion to compare numerically:
+      assert tuple(int(x) for x in color) == (0, 0, 0)
+- If get_paint returns (r,g,b,a):
+  - Fix: either return only RGB, or change test to expect alpha:
+      assert color[:3] == (0, 0, 0)
+- If get_paint maps -0.5 incorrectly (does not clamp negatives to 0):
+  - Fix: clamp input at the start of get_paint:
+      x = max(0.0, min(1.0, x))   # if domain is 0..1
+  - Or explicitly handle negatives:
+      if x < 0: x = 0
+- If get_paint returns a Color object:
+  - Fix: make it return a plain tuple if your API promises that, or change tests to compare by attributes:
+      assert (color.r, color.g, color.b) == (0, 0, 0)
+- If floating precision causes inequality:
+  - Fix: round values before returning or in tests:
+      assert all(abs(c) < 1e-9 for c in color)
+  - Or return integers.
+
+Minimal immediate diagnostic change to your test (non-invasive)
+- Replace the failing assert temporarily with:
+   print(repr(color), type(color))
+   assert tuple(map(int, color[:3])) == (0, 0, 0)
+  This will show what color holds and let the test pass if the values are the expected grayscale but different type/format. After diagnosing, apply the appropriate fix in get_paint or your test.
+
+If you paste the GrayPaintScale.get_paint implementation (or the printed repr/type output), I’ll point exactly which line to change and give the exact code patch.

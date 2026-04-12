@@ -1,0 +1,56 @@
+What happened (root cause)
+- At line 335 the code sets inferred_type = type(array). That takes the type of the list object itself (e.g. <class 'list'>), not the element type stored in the list. So inferred_type becomes list, not the type of the contained elements.
+- At lines 337–340 the code falls back to inferred_type = object when the element is None (both array and element None path uses object).
+- At line 346 the code checks if inferred_type == object and expected_type != object and then raises TypeError.
+
+Why this causes the failing test
+- Your test calls ArrayUtils.add(None, None, expected_type=str).
+- Execution reaches the branch where both array is None and element is None, so inferred_type becomes object (line 340).
+- The code then compares inferred_type (object) to expected_type (str) at line 346; they differ, so it raises TypeError.
+- The test expects a one-element list [None] of the requested element type (String in the Java original or str here). Instead the function raises TypeError. The wrong inference (object) combined with the strict comparison against expected_type is the direct cause.
+
+Other incorrect behavior caused by the same bug
+- When an array argument is non-None, inferred_type = type(array) uses the list's type, not the element type. That will make subsequent checks compare list vs element types or treat the array as if its elements had type list, producing incorrect TypeErrors or wrong behavior.
+- Empty arrays ([]) or arrays whose elements are None are not inspected correctly; the code should look at element types or use expected_type when provided, but currently it doesn't.
+
+Where to change the code (specific variables / lines)
+- Change the inference at line 335–336: instead of inferred_type = type(array), infer the element type, not the list type. For example:
+  - If array is not None and non-empty: inspect its elements to determine element type (first non-None element or a common element type).
+  - If array is an empty list, do not use type(array); instead use expected_type (if provided) or fall back to object.
+- Change the fallback for both-None cases: when both array and element are None, prefer expected_type if provided (and do not treat expected_type != object as an error).
+- At line 346, compare against expected_type carefully: expected_type may be None (meaning "no expectation") — do not treat that as the same as object. Only raise when there is a real incompatibility between an inferred element type and a provided expected_type.
+
+Concrete minimal fix (steps)
+1. Replace the inference block (lines ~335–340) with:
+   - If array is not None:
+     - If array has any non-None elements: inferred_type = type(first_non_none_element)
+     - Else (empty list or all-None): inferred_type = expected_type if expected_type is not None else object
+   - Elif element is not None:
+     - inferred_type = type(element)
+   - Else (both None):
+     - inferred_type = expected_type if expected_type is not None else object
+2. Change the check at line 346 to only raise when:
+   - expected_type is not None AND inferred_type is not object AND expected_type is not inferred_type (or not compatible under your compatibility rules).
+   - In other words, treat expected_type=None as “no constraint” and treat object as the universal fallback that shouldn’t cause a raise if an explicit expected_type was supplied to guide the result.
+
+Example replacement (pseudo-Python):
+- Compute first_non_none = next((x for x in array if x is not None), None) when array is not None
+- If array is not None:
+    if first_non_none is not None:
+        inferred_type = type(first_non_none)
+    else:
+        inferred_type = expected_type if expected_type is not None else object
+  elif element is not None:
+    inferred_type = type(element)
+  else:
+    inferred_type = expected_type if expected_type is not None else object
+- Then:
+  if expected_type is not None and inferred_type is not object and not issubclass(inferred_type, expected_type):
+      raise TypeError(...)
+
+Why this fix works
+- It uses the element type (or the explicitly supplied expected_type) instead of the list object's type, so inferred_type will be str when you call add(None, None, expected_type=str).
+- It avoids raising a TypeError simply because the fallback inferred_type is object.
+- It correctly handles empty arrays and arrays of None elements by deferring to expected_type when available.
+
+This pinpoints the exact lines and variables: inferred_type at lines 335–340, the check at 346, and the variables array, element, expected_type. The failing behavior is caused by inferring type(array) (the list class) rather than the element type and by treating object as an incompatible type when expected_type is provided.

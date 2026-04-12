@@ -1,0 +1,49 @@
+What happened (where and why)
+- The function rejects any negative minutes at this check (line numbers relative to your slice):
+  - Line ~397: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Your error ValueError: Minutes out of range: -15 shows a negative minutes_offset (-15) was passed in and the function raised there. So the failure is happening before the arithmetic block or try/catch you showed — it’s the explicit range check rejecting a negative minutes value.
+
+Why this is the root cause (how the code and caller expectations mismatch)
+- The function’s API (as implemented) insists minutes_offset must be in [0,59], but callers commonly pass minutes with the sign that matches the hours (for example hours_offset = -5, minutes_offset = -15). When a caller does that, minutes_offset becomes negative and your check raises the ValueError.
+- The later code (lines 402–405) is written to combine hours and minutes into a total minutes value using:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic assumes minutes_offset is non-negative when hours are negative (so it subtracts minutes to make -5:15 -> -315). Because the check already rejects negative minutes, the intended combination only works if callers pass minutes as a positive absolute offset. But callers evidently passed signed minutes, so the function raised earlier instead of computing.
+
+What exactly to change (clear steps and example code)
+You have two reasonable fixes — pick one and apply it consistently:
+
+Option A — Accept signed minutes (recommended if callers expect signed minutes)
+1. Allow minutes_offset in [-59, 59] instead of [0,59].
+2. Compute total_minutes by applying the sign of hours_offset to minutes when hours_offset != 0; if hours_offset == 0 use the sign of minutes_offset.
+3. Use a local variable for the combined minutes instead of overwriting the input.
+
+Replacement snippet (replace the range check + combination block):
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+    hours_in_minutes = hours_offset * 60
+    # Combine into total minutes, preserving sign intent:
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+    elif hours_in_minutes > 0:
+        total_minutes = hours_in_minutes + abs(minutes_offset)
+    else:
+        # hours = 0: minutes_offset may be signed
+        total_minutes = minutes_offset
+
+    try:
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Option B — Require callers to pass non-negative minutes and document it (less change)
+- Keep the existing minutes range check but update documentation and call sites so callers pass minutes as an absolute number (0..59) and set hours negative when the whole offset is negative.
+- If you choose this, also rename minutes_offset to minutes_absolute to avoid confusion and add an assertion or a conversion helper at call sites.
+
+Summary
+- The immediate failure is caused by the minutes range check (minutes < 0) rejecting signed minutes (-15).
+- Fix by either accepting signed minutes and combining them correctly (Option A) or by enforcing and documenting that minutes must be non-negative and updating all callers (Option B). Option A is usually less surprising to callers who pass signed minute values.

@@ -1,0 +1,56 @@
+What happened (root cause)
+- The translate code mixes two different kinds of indexing: Python string indexes (code points) and UTF-16 code‑unit indexes. That mismatch is what causes the IndexError.
+- The failing check is in code_point_at (shown in your slice): lines 35–36
+  - 35: if index < 0 or index >= len(code_units):
+  - 36:     raise IndexError(f"String index out of range: {index}")
+  code_point_at expects the caller to pass an index into the list produced by to_utf16_code_units (a UTF‑16 code‑unit index).
+- The translator loop that calls code_point_at advances its index using Python string indexing (one step per Python character). For characters outside the Basic Multilingual Plane (BMP) — emoji like \U0001F630 — UTF‑16 represents them as a surrogate pair (two code units). When the loop sees a surrogate pair it advances incorrectly (or the loop increments by 1 while the UTF‑16 logic expects two code units), so later a call to code_point_at receives an index that is out of range for the code_units list and triggers the IndexError at line 35.
+- Concretely: your code constructs code_units = to_utf16_code_units(s) (line ~10) and then calls code_point_at(code_units, index). The index variable is not kept in the same unit-system as code_units (UTF‑16 units), so index can reach len(code_units) and cause the explicit IndexError.
+
+Where it happens (exact names/lines)
+- to_utf16_code_units(s) constructs code_units (slice lines 10–12).
+- code_point_at checks index against len(code_units) and raises (lines 35–36).
+- code_point_at then reads high = code_units[index] (line 38) and has the surrogate-pair combination logic (lines 39–44).
+- The IndexError originates at the check on line 35 because the caller passed an index that is a Python-string index rather than a UTF‑16 code‑unit index.
+
+Why the mismatch matters
+- Python 3 strings are sequences of Unicode code points; iterating by index moves by code points, not by UTF‑16 code units. For characters outside the BMP, a single Python position corresponds to one code point but two UTF‑16 code units. If you build a UTF‑16 code unit array and then use Python string indexes to access it (or vice versa), indexes will be inconsistent and can go out of bounds.
+
+Exactly what to change (concrete fixes, step-by-step)
+Pick one consistent approach and implement it. Two clear options:
+
+Option A — Work in Python code points (recommended for Python 3)
+1. Remove to_utf16_code_units entirely and make code_point_at operate on the original Python string.
+2. Implement code_point_at(s, index) to simply return ord(s[index]) for normal code points. Because Python stores full code points, you do not need surrogate handling in Python 3 unless you are running on a narrow-build Python (rare now). This keeps indexing consistent with the rest of the translator.
+3. Update all calls to code_point_at to pass the Python string and a Python string index.
+
+Minimal code change example:
+- Replace use of to_utf16_code_units and current code_point_at with:
+  def code_point_at(s: str, index: int) -> int:
+      if index < 0 or index >= len(s):
+          raise IndexError(...)
+      return ord(s[index])
+
+Option B — Fully work in UTF‑16 code units (only if you must mirror Java behavior)
+1. Keep to_utf16_code_units and make the translation loop iterate over code_units, not over Python string indexes.
+2. Wherever the translator currently increments an index by 1 per Python character, change it to increment by the number of UTF‑16 code units consumed (1 for BMP characters, 2 for surrogate pairs). That keeps the index passed to code_point_at valid.
+3. Ensure all places that build output and slice the input use the same code_unit indexing (you will need to map code_unit ranges back to Python string slices when assembling the output).
+
+Minimal steps for Option B:
+- After code_units = to_utf16_code_units(s), use a while loop:
+    i = 0
+    while i < len(code_units):
+        cp = code_point_at(code_units, i)   # expects UTF-16 index i
+        if cp > 0xFFFF:
+            i += 2
+        else:
+            i += 1
+  Make sure when you append characters to the output you convert code units back to a Python character (use chr(cp) for code points, not raw code units).
+
+Which to choose
+- If the rest of your codebase and tests expect Python behavior (translate_string is called with Python strings and compared to Python strings), Option A is simpler and less error-prone.
+- Use Option B only if you explicitly need Java/UTF‑16 indexing semantics.
+
+Summary
+- Root cause: index unit mismatch — code_point_at expects a UTF‑16 code‑unit index but the caller is using Python string (code point) indexing; that leads to an index reaching len(code_units) and the explicit IndexError at lines 35–36.
+- Fix by making the code use one consistent indexing model: either operate on Python code points everywhere (recommended) or operate on UTF‑16 code units everywhere and advance indices accordingly.

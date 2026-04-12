@@ -1,0 +1,61 @@
+What fails
+- The minutes validation at lines 396–397 incorrectly rejects valid negative minute offsets. The code does:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+  That means an input like (0, -15) or (-2, -15) — both valid according to the docstring — will raise ValueError here.
+
+- The arithmetic that combines hours and minutes is wrong for negative hours. These lines:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  produce the wrong total minutes when hours are negative and minutes are positive. Example:
+  - Input: hours_offset = -2, minutes_offset = 15
+  - hours_in_minutes = -120
+  - Code computes minutes_offset = -120 - 15 = -135 (which is -02:15 + an extra -15)
+  The correct total minutes is -120 + 15 = -105 (i.e. -01:45? — see below for intended semantics). The code sign logic is inverted for the negative-hour case.
+
+Why that breaks real inputs
+- According to your docstring, valid minute values are -59..+59, and certain sign combinations are allowed:
+  - (0, -15) should yield -00:15 — but line 396 rejects it.
+  - (-2, 15) should yield -02:15 — but the combination code computes -02:15 incorrectly as -02:15 plus extra negative, producing the wrong offset.
+- So the failure happens at the minutes range check (immediate ValueError) for negative minutes, and for negative hours the computed offset is wrong because you subtract minutes instead of adding them (or otherwise applying the intended sign rule).
+
+Where it occurs (exact lines / variables)
+- Validation failure: lines 396–397 (the slice you provided). Variable: minutes_offset.
+- Wrong arithmetic: in the try block, variables hours_in_minutes and minutes_offset are used/overwritten; the conditional uses hours_in_minutes < 0 to decide whether to subtract minutes_offset, which causes the incorrect computation when hours_offset is negative.
+
+What to change (step-by-step fixes)
+1. Fix the minutes range check:
+   - Allow negative minutes per the docstring. Replace the current check with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the documented sign rules explicitly:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (doc disallows positive hours with negative minutes).
+   - (Optionally) If you prefer the historical behaviour you mention in the docstring, keep other constraints accordingly.
+
+3. Compute the total minutes with the correct sign logic instead of altering minutes_offset in-place:
+   - If hours_offset > 0:
+       if minutes_offset < 0: raise ValueError(...)
+       total_minutes = hours_offset * 60 + minutes_offset
+     elif hours_offset < 0:
+       # minutes sign is ignored for negative hours per doc — combine as negative
+       total_minutes = hours_offset * 60 - abs(minutes_offset)
+     else:  # hours_offset == 0
+       total_minutes = minutes_offset  # minutes_offset can be negative or positive
+
+   - Then compute offset in millis from total_minutes:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Keep the existing try/except around the multiplication to catch overflow as before.
+
+Concrete example to verify after fixes
+- (0, -15) -> total_minutes = -15 -> allowed -> -00:15
+- (-2, 15) -> total_minutes = -120 - 15 = -135 minutes -> -02:15 (total_minutes in minutes is -135 minutes = -02:15)
+  Note: -135 minutes equals -2 hours and -15 minutes => -02:15, which matches the doc examples.
+- (2, -15) -> raises ValueError (positive hours with negative minutes), per doc.
+
+Summary
+- Root causes: (1) minutes validation disallows negative minutes though the doc allows them; (2) the combination logic when hours are negative subtracts minutes instead of applying the intended sign rule, producing wrong offsets. Fix the minutes range check, enforce the sign rules explicitly, and compute total_minutes with clear expressions rather than mutating minutes_offset with the wrong sign.

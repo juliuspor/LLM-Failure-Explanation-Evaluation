@@ -1,0 +1,55 @@
+What went wrong (root cause)
+- The bug is in the try block where you compute the total offset in minutes. You overwrite minutes_offset and use the wrong sign when hours_offset is negative.
+- Specifically, at these lines:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- For inputs (-2, -15):
+  - hours_in_minutes = -120
+  - code does minutes_offset = -120 - (-15) = -105
+  - That yields -105 minutes (-1h45m), but the expected result is -135 minutes (-2h15m).
+- In short: when hours are negative and minutes are negative, subtracting minutes_offset (which is already negative) reduces the magnitude instead of increasing it. The code incorrectly handles the sign combination and corrupts the total minutes variable used in the multiply.
+
+Where it occurs
+- The incorrect behavior happens inside for_offset_hours_minutes in the try block where total minutes are calculated (the three lines shown above). The wrong value is then passed to FieldUtils.safe_multiply and ultimately to for_offset_millis, producing an incorrect zone id/offset.
+
+Why it fails logically
+- The method attempts to fold hours and minutes into a single minute total, but the branching tests the sign of hours_in_minutes and then blindly subtracts or adds minutes_offset. That logic only works if minutes_offset is non-negative when hours_in_minutes < 0. The docstring requires accepting negative minutes in combination with negative hours; your code must treat both (-2, -15) and (-2, 15) as -2h - 15m (i.e. -135 minutes). The current code does not.
+
+Concrete fixes (step-by-step)
+1. Do not reuse minutes_offset for the combined total (use a new variable total_minutes for clarity).
+2. Implement consistent sign handling according to the docstring rules:
+   - If hours_offset > 0: minutes_offset must be >= 0 (ValueError otherwise). total_minutes = hours_offset*60 + minutes_offset
+   - If hours_offset < 0: minutes_offset must be >= 0 or <=0? The doc allows +/- minutes; the result should be negative magnitude: total_minutes = hours_offset*60 - abs(minutes_offset)
+   - If hours_offset == 0: total_minutes = minutes_offset (allow positive or negative)
+3. Then multiply total_minutes by MILLIS_PER_MINUTE.
+
+Minimal replacement code (paste into your method to replace the try-block calculation):
+
+    # compute total minutes explicitly and correctly
+    hours_in_minutes = hours_offset * 60
+    if hours_offset > 0:
+        if minutes_offset < 0:
+            raise ValueError(f"Minutes out of range for positive hours: {minutes_offset}")
+        total_minutes = hours_in_minutes + minutes_offset
+    elif hours_offset < 0:
+        # minutes may be positive or negative, but they should increase the magnitude
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+    else:  # hours_offset == 0
+        total_minutes = minutes_offset
+
+    try:
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Notes and why this fix works
+- Using total_minutes avoids overwriting the original minutes_offset input.
+- abs(minutes_offset) for negative hours guarantees both (-2, 15) and (-2, -15) yield -120 - 15 = -135.
+- The explicit branches follow the docstring rules (positive hours cannot have negative minutes, zero hours passes minutes through, negative hours always produce a negative total magnitude).
+
+This will fix the failing tests (e.g. (-2, -15) producing -02:15) by producing the correct minute total before converting to milliseconds.

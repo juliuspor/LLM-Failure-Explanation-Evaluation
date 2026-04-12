@@ -1,0 +1,44 @@
+What happened (where it fails)
+- The immediate failure can occur at line 56:
+  ch = chr(start + _RANDOM.randrange(gap))
+  Two different things can raise a ValueError here depending on the inputs:
+  1. If end <= start then gap == end - start <= 0 and randrange(gap) will throw a ValueError (or your explicit check at the next line will raise "bound must be positive" if moved). In your code you do check gap <= 0 and raise ValueError("bound must be positive"), so callers that pass end <= start hit that raise (the check is at the top of the excerpt).
+  2. If start is negative or start + something >= sys.maxunicode (>= 0x110000) then chr(...) will raise ValueError("chr() arg not in range(0x110000)").
+
+Why it happens (root causes)
+- No validation of start and end as valid Unicode code point bounds:
+  - The function only checks gap <= 0 (which detects end <= start) but does not check that start >= 0 and end <= 0x110000. If start < 0 or end > 0x110000, chr() will fail at line 56.
+- The error message/placement is ambiguous:
+  - The check gap <= 0 raises "bound must be positive" (not specific to this function) and mirrors Random#nextInt wording; that may confuse callers. The code comment says “missing validation when end <= start”, but the actual check exists; what is missing is the additional validation for the valid Unicode range and clearer error messages.
+
+Where it occurs in this snippet
+- Line 52 (gap = end - start) computes the value used by randrange.
+- The explicit check for a non-positive gap is right after that: if gap <= 0: raise ValueError("bound must be positive")
+- The risky call that can fail for invalid code points is line 56: ch = chr(start + _RANDOM.randrange(gap))
+
+Concrete fixes (step‑by‑step)
+1. Validate ordering explicitly and give a clear message:
+   - Replace or supplement the gap check with an explicit test and message:
+     if end <= start:
+         raise ValueError(f"end ({end}) must be greater than start ({start})")
+2. Validate Unicode code-point bounds before calling chr:
+   - Enforce start >= 0 and end <= 0x110000:
+     if start < 0 or end > 0x110000:
+         raise ValueError(f"start and end must be within [0, 0x110000), got start={start}, end={end}")
+3. (Optional) Validate types if callers might pass non-integers:
+   - if not isinstance(start, int) or not isinstance(end, int):
+         raise TypeError("start and end must be integers")
+4. Keep the random selection after validation:
+   - After these checks, gap = end - start is guaranteed > 0 and start + randrange(gap) is guaranteed a valid argument for chr.
+
+Example patch (where to change)
+- Before computing gap (between the start/end defaulting block and gap calculation), add:
+    if not isinstance(start, int) or not isinstance(end, int):
+        raise TypeError("start and end must be integers")
+    if end <= start:
+        raise ValueError(f"end ({end}) must be greater than start ({start})")
+    if start < 0 or end > 0x110000:
+        raise ValueError(f"start and end must be within valid Unicode range: 0 <= start < end <= 0x110000")
+
+Summary
+- The function either raises for end <= start (gap <= 0) or, if start/end are outside valid Unicode code points, chr(...) raises on line 56. Add explicit validation for end > start and for start/end being inside [0, 0x110000) and improve error messages to prevent these failures and make the cause obvious.

@@ -1,0 +1,45 @@
+What happened (where it failed)
+- The failure happens inside get_paint (defined at line 54). The code computes g on line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after that, lines 74–75 check g and raise a ValueError:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- The test triggered that ValueError because g was either < 0 or > 255.
+
+Why it happened (root cause)
+- The expression for g assumes:
+  1) upper_bound - lower_bound != 0 (otherwise you divide by zero), and
+  2) value is within the [lower_bound, upper_bound] range so the normalized result is between 0.0 and 1.0.
+- If value is outside the bounds, or if the bounds are equal, the calculation can produce a number less than 0 or greater than 255 (or a division by zero in the equal-bounds case). That produces g outside [0,255] and triggers the raise on line 74.
+- The error message itself ("Color parameter outside of expected range: Red Green Blue") is unhelpful because it does not show the offending variable values (g, value, lower_bound, upper_bound) or the reason (out of range vs division by zero).
+
+Concrete, step-by-step fixes
+1. Validate bounds once in __init__ (lines 30–44):
+   - Ensure upper_bound > lower_bound. If not, raise a clear ValueError.
+     Example change:
+       if upper_bound <= lower_bound:
+           raise ValueError(f"upper_bound must be > lower_bound (got {upper_bound} <= {lower_bound})")
+2. Validate input value at the start of get_paint (line 54) or clamp intentionally:
+   - Option A (reject out-of-range inputs):
+       if value < self._lower_bound or value > self._upper_bound:
+           raise ValueError(f"value {value} not in [{self._lower_bound}, {self._upper_bound}]")
+   - Option B (allow but clamp to bounds):
+       value = min(max(value, self._lower_bound), self._upper_bound)
+   Pick one depending on desired behavior.
+3. Protect the division (line 71):
+   - After step 1, denominator (upper - lower) cannot be zero, so division-by-zero is prevented.
+4. Compute g robustly and ensure it ends up in [0,255]:
+   - Use rounding and clamping:
+       ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+       g = int(round(ratio * 255.0))
+       g = max(0, min(255, g))
+5. Improve the error message at lines 74–75 if you keep the explicit raise:
+   - Include variable values so debugging is immediate:
+       raise ValueError(f"Computed color channel g={g} out of range [0,255] for value={value}, bounds=[{self._lower_bound},{self._upper_bound}]")
+
+Why these fixes resolve the failure
+- Validating bounds prevents division by zero.
+- Validating or clamping value prevents g from being outside the expected 0–255 range.
+- A better error message tells you exactly which input caused the problem (value and bounds), so tests or callers can be fixed quickly.
+
+If you want, I can produce a small patched version of get_paint and __init__ showing these changes.

@@ -1,0 +1,43 @@
+What happened (where it fails)
+- The code raises IndexError at line 36: the check on line 35 flags index as invalid because index >= len(code_units).
+- Immediately after that (line 38) the code tries to read high = code_units[index]. Because the check found index invalid, that means the caller supplied an index that does not exist in code_units, so the function fails before it can read any code unit.
+
+Why it happened (root cause)
+- The caller and this function are using different indexing models. The caller is almost certainly passing an index that refers to Python string code points (characters) or to some higher-level character positions, while code_units is a list of UTF-16 code units.
+- Characters outside the Basic Multilingual Plane (BMP), such as emoji or certain rare CJK characters, are represented using two UTF-16 code units (a surrogate pair). That makes len(code_units) larger than len(s) in terms of code points, and it also shifts how indexes map between code points and code units.
+- Because of that mismatch, the caller can pass an index that is valid for the string (or for a different indexing scheme) but out of range for code_units, so the index check on line 35 fails and IndexError is raised.
+
+Exact places to look in the snippet
+- Line 35–36: the check and the raised IndexError tell you index >= len(code_units).
+- Line 38: the code expects code_units[index] to exist but it does not because code_units has a different length/structure than the caller expects.
+- Lines 39–43: the code handles surrogate pairs if present, confirming this function is working at the UTF-16 code-unit level, not at Python "characters" (code points) level.
+
+How to fix it (concrete steps)
+Choose one of these fixes depending on what the caller intends:
+
+1) If the caller passed a code-point index (most likely):
+- Change the caller to use code-unit indexes, or better: change this function to accept a code-point index instead.
+- Implementation steps:
+  - Convert the string index into the corresponding UTF-16 code-unit index before calling this function. For example, iterate the string up to the desired code-point index and count how many UTF-16 code units each code point would produce (1 for BMP code points, 2 for supplementary) and use that sum as the index.
+  - Or avoid this function entirely and use ord(s[index]) to get the code point directly if that is what you need.
+
+2) If the function should operate directly on UTF-16 code units (and the caller should pass such an index):
+- Make sure the caller passes a UTF-16 code-unit index, not a Python character index.
+- Example helper to get code units reliably:
+  - Build code_units by encoding the string: units = list(int.from_bytes(b[i:i+2], 'little') for i in range(0, len(b), 2)) where b = s.encode('utf-16-le'). Then indexes in units correspond to UTF-16 code units. Use those units consistently.
+
+3) Make the function robust by documenting and enforcing its contract:
+- Document whether index is a code-point index or a UTF-16 code-unit index.
+- If you want both behaviors, add a wrapper that converts between the two. For example:
+  - def code_point_to_utf16_index(s, code_point_index): iterate s[:code_point_index], sum 1 for BMP and 2 for supplementary; return that sum. Then call your current function with the returned index.
+
+Minimal code examples (concrete)
+- To get the code point at Python index i:
+  - value = ord(s[i])  # no UTF-16 conversion needed
+- To get a list of UTF-16 code units:
+  - b = s.encode('utf-16-le')
+  - code_units = [int.from_bytes(b[i:i+2], 'little') for i in range(0, len(b), 2)]
+
+Summary
+- The immediate failure is IndexError at line 36 because the passed index does not exist in code_units.
+- The root cause is an index mismatch: the caller uses a different index unit (likely Python code points) than this function (UTF-16 code units). Fix by aligning the indexing model: either convert the index before calling, or change the function to accept code-point indexes (or use ord(s[index]) when appropriate).

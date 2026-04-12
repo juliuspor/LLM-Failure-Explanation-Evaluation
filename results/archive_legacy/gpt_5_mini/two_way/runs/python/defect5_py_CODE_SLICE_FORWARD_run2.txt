@@ -1,0 +1,50 @@
+What fails
+- Root cause: on line
+      inferred_type = type(array)
+  the code sets inferred_type to the Python type of the list object (i.e. list) instead of the element/component type that you actually need. That wrong type flows into ArrayUtils._copy_list_grow1(...) and into the later cast check, producing incorrect behavior (and ultimately a runtime type/cast error).
+
+What actually happens, and where
+1. Line with the bug: inferred_type = type(array)
+   - When array is a list, type(array) is list (the container type), not the type of elements inside the list.
+2. new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+   - _copy_list_grow1 expects an element/component type (so it can create a new list of the correct component type), but receives list instead of element type. That produces a list whose component type is wrong.
+3. new_list[len(new_list) - 1] = element
+   - If the element's type does not match the incorrect component type set earlier, an assignment or later cast fails.
+4. The conditional check
+      if inferred_type == object and expected_type != object:
+   will almost never run as intended because inferred_type is list (not object) when array was provided; so the code won't catch the problematic case here.
+
+Why this is the root cause (no guessing)
+- You asked for an element-type, but the code takes the container's type. The variable name inferred_type says it should be the element type, but the expression type(array) returns the container type. That mismatch causes the wrong component type to be used downstream, causing ClassCastException-like failures when elements are inserted or lists are interpreted as having a different component type.
+
+Concrete failures you will see
+- If array is a list whose elements are, say, ints, inferred_type becomes list, so _copy_list_grow1 will create a list typed as list (or otherwise wrong). Assigning an element of a different type or a later casting operation will raise a TypeError / ClassCast-like error at the assignment or at a cast performed by ArrayUtils.
+
+How to fix it (step-by-step, specific)
+1. Derive the component type from the elements, not from the container:
+   - If array is not None and len(array) > 0, use type(array[0]) as inferred_type.
+   - Else if element is not None, use type(element).
+   - Else fall back to object (or expected_type if provided).
+2. Factor in expected_type early: if expected_type is provided, prefer it (or validate against it).
+3. Replace the problematic block with explicit logic. Example replacement:
+
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+4. Keep the existing check, but compare correctly:
+    if inferred_type is object and expected_type is not None and expected_type is not object:
+        raise TypeError(...)
+
+5. Ensure ArrayUtils._copy_list_grow1 receives the element/component type, not list.
+
+Why this fix works
+- type(array[0]) gives the actual runtime type of elements. Using expected_type when available makes your intent explicit. With the component type correct, _copy_list_grow1 will create a list with the right component type and subsequent assignments/casts will not fail.
+
+Summary (one sentence)
+- The code uses type(array) (the list/container class) instead of the element type (e.g. type(array[0]) or expected_type), causing _copy_list_grow1 and later type checks/assignments to use the wrong component type and produce runtime type/cast errors.

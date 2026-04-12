@@ -1,0 +1,40 @@
+What happened (where it fails)
+- The code treats -0.0 as an integer because of the test at line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  For x == -0.0, int(x) is 0 and the equality x == int(x) is True (because -0.0 == 0.0).
+- That makes the function take the integer branch (lines 177–192) and set value = int(x) (line 177). int(-0.0) yields 0, losing the negative sign.
+- Later the code prints str(value) (line 192), so it outputs "0" instead of the required "-0.0".
+- The root cause is that converting to int (value = int(x)) and comparing x == int(x) loses the sign bit for negative zero before any code checks the sign. The negative-zero case is never detected or preserved in that branch.
+
+Why this matters
+- IEEE-754 negative zero is distinct from positive zero for sign-preservation. Tests expect -0.0 to be emitted as "-0.0".
+- The code's integer branch assumes integerness can be determined by equality with int(x), but that check collapses -0.0 into 0.0 and the sign is lost.
+
+Exactly where to change it (concrete steps)
+1. Detect negative zero before converting to int or taking the integer branch (before line 176).
+2. If x is negative zero, emit "-0.0" and return immediately (so the integer branch is not executed).
+3. Use a reliable negative-zero test such as math.copysign(1.0, x) < 0 or a dedicated is_negative_zero utility (example below).
+
+Exact minimal patch (insert before line 176):
+    # handle negative zero first — int(-0.0) would lose the sign
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        self.add("-0.0")
+        return
+
+Alternative: use a utility method:
+    @staticmethod
+    def is_negative_zero(x):
+        return x == 0.0 and math.copysign(1.0, x) < 0
+
+    # then at top of add_number:
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+Why this fix works
+- math.copysign(1.0, x) returns -1.0 when x has the negative sign bit even if its magnitude is zero. That lets you detect -0.0 before you call int(x) or str(x), preserving the sign in output.
+- Returning immediately prevents the integer branch from converting -0.0 into 0 and printing "0".
+
+Notes
+- The existing logic that inserts a space when a negative number follows a minus (prev == '-' check) can remain unchanged; it only deals with spacing and not sign preservation.
+- Do not rely on x == int(x) to decide formatting for zeros if you need to preserve negative-zero semantics.

@@ -1,0 +1,45 @@
+What happened (root cause)
+- At line 176 you test "if x == int(x) ..." and then at line 177 you do "value = int(x)" and at line 178 "mantissa = value".
+- For x == -0.0, Python's int(-0.0) evaluates to 0 and the comparison x == int(x) is True. Converting to int loses the sign bit: value becomes 0 (positive zero) and all downstream formatting that uses value (lines 181–192, specifically the self.add(str(value)) call at line 192) produces "0" instead of "-0.0".
+- The test expected the negative-zero string (or negative zero float behavior) but the code canonicalized -0.0 into 0 too early, therefore the output was 0.
+
+Where it occurs
+- The problematic conversion is in the branch starting at line 176 and the immediate conversion at line 177. The loss of sign happens before the code chooses representations and before the self.add calls at lines 190, 192, and 194.
+
+Why the sign is lost
+- -0.0 compares equal to 0.0, and int(-0.0) == 0. The sign bit of a floating-point negative zero is not preserved by int(), so any logic that relies on int(x) will not be able to distinguish -0.0 from +0.0.
+
+Concrete fixes (step-by-step)
+1. Detect negative zero before converting to int. Use math.copysign or an equivalent test:
+   - If x == 0.0 and math.copysign(1.0, x) < 0.0 then x is negative zero.
+2. Short-circuit the integer branch for negative zero so you preserve the original string/representation:
+   - Example change around lines 176–178:
+     - Replace:
+       if x == int(x) and not math.isinf(x) and not math.isnan(x):
+           value = int(x)
+           mantissa = value
+     - With:
+       if x == int(x) and not math.isinf(x) and not math.isnan(x):
+           if x == 0.0 and math.copysign(1.0, x) < 0.0:
+               # preserve negative zero representation
+               self.add(str(x))
+               continue   # or otherwise skip the integer-handling branch
+           value = int(x)
+           mantissa = value
+3. Alternatively, when you reach the point you would call self.add(str(value)), check if x was negative zero and use str(x) instead.
+
+Why this fix works
+- The check uses math.copysign to detect the sign of zero without changing x. Preserving str(x) for -0.0 yields "-0.0" (or the same negative-zero representation the test expects) instead of "0".
+
+Minimal code example
+- At top of the function ensure you have "import math", then modify like this:
+
+   if x == int(x) and not math.isinf(x) and not math.isnan(x):
+       if x == 0.0 and math.copysign(1.0, x) < 0.0:
+           self.add(str(x))
+           continue
+       value = int(x)
+       mantissa = value
+       ...
+
+This directly addresses the failure "Expected -0.0, got 0" by preventing the integer conversion from discarding the negative-zero sign.

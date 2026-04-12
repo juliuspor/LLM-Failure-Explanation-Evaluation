@@ -1,0 +1,50 @@
+What happened (where)
+- The bug is in the code near the slice you provided, around lines 402–405:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+  - 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- The method reuses the parameter name minutes_offset to hold a combined minutes value, and the arithmetic there is wrong for some sign combinations (not matching the docstring). That causes incorrect offsets (or the wrong ValueError behavior) for mixed sign inputs such as (-2, 15) or (-2, -15).
+
+Why it fails (root cause)
+- The code tries to combine hours_in_minutes and minutes_offset by doing either subtraction or addition, but the branch logic is incorrect and/or uses the same variable name for two different things. As a result:
+  - For negative hours (hours_in_minutes is negative), the code must subtract the absolute value of the minutes when minutes are positive (so (-2, 15) -> -120 - 15 = -135 minutes). The current lines do not consistently perform that operation.
+  - Reusing minutes_offset confuses the original minute sign and leads to wrong arithmetic when converting to total minutes.
+- Because total minutes are computed incorrectly, the multiplication by DateTimeConstants.MILLIS_PER_MINUTE produces a wrong millisecond offset, giving wrong zone IDs and offsets or triggering the "Offset is too large" check improperly.
+
+Exactly what to change (step-by-step)
+1. Stop reusing minutes_offset for the combined value. Compute a new variable, e.g. total_minutes.
+2. Follow the docstring sign rules:
+   - If hours > 0:
+     - minutes must be 0..59 (minutes < 0 should raise ValueError).
+     - total_minutes = hours * 60 + minutes
+   - If hours < 0:
+     - minutes must be -59..59 (both signs allowed)
+     - total_minutes = hours * 60 - abs(minutes)  (so both (-2, 15) and (-2, -15) produce -135)
+   - If hours == 0:
+     - total_minutes = minutes (minutes sign determines offset sign)
+3. Multiply total_minutes by MILLIS_PER_MINUTE and continue with the existing overflow checks and return.
+
+Concrete replacement snippet (pseudo-Python you can drop in at lines ~402–405)
+- Assume variables hours and minutes are the input parameters, and hours_in_minutes = hours * 60 exists:
+
+    # compute total minutes correctly, do not reuse minutes_offset
+    if hours > 0:
+        if minutes < 0:
+            raise ValueError("Positive hours with negative minutes is not allowed")
+        total_minutes = hours_in_minutes + minutes
+    elif hours < 0:
+        # for negative hours the minutes always extend the negative magnitude
+        total_minutes = hours_in_minutes - abs(minutes)
+    else:  # hours == 0
+        total_minutes = minutes
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- After this change the tests described in your suite (including (-2, 15) and (-2, -15)) will yield -02:15 (i.e. -8100000 ms) and (+02, -15) will raise ValueError as required.
+
+Why this fixes it
+- It matches the docstring sign rules exactly, avoids variable reuse confusion, and produces the correct total minute value before converting to milliseconds, so IDs and offsets will be correct and validations consistent.
+
+Where the error manifested in your tests
+- Tests that expect (-2, 15) or (-2, -15) to produce the same negative offset fail because the previous arithmetic produced the wrong sign/magnitude (or raised when it shouldn't). Fixing the total_minutes computation resolves those failures.

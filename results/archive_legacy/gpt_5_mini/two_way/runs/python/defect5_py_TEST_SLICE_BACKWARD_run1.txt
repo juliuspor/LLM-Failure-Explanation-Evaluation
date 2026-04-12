@@ -1,0 +1,58 @@
+What happened (where, what variable, and the root cause)
+
+- Location: the problem is in the inference branch shown in the slice (lines ~335–347).
+- Variables involved: array, element, inferred_type, expected_type.
+- Root cause: inferred_type is set to the wrong thing when array is non-None (line 336). The code uses type(array) (the type of the whole container, e.g. list) instead of the element type (the type of items inside the array). That makes inferred_type equal to list (or whatever container class) instead of str, int, etc. Separately, when both array and element are None the code falls through to set inferred_type = object (line 340) and then raises TypeError if expected_type is not object (line 346–347). That raise is incorrect: ArrayUtils.add(None, None, expected_type=str) should produce a one-element array of the expected type (e.g. [None]), not raise.
+
+Concrete sequence that fails (using your test test_add_null_to_null_with_expected_type)
+1. array is None and element is None -> the code runs the branch that sets inferred_type = object (line 340).
+2. expected_type is str (your test passes expected_type=str).
+3. Line 346 checks if inferred_type == object and expected_type != object and then raises TypeError (line 347). This is the exact failure your test shows: instead of returning [None] it throws a TypeError (mirrors the Java ClassCastException described in the test docstring).
+
+Why this is wrong
+- type(array) is the wrong thing to infer element type from; it returns the container class (list), not the type of elements inside the container. That causes bad decisions later (type mismatches and unnecessary errors).
+- When both array and element are None, inferred_type should defer to expected_type (if provided) and not trigger a raise. Raising at line 346 is too strict and mis-handles the expected_type hint.
+
+Exact lines to change and what to do (step-by-step fixes)
+
+1. Replace line 336 (inferred_type = type(array)) with logic that uses element type(s) from the array:
+   - If array is a sequence and non-empty: set inferred_type = type(array[0]) (or better: check all elements and promote to object if mixed types).
+   - If array is empty and expected_type is provided: set inferred_type = expected_type.
+   - If array is empty and no expected_type: set inferred_type = object.
+
+2. Change the handling when both array and element are None (line 340 and the subsequent check):
+   - If inferred_type becomes object but expected_type is provided (expected_type != object), do not raise. Instead set inferred_type = expected_type so we honor the caller's expected_type (this is the purpose of expected_type).
+   - Only raise a TypeError when there is a true conflict between an already-determined element type and expected_type (for example, inferred_type is int and expected_type is str). That check should be explicit and should compare element types, not container types.
+
+3. Add a small uniform-type check if you care about homogenous arrays:
+   - When inferring from array contents, consider scanning the array for element types; if more than one element type is found, set inferred_type = object to reflect mixed types.
+
+Concrete pseudo-fix (minimal changes tied to the problematic lines)
+- Replace:
+  inferred_type = type(array)
+- With something like:
+  if isinstance(array, (list, tuple)):
+      if len(array) > 0:
+          inferred_type = type(array[0])
+          # optionally: if any(type(x) != inferred_type for x in array[1:]): inferred_type = object
+      else:
+          inferred_type = expected_type if expected_type is not None else object
+  else:
+      inferred_type = type(array)  # fallback if array is not a sequence
+
+- Replace the raise block:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+- With:
+  if expected_type is not None and inferred_type != object and inferred_type is not expected_type:
+      # true conflict between known element type and caller's expected_type
+      raise TypeError(...)
+  if expected_type is not None and inferred_type == object:
+      inferred_type = expected_type  # honor caller's expected type
+
+Why these changes fix the tests
+- When array and element are both None and expected_type=str, inferred_type will become str instead of object, and no TypeError will be raised; ArrayUtils.add can construct a list with a single None element and return it (test_add_null_to_null_with_expected_type passes).
+- When array is non-empty, inferred_type will be derived from element types instead of the list class, so type checks will be meaningful and not comparing container types to element types.
+- Only real type conflicts cause a TypeError; expected_type acts as a hint to be honored rather than a trigger for failure when types are unknown.
+
+If you want, I can produce a concrete patch for the function showing exact replacement lines.

@@ -1,0 +1,59 @@
+What happened (where it fails)
+- The failure happens when the code combines an hours value and a minutes value into a single offset and then multiplies by DateTimeConstants.MILLIS_PER_MINUTE. The visible lines are 400 (minutes validation), 406/408 (combining minutes with hours), 409 (FieldUtils.safe_multiply), 411 (raising "Offset is too large"), and 412 (return).
+- The immediate symptom is that FieldUtils.safe_multiply (line 409) triggers the "Offset is too large" path (line 411). That happens when the computed minutes value passed to safe_multiply is far larger in magnitude than expected and causes an overflow detection.
+
+Why it fails (root cause)
+- At line 400 you validate that minutes_offset is in [0,59]. That variable is the minutes component at that point.
+- Later (lines 406 and 408) the same variable minutes_offset is reused and overwritten with the combined minutes value:
+  - If hours are negative, the code does minutes_offset = hours_in_minutes - minutes_offset (line 406).
+  - Otherwise it does minutes_offset = hours_in_minutes + minutes_offset (line 408).
+- The problem occurs when hours_in_minutes is already negative (hours < 0) and minutes_offset is a positive minute component (0–59). Subtracting a positive minute from an already negative hours_in_minutes makes the absolute value larger than intended, and if hours and minutes were large enough this combined value overflows when multiplied by MILLIS_PER_MINUTE at line 409.
+- In short: reusing minutes_offset for two different meanings (first as minute component, later as total minutes) and subtracting the minute component from a negative hours_in_minutes yields a wrong (too-large-in-magnitude) intermediate value that triggers overflow detection in FieldUtils.safe_multiply. That is the precise place and cause of the failure.
+
+Concrete reproduction scenario
+- Example: hours = -18, minutes = 30.
+  - hours_in_minutes = hours * 60 = -1080
+  - minutes_offset (minutes component) = 30 (validated at line 400)
+  - code does minutes_offset = hours_in_minutes - minutes_offset → -1080 - 30 = -1110
+  - multiply by MILLIS_PER_MINUTE gives a value whose magnitude triggers overflow detection and causes "Offset is too large" (line 411).
+
+Exact fixes (step-by-step)
+1. Stop reusing minutes_offset for two meanings. Introduce clear local names:
+   - minutesComponent (0..59) validated at line 400
+   - totalMinutes for the combined value
+2. Compute totalMinutes using the sign of hours, not by subtracting from an already-signed hours_in_minutes:
+   - long totalMinutes = hours * 60L;
+   - if (hours < 0) totalMinutes -= minutesComponent;
+   - else totalMinutes += minutesComponent;
+   (This keeps the arithmetic intention explicit.)
+3. Use a wide type for the multiplication check before passing to FieldUtils.safe_multiply:
+   - Compute totalMinutes as a long (or the equivalent wide integer type in your language).
+   - Call FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE) (or ensure safe_multiply accepts/handles the wide type).
+4. Replace minutes_offset usages at lines 406–409 with the new totalMinutes variable and then proceed to line 409 with the correct value.
+5. Add unit tests for boundary cases:
+   - hours negative with non-zero minutes (e.g., -1:30, -18:30)
+   - hours positive with minutes (e.g., 5:45)
+   - max/min hour values that approach overflow
+
+Code change sketch (illustrative)
+- Before (problematic):
+  - minutes_offset validated (line 400)
+  - if (hours < 0) minutes_offset = hours_in_minutes - minutes_offset; else minutes_offset = hours_in_minutes + minutes_offset; // lines 406/408
+  - offset = FieldUtils.safe_multiply(minutes_offset, MILLIS_PER_MINUTE); // line 409
+- After (fixed):
+  - int minutesComponent = minutes_offset; // result of line 400 validation
+  - long totalMinutes = hours * 60L; // compute hours_in_minutes safely
+  - if (hours < 0) totalMinutes -= minutesComponent; else totalMinutes += minutesComponent;
+  - long offset = FieldUtils.safe_multiply(totalMinutes, MILLIS_PER_MINUTE);
+
+Why this fixes it
+- It avoids the accidental sign/magnitude amplification caused by subtracting a positive minute component from an already-negative hours_in_minutes that was stored in the same variable.
+- It makes the arithmetic explicit and uses a wide integer type to prevent unintended overflow before the safe_multiply check.
+
+References to exact lines/methods
+- Validation: line 400 (if minutes_offset < 0 or > 59)
+- Combining minutes/hours (buggy reuse): lines 406 and 408
+- Multiplication/overflow check: FieldUtils.safe_multiply at line 409
+- Overflow handling path triggered: line 411 ("Offset is too large")
+
+If you want, paste the surrounding method (lines ~390–420) and I’ll produce a corrected code snippet using exact variable names and types for your codebase.

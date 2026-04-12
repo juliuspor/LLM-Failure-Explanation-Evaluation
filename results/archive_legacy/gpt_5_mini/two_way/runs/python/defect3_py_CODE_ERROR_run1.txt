@@ -1,0 +1,62 @@
+What happened (symptom)
+- The loop raises IndexError: "String index out of range: 2" while calling code_point_at(code_units, pos).
+- That happens inside the inner for-loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it fails (root cause)
+- translate_codepoint(...) returns consumed, which your code treats as "how many codepoints were handled" and then tries to advance pos by re-reading the remaining code units to compute their char lengths.
+- But code_point_at(code_units, pos) assumes a next code unit exists when it sees a high surrogate (it will access pos+1). If pos points to the last index (length - 1) the call attempts to read index length (out of range) and you get IndexError.
+- The inner loop advances pos in small steps by calling code_point_at repeatedly. If consumed > 1, the loop can call code_point_at when pos is at the last code unit and that call requires pos+1, causing the out-of-range access.
+- In other words: you call translate_codepoint that already consumed surrogate pairs, then you try to discover surrogate lengths again by calling code_point_at on positions that may be near the end of the array. Those additional reads can go past length-1 and throw IndexError.
+
+Concrete example that triggers the bug
+- code_units has length = 2 (a single supplementary character encoded as a surrogate pair).
+- pos starts at 0.
+- translate_codepoint(...) returns consumed = 2 (or returns 1 meaning "1 codepoint" — the bug appears for either mismatch of units vs codepoints).
+- Enter for pt in range(consumed): the loop runs 2 times.
+  - First iteration: code_point_at(code_units, 0) may return a codepoint and char_count(...) returns 2, so pos becomes 2.
+  - Second iteration: loop tries to call code_point_at(code_units, 2) → IndexError (index 2 is out of range).
+
+Where exactly in your snippet
+- The failure happens at the lines:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  The call to code_point_at(code_units, pos) is the immediate site of the IndexError.
+
+How to fix it (specific steps)
+You must make pos advance correctly and consistently with the contract of translate_codepoint. Choose one of the two clear options:
+
+Option A — translate_codepoint returns number of code units consumed
+1. Change translate_codepoint so it returns the number of code units (UTF-16 char units) it consumed (1 or 2).
+2. Replace the inner loop with a single advance by that number:
+       pos += consumed
+   (Remove the for pt in range(consumed) loop and its code_point_at/char_count calls.)
+
+Option B — translate_codepoint returns number of code points consumed (not code units)
+1. If translate_codepoint must return number of code points, then you need a safe way to advance through code_units without reading past the end:
+2. Replace the inner loop with explicit checks that you have enough code units before reading a possible surrogate pair:
+       for pt in range(consumed):
+           if pos >= length:
+               break   # defensive: nothing left to read
+           cp = code_point_at_safe(code_units, pos, length)
+           pos += char_count(cp)
+   and implement code_point_at_safe so it never reads pos+1 when pos == length-1 (it should treat an unmatched high surrogate as a single code unit or handle it according to your policy).
+3. But this option is more complicated and error-prone; you must define and consistently use the same semantics for unmatched surrogates.
+
+My recommendation (what to do)
+- Use Option A. Make translate_codepoint return the number of UTF-16 code units consumed and then simply do pos += consumed. That is the simplest, safest fix and avoids re-parsing/reading code units while inside the loop.
+- Concretely change these lines:
+    # current
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  to:
+    # fixed
+    pos += consumed
+
+Why that recommendation
+- It avoids extra reads of code_units (so no out-of-range access).
+- It keeps responsibility for interpreting surrogate pairs in translate_codepoint (which your comment already suggests: "Contract with translators is that they have to understand codepoints").
+- It’s a single, small change that resolves the IndexError and makes the code easier to reason about.
+
+If you want, paste your translate_codepoint signature/implementation and I will show the exact one-line change in context.

@@ -1,0 +1,73 @@
+What happens
+- The failure occurs inside LocaleUtils.to_locale when parsing strings like "fr__POSIX".
+- The parser assumes that after the two-letter language (locale_str[0:2]) the next character (locale_str[2]) is the separator '_' and the character after that (locale_str[3]) is the first letter of a two-letter country code which must be uppercase.
+- For "fr__POSIX" the characters are:
+  - index 0 = 'f', 1 = 'r', 2 = '_', 3 = '_' (second underscore), 4 = 'P' ...
+- The code checks locale_str[3].isupper() (or similar) and raises ValueError because locale_str[3] == '_' is not an uppercase letter. The code never recognizes the double-underscore case meaning "empty country, variant follows".
+
+Root cause (precise)
+- The parser conflates two different formats:
+  - language_country_variant  (e.g. "en_US_WIN") — country present
+  - language__variant         (e.g. "fr__POSIX") — empty country, variant present
+- It validates position 3 as if it must always be an uppercase country letter. It therefore rejects the legitimate "language__variant" format when locale_str[3] == '_'.
+
+Where it happens (what to look for)
+- In LocaleUtils.to_locale, look at the branch that runs after confirming the first two characters are a lowercase language and locale_str[2] == '_'.
+- You will find a validation that checks locale_str[3] (or the next two characters) for uppercase letters and raises ValueError on failure. That's the exact check that fails for a double underscore.
+
+How to fix (concrete steps)
+1. Detect the double-underscore case explicitly before treating the character(s) after index 2 as a country code:
+   - If locale_str[2] == '_' and locale_str[3] == '_', then:
+     - language = locale_str[:2]
+     - country = "" (empty)
+     - variant = locale_str[4:] (variant begins at index 4)
+     - Validate that variant is non-empty when appropriate, then return Locale(language, "", variant)
+2. Otherwise continue to parse the country normally (two uppercase letters at indices 3 and 4), or parse country+variant for longer strings.
+3. Keep the existing strict validations for language lowercase, country uppercase, separator underscore, and length for the other formats.
+
+Minimal example of the parsing change (pseudo-Python)
+- Replace the country validation branch with something like:
+
+if s is None:
+    return None
+if len(s) < 2:
+    raise ValueError(...)
+lang = s[0:2]
+if not lang.islower():
+    raise ValueError(...)
+if len(s) == 2:
+    return Locale(lang, "")
+
+if s[2] != '_':
+    raise ValueError(...)
+
+# NEW: handle empty country + variant: "xx__VAR"
+if len(s) >= 4 and s[3] == '_':
+    # variant starts at index 4
+    variant = s[4:]
+    if variant == "":
+        raise ValueError(...)
+    return Locale(lang, "", variant)
+
+# otherwise, expect a 2-letter uppercase country at s[3:5]
+if len(s) < 5:
+    raise ValueError(...)
+country = s[3:5]
+if not country.isupper():
+    raise ValueError(...)
+if len(s) == 5:
+    return Locale(lang, country)
+if s[5] != '_':
+    raise ValueError(...)
+variant = s[6:]
+return Locale(lang, country, variant)
+
+Why this fixes it
+- The explicit check for s[3] == '_' recognizes the legal "language__variant" syntax and prevents the code from treating the underscore as an invalid country letter.
+- It preserves strict validation for the other supported formats.
+
+Test cases to verify
+- Existing tests you already included: "fr__POSIX", "en__UNIX", "de__DOS" should pass.
+- Also ensure "en_US", "en_US_WIN", "en" still pass and invalid cases still raise ValueError.
+
+If you want, paste the current LocaleUtils.to_locale implementation and I can show the exact lines to change.

@@ -1,0 +1,60 @@
+What happened (where it fails)
+- The method that builds a fixed-offset time zone rejects any negative minutes at line 400:
+  - 400: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- That check rejects valid inputs described by the docstring, e.g. (0, -15) -> -00:15 and (-2, -15) -> -02:15. The doc explicitly allows negative minutes when hours are zero or negative, but the code forbids all negative minutes unconditionally.
+- Because of that early rejection you get a ValueError at line 400 for inputs the doc says should be accepted. That is the root cause.
+
+Why it happens (root cause)
+- The code enforces minutes must be 0..59 regardless of the sign of hours. The doc requires different behavior depending on the sign of hours:
+  - If hours > 0, minutes must be zero or positive (minutes negative should be invalid).
+  - If hours == 0, minutes may be positive or negative (e.g. +00:15 or -00:15).
+  - If hours < 0, minutes may be positive or negative but the resulting offset must be negative (i.e. -2:-15 should become -2:15).
+- The unconditional minutes < 0 check at line 400 implements the wrong rule and causes valid inputs to fail before any combination logic on lines 406/408 runs.
+
+Where else to look / why other lines matter
+- Lines 406 and 408 are where minute and hour components get combined:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+  These lines indicate special-case arithmetic to produce the final offset minutes, and are only reached if the earlier validation passes.
+- Line 409 multiplies minutes by millis to get offset; line 411 raises if offset is out of allowed range.
+- Because the invalid inputs fail at 400, the combining logic is never reached for cases the doc allows, hence the code fails early.
+
+Concrete steps to fix (exact changes to make)
+1. Replace the unconditional negative-minute check at line 400 with validation that follows the doc rules:
+   - Accept minutes_offset in the range 0..59 if hours_offset > 0.
+   - Accept minutes_offset in the range -59..59 if hours_offset == 0 or hours_offset < 0.
+   - Always reject abs(minutes_offset) > 59.
+   - Specifically, change the check into something like:
+     - if abs(minutes_offset) > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+     - if hours_offset > 0 and minutes_offset < 0: raise ValueError("Positive hours with negative minutes not allowed")
+2. Compute the total offset minutes with a clear formula, not ad-hoc subtraction combinations:
+   - offset_minutes = hours_offset * 60
+   - if hours_offset >= 0: offset_minutes += minutes_offset
+     else: offset_minutes -= abs(minutes_offset)   (or equivalently offset_minutes += minutes_offset if minutes_offset is already negative)
+   - This ensures the sign of the minute contribution is applied consistently with the sign of the hour.
+   - Replace lines 406/408 with a single, explicit computation above (or equivalent) so the logic is easy to follow.
+3. Keep the existing sanity check that the final offset magnitude does not exceed 23:59:59.000 (line 411), and then compute millis and return (lines 409/412).
+
+Example fix sketch (pseudo-code tying to line numbers)
+- Replace the check at or around line 400 with:
+  if abs(minutes_offset) > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError("Positive hours with negative minutes not allowed")
+- Replace the combination logic (lines 406/408) with:
+  offset_minutes = hours_offset * 60 + minutes_offset
+  # If hours_offset < 0 and minutes_offset > 0 you may want:
+  #    offset_minutes = hours_offset * 60 - minutes_offset
+  # but this is equivalent if minutes_offset has the intended sign; ensure tests cover (-2, -15), (-2, 15), (0, -15), (2, 15), (2, -15)
+
+Why this is sufficient
+- It removes the incorrect blanket rejection of negative minutes.
+- It enforces the documented constraint that positive hours cannot be paired with negative minutes.
+- It makes the math explicit and avoids subtle sign-bug combinations in lines 406/408.
+
+References to code lines (as requested)
+- Failure point: line 400 (minutes < 0 or > 59)
+- Combination logic that is currently not reached or may be incorrect: lines 406 and 408
+- Millisecond conversion and final checks: lines 409 and 411–412
+
+If you want, I can provide a ready-to-drop-in corrected implementation of this method using the exact variable names used in your file.

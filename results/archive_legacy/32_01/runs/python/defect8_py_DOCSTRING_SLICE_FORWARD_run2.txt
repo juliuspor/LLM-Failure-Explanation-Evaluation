@@ -1,0 +1,35 @@
+What happened (where it fails)
+- The failure happens in the to_locale method when it gets to the code around lines 248–252.
+- Specifically, for a two-part locale like "en_GB" (length 5) the code executes line 250:
+  if locale_str[5] != '_':
+- But locale_str[5] is out-of-range for a 5-character string (valid indexes are 0..4). That raises an IndexError (string index out of range) before the function can return the expected Locale object.
+- The same class of bug (index out-of-range) can also occur for shorter inputs because the code uses fixed numeric indexes (3, 5, 6) without first ensuring the string is long enough.
+
+Why it happened (root cause)
+- Off-by-one / insufficient length checks. The code assumes positions 3, 5 and 6 exist without guarding those accesses:
+  - line 248 slices locale_str[3:5] (expects at least 5 chars) but there is no explicit check that len == 5 before doing that return.
+  - line 250 unconditionally reads locale_str[5] (index 5), which only exists when len >= 6.
+- The logic mixes checks for 2-part and 3-part locales without checking length in the right order. For a 2-part locale ("en_GB", len==5) the code tries to access index 5 and fails.
+
+Exact locations
+- Line 248: return Locale(locale_str[0:2], locale_str[3:5]) — this assumes the string has at least 5 characters but is reached without a length check.
+- Line 250: if locale_str[5] != '_': — reading locale_str[5] raises IndexError when len == 5.
+- Line 252: return Locale(..., locale_str[6:]) — this assumes the variant starts at index 6; that access must only happen when len >= 7.
+
+How to fix it (concrete steps)
+1. Check length explicitly before accessing fixed indexes. Use branching based on len(locale_str):
+   - If len == 2: return Locale(locale_str[0:2], "")
+   - If len == 5:
+     - verify locale_str[2] == '_' and language/country case rules, then return Locale(locale_str[0:2], locale_str[3:5])
+   - If len > 5:
+     - verify locale_str[2] == '_' and locale_str[5] == '_' and other validations, then return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+   - Otherwise: raise ValueError("Invalid locale format: ...")
+2. Always check the separator characters (position 2 for first underscore, position 5 for second underscore) only after confirming the string is at least that long.
+3. Validate character case (lowercase language, uppercase country) only after confirming the relevant slices exist.
+
+Minimal corrected example (illustrative)
+- Before accessing locale_str[5], ensure len(locale_str) >= 6.
+- Before returning a two-part Locale slice [3:5], ensure len(locale_str) == 5.
+
+Why this explanation fixes the issue
+- The crash was not a logic or Locale API problem; it was an IndexError caused by reading characters at positions that don't exist for some valid inputs. Adding accurate length-based guards prevents out-of-range access and allows the function to return the correct Locale or raise a controlled ValueError for invalid strings.

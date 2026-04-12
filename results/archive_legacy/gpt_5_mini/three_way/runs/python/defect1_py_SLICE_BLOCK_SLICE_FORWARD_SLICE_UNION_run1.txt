@@ -1,0 +1,40 @@
+What happened (where it fails)
+- At lines 396–397 the code does this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That rejects any negative minute value immediately.
+
+- Later, at lines 402 and 404 the code treats minutes_offset as something that may need to be combined with an hours component and adjusted by sign:
+  402 | minutes_offset = hours_in_minutes - minutes_offset
+  404 | minutes_offset = hours_in_minutes + minutes_offset
+  In other words, the later logic expects to be able to apply the hours sign to the minute value (or otherwise work with negative minutes) and then compute a total minutes count.
+
+Because the validation runs before the sign/combination logic, a caller that supplies a negative minutes argument (for example: hours = -5, minutes = -30 or an API that lets minutes carry sign) is rejected at line 396 even though the code below would have handled the negative minute by combining it with hours. The root mismatch is that the code validates minutes_offset as if it must always be 0..59 up front, but later code uses minutes_offset in signed arithmetic with hours_in_minutes.
+
+Why this is wrong (root cause)
+- The validation and the later arithmetic disagree about whether minutes_offset can be negative.
+- The immediate check at line 396 is too strict / in the wrong place relative to the sign-handling code at lines 402/404.
+- As a result a valid logical input (where minutes sign should be combined with the hours sign) is treated as invalid and triggers ValueError("Minutes out of range...") at line 397.
+
+How to fix it (concrete steps)
+Pick one of these two precise fixes depending on desired API:
+
+A) If minutes must always be non-negative and the hours sign determines overall sign:
+1. Enforce minutes is non-negative at the API boundary (document it).
+2. Keep the check but validate the absolute minute after converting hours to minutes. Concretely:
+   - Before line 396, compute hours_in_minutes = hours * 60 (as the code already does).
+   - Do NOT reject negative minutes at line 396; instead check that minutes_offset is in 0..59 (non-negative) and that hours sign will apply later. Example check: if minutes_offset < 0 or minutes_offset > 59: raise...
+   - When applying the sign at lines 402/404, make sure you only subtract when hours is negative, and add when hours is positive. (This is what the code already intends.)
+
+B) If minutes may be passed negative (caller supplies signed minutes):
+1. Change validation at lines 396–397 to validate absolute range:
+   Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+   with
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Then when combining with hours, apply the hours sign consistently:
+   - If hours_in_minutes is negative and minutes_offset is negative, do hours_in_minutes - abs(minutes_offset) (or just add two signed minute counts).
+   - Alternatively convert everything to a signed total minutes: total_minutes = hours_in_minutes + minutes_offset (where minutes_offset may be negative), then proceed to multiply by MILLIS_PER_MINUTE.
+
+Which precise change to use depends on intended API, but the bug is this mismatch: the early check at lines 396–397 forbids negative minutes while the code at lines 402 and 404 expects to be able to apply sign/negation to minutes. Fix by validating the absolute minute range or by moving/adjusting the check to after sign application so the minutes sign is handled consistently.

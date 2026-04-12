@@ -1,0 +1,48 @@
+What happened (where the crash occurs)
+- The code throws an IndexError from code_point_at(...) (the check at lines 35–36 in your pasted slice) when the loop tries to read a code unit past the end of code_units.
+- That call happens in this line inside the for-loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (the call to code_point_at(code_units, pos) is what raises.)
+
+Why it happens (root cause)
+- translate_codepoint(...) returns the number of codepoints consumed (variable consumed). But pos is an index into UTF‑16 code units.
+- The for-loop assumes it can call code_point_at(code_units, pos) consumed times and advance pos by char_count(...) each iteration. If translate_codepoint said it consumed some codepoints at the end of the array, the loop will call code_point_at when pos is already at or beyond length, triggering the IndexError guard at lines 35–36.
+- In short: you are mixing two different units (codepoints vs. code units) and calling code_point_at(...) when pos has reached length. translate_codepoint told you "I consumed N codepoints", but the for-loop uses code_point_at on the current pos without ensuring pos is still valid or without knowing how many code units those consumed codepoints actually used.
+
+Exactly where to look
+- While condition / beginning of loop: pos starts as 0, length = len(code_units).
+- The problematic line is the for-loop body that does pos += char_count(code_point_at(code_units, pos)).
+- The IndexError originates from code_point_at(...) guard at lines 35–36 (it checks index >= len(code_units) and raises).
+
+Concrete fixes (pick one and apply exactly)
+1) Make translate_codepoint return the number of UTF‑16 code units consumed (not codepoints)
+   - Change its contract and return value so consumed represents units.
+   - Then simply do pos += consumed instead of the for-loop.
+   - Minimal code change:
+     consumed = self.translate_codepoint(code_units, pos, out)
+     if consumed == 0:
+         ...
+     else:
+         pos += consumed
+
+2) If you must keep translate_codepoint returning codepoints, compute code units safely
+   - Replace the for-loop with safe logic that never calls code_point_at when pos >= length:
+     units_consumed = 0
+     for _ in range(consumed):
+         if pos >= length:
+             break   # avoid calling code_point_at out of range
+         cp = code_point_at(code_units, pos)
+         u = char_count(cp)   # 1 or 2
+         pos += u
+         units_consumed += u
+   - This ensures you never call code_point_at at pos == length and increments pos by actual code units consumed.
+
+3) Return both counts from translate_codepoint
+   - Have translate_codepoint return (codepoints_consumed, code_units_consumed) and use the code_units_consumed to advance pos.
+
+Which fix I recommend
+- Option 1 is simplest and least error-prone: make translate_codepoint return code units consumed and use pos += consumed. That directly aligns pos (a code-unit index) with what you advance by and avoids repeated calls to code_point_at.
+
+Summary in one sentence
+- The loop calls code_point_at(code_units, pos) after translate_codepoint reported it consumed codepoints, so pos can be advanced past the end and code_point_at raises IndexError; fix by advancing pos by code units (not by iterating over codepoints) or by making translate_codepoint return the code-unit count.

@@ -1,0 +1,61 @@
+What happens (short answer)
+- The bug is in the "advance pos after a translator consumed N codepoints" code (the for-loop near the end). It double-reads and mis-advances when a consumed codepoint is a UTF-16 surrogate pair (a supplementary character like U+1F630). That causes pos to move incorrectly and the routine to produce the wrong output for supplementary characters.
+
+Exactly where it fails
+- After translate_codepoint(...) returns consumed > 0, this code runs:
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  (the for-loop starting at that line).
+
+Why that is wrong (step-by-step)
+1. translate_codepoint(...) tells you “I consumed N codepoints starting at pos” (consumed counts codepoints, not UTF-16 code units).
+2. The loop intends to advance pos by the number of UTF-16 code units corresponding to those N codepoints.
+3. Inside the loop you call code_point_at(code_units, pos) which itself reads one codepoint starting at the current pos. For a supplementary character (a surrogate pair) code_point_at will read two code units and return a single codepoint integer (e.g. 0x1F630).
+4. Then you call char_count(...) on that codepoint; char_count returns 2 for a supplementary codepoint (because it needs two UTF-16 code units).
+5. You add that 2 to pos. So far so good for the first iteration.
+6. But the loop will repeat consumed times. Suppose consumed > 1: on the next iteration you now call code_point_at(code_units, pos) where pos already advanced past the surrogate pair — that is fine if you truly want the next codepoint. The logic only works if consumed exactly equals the number of codepoints starting at the original pos, and if code_point_at and char_count are used in a way that does not re-read or double-count the same UTF-16 code units.
+7. The real failure occurs when the translator consumed a supplementary codepoint and the code branches differ (or when translate_codepoint handled the surrogate-pair for you). The code re-reads code units and mixes “codepoint-level” and “code-unit-level” arithmetic incorrectly. In practice that leads to skipping or miscounting positions for surrogate pairs and produces the wrong output for supplementary characters (the test with '\U0001F630' fails).
+
+What actually happens with your test
+- For input '\U0001F630' (a single supplementary char represented as a surrogate pair in your UTF-16 code_units):
+  - translate_codepoint(...) reports it consumed one codepoint (consumed == 1).
+  - The for-loop runs once and executes pos += char_count(code_point_at(code_units, pos)).
+  - Depending on how code_point_at and char_count are implemented, this can either:
+    - advance pos by 2 (correct in isolation), or
+    - mis-handle edge cases and lead to wrong pos for other consumers (the code mixes levels of abstraction and is fragile).
+- The mixing of responsibilities and re-reading of codepoints in the loop is the root cause of the failing behavior for supplementary characters.
+
+Concrete fixes (step-by-step)
+Pick one clear, correct approach and implement it:
+
+Option A — Use code units only (simpler to reason about):
+- When translate_codepoint returns the number of codepoints consumed, also return the number of UTF-16 code units consumed (or have a separate API that returns code units).
+- Replace the loop with a single advance by that code-unit count:
+
+    # change translate_codepoint so it returns code_unit_consumed, not codepoint count
+    code_unit_consumed = self.translate_codepoint(code_units, pos, out)
+    pos += code_unit_consumed
+
+- This removes the fragile mix of codepoint-level and code-unit-level logic.
+
+Option B — Compute pos advance per-codepoint but read each codepoint only once:
+- If you must keep translate_codepoint returning codepoint count:
+  - For each of the consumed codepoints, call code_point_at once and advance pos by char_count of that codepoint. Do not re-read the same codepoint or re-interpret code units:
+
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)    # read the next codepoint once
+        pos += char_count(cp)                  # advance by 1 or 2 UTF-16 units
+
+  - This ensures each codepoint is read exactly once and pos advances correctly.
+
+Option C — Let the translator itself advance pos:
+- Change translate_codepoint API so it returns how many code units it consumed and do not try to advance pos outside it.
+
+Which to choose
+- If translate_codepoint already knows about surrogate pairs and works in UTF-16 code units, Option A or C is the clearest and least error-prone.
+- If translate_codepoint is defined at the codepoint abstraction (counts codepoints), then use Option B and ensure you read each codepoint once, as shown above.
+
+Summary (one-sentence)
+- The loop that advances pos after translate_codepoint mixes codepoint-level and UTF-16 code-unit-level logic and re-reads codepoints, so surrogate pairs (supplementary characters like U+1F630) are counted/advanced incorrectly; fix by advancing pos by the exact number of UTF-16 code units consumed (or by reading each consumed codepoint exactly once and advancing by its char_count).

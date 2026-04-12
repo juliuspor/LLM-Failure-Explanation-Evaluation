@@ -1,0 +1,58 @@
+I can’t point to the exact failing line numbers because you didn’t paste the implementation of LocaleUtils.to_locale, but I can explain the exact, common root causes that make implementations of this docstring fail, show where in the method they typically occur, and give precise, testable steps to fix them.
+
+Summary of the most likely root cause
+- The implementation is validating and slicing the input by fixed character positions (e.g. checking locale_str[2] or locale_str[3]) instead of parsing components. That breaks for many valid and edge-case inputs (empty string, 3-letter languages, missing/extra underscores, variants containing underscores).
+- As a result the method throws ValueError or IndexError on inputs that the docstring claims are valid (or vice versa).
+
+Where exactly this typically happens in LocaleUtils.to_locale
+- At the start: an early check like if len(locale_str) != expected_length or checks of specific characters by index (locale_str[2] != '_' etc.). Those checks belong to a fixed-format parser and will fail when the number or position of underscores or component lengths differs from the exact values the method assumes.
+- At language/country validation: using islower()/isupper() on an empty substring (causes valid empty country in "en" to be treated incorrectly) or wrong length checks (e.g. requiring language length==2 when 3-letter languages are valid).
+- When extracting variant: using a fixed substring starting at a fixed index (e.g. locale_str[5:]) assumes the country is always 2 letters and that the second underscore is at a fixed position; variants may contain underscores themselves and can be empty.
+
+What happened (concrete failure modes)
+1. Input "en" — code checks index 2 for '_' and raises IndexError or ValueError because the string is shorter than expected.
+2. Input "en_GB" — code expects index 3 to be '_' (off-by-one), or checks wrong lengths so it rejects a perfectly valid locale.
+3. Input "en_GB_xxx" — code uses a fixed start for variant (e.g. substring from index 5), which is OK here only if country is always two letters and underscores are at expected positions; if variant contains underscores (valid), or if language is 3 letters, that fails.
+4. Empty string or None — None might not be handled; empty string may pass checks or cause slicing errors.
+
+Why this is the root cause (short, explicit reason)
+- The docstring states “The separator must be an underscore” and “The length must be correct” but valid locale forms have variable-length components (language 2 or 3 letters, optional country, optional variant) and the variant can contain underscores. Parsing by fixed index positions is brittle and incorrect. You must split into components and validate each component, not index into fixed positions.
+
+Exact steps to reproduce the failure locally
+- Call LocaleUtils.to_locale("en") — observe IndexError or ValueError thrown from lines that access locale_str[2] or similar.
+- Call LocaleUtils.to_locale("eng_US") or LocaleUtils.to_locale("en_US_POSIX") — observe incorrect accept/reject behavior or mis-parsed components.
+- If you can run tests, add these three asserts:
+  - to_locale(None) -> None
+  - to_locale("en") -> Locale("en", "")
+  - to_locale("en_GB_xxx") -> Locale("en", "GB", "xxx")
+and watch which fail and where the exception stack trace points into the method.
+
+Precise fix (step-by-step, with checks to change)
+1. Handle None immediately:
+   - if locale_str is None: return None
+2. Reject empty string explicitly:
+   - if not locale_str: raise ValueError("empty locale string")
+3. Do not rely on fixed indices. Split on underscores:
+   - parts = locale_str.split('_')
+   - len(parts) must be 1, 2, or >=3 (3 or more means language, country, and variant where variant is the rest re-joined with underscores)
+4. Validate components with clear rules:
+   - language = parts[0]; require 2 or 3 lowercase letters only (regex ^[a-z]{2,3}$)
+   - if len(parts) >= 2 and parts[1] != "": country = parts[1]; require exactly 2 uppercase letters (regex ^[A-Z]{2}$)
+   - if len(parts) >= 3: variant = '_'.join(parts[2:]) — do NOT uppercase the variant (docstring notes JDK behavior can differ)
+5. Construct Locale with appropriate constructor overload:
+   - if only language: Locale(language, "")
+   - if language+country: Locale(language, country)
+   - if language+country+variant: Locale(language, country, variant)
+6. Add explicit error messages for each validation failure (e.g. "invalid language: must be 2-3 lowercase letters", "invalid country: must be 2 uppercase letters", "separator must be '_'").
+
+Example of the precise validation conditions to check
+- language: match ^[a-z]{2,3}$ (fail otherwise)
+- country: either empty string or match ^[A-Z]{2}$ (fail otherwise)
+- variant: any non-empty string allowed; preserve case and underscores
+
+Why this fix solves the root cause
+- Splitting on underscores and rejoining the tail for variant removes dependence on fixed character positions and handles variants with underscores.
+- Explicit regex checks enforce the lowercase/uppercase rules mentioned in your docstring.
+- Handling None and empty string up front prevents IndexError from slicing.
+
+If you paste the actual LocaleUtils.to_locale implementation (the method body and the failing stack trace), I will point to the exact line numbers and show the minimal code changes you need (with the precise lines to replace and the corrected code).

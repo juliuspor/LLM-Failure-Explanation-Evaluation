@@ -1,0 +1,74 @@
+What happened (root cause)
+- At lines 346–351 the code checks inferred_type and expected_type:
+  - inferred_type is the element type determined from the input array (variable name inferred_type).
+  - expected_type is the caller-supplied parameter (expected_type=str in your test).
+- Your test calls ArrayUtils.add(None, None, expected_type=str). That means:
+  - array is None (the current array passed into add).
+  - element is None.
+- Because the input array is None (no elements to inspect), the code sets inferred_type to object.
+- The check at line 346 is:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(... ClassCastException ...)
+
+  Since inferred_type == object and expected_type is str, that condition is true and the code raises the TypeError you saw:
+  "Cannot cast object list to str list (ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;)".
+
+Why that is wrong for your call
+- You passed None as the element and expected_type=str. There is nothing in the input array to prove a conflicting element type; all we have is a None element and no existing array. There is no actual object[] that needs casting to String[], so rejecting the call is incorrect. The code assumes object means "incompatible", but object can also mean "unknown because array was None or all elements are None".
+- In short: inferred_type == object is being treated as an incompatible concrete type instead of "unknown/unspecified", so the function throws when it should allow creating a new list of the requested expected_type (and accept None as a valid value).
+
+Where in the code this happens
+- The error originates at the check on line 346:
+  - inferred_type (computed earlier) is compared to object.
+  - expected_type is compared to object.
+- The TypeError is raised at lines 347–351 when inferred_type == object and expected_type != object.
+
+Concrete fixes (step-by-step, pick one)
+Option A — Treat array None or all-None as "unknown" and allow expected_type:
+1. Change the if condition at line 346 to skip the raise when the input array is None or contains only None values.
+2. Example patch (replace the current if at lines 346–351):
+
+   Replace:
+   if inferred_type == object and expected_type != object:
+       raise TypeError(...)
+
+   With:
+   if inferred_type == object and expected_type != object:
+       # If array is None or contains only None, inferred_type is object but we can
+       # safely create an array of expected_type and accept None elements.
+       if array is None or all(elem is None for elem in array):
+           pass  # allow creation of expected_type array
+       else:
+           raise TypeError(...)
+
+3. Why this works: if array is None or all items are None, there is no real element-type conflict — creating a new list of expected_type is valid.
+
+Option B — When array is None, set inferred_type to expected_type earlier
+1. Where the code determines inferred_type from the array (before line 346), add:
+   if array is None:
+       inferred_type = expected_type
+2. This makes the later check skip the exception because inferred_type == expected_type.
+
+Option C — Allow None elements regardless of inferred_type
+1. If the element is None, skip the strict cast check entirely:
+   if element is None:
+       proceed to create/return an array of expected_type without raising.
+2. This specifically addresses your test where element is None.
+
+Which to choose
+- Option A is safest and most explicit: it preserves the existing safety check for true conflicts (non-None elements of incompatible types) while allowing the empty/None-case your test exercises.
+- Option B is simplest but could hide some logic errors if you wanted to detect conflicts earlier.
+- Option C is minimal and directly matches the test case, but misses cases where array contains non-None elements of unknown type.
+
+What to change in code (concise patch suggestion)
+- Insert a guard before raising that inspects the input array:
+  if inferred_type == object and expected_type != object:
+      if array is None or all(elem is None for elem in array):
+          # allow creating expected_type array with None values
+          pass
+      else:
+          raise TypeError(...)
+
+Summary
+- The code raises because inferred_type is treated as a concrete object[] that cannot be cast to str[], even when the array is None or contains only None.
+- Fix by recognizing "inferred_type == object" can mean "unknown" (array absent or all None) and allow creation of an array of expected_type in that case.

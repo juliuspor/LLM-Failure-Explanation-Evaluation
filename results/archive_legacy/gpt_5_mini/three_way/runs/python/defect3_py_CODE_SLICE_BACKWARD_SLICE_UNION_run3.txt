@@ -1,0 +1,46 @@
+What happens
+- At translate(), after calling consumed = self.translate_codepoint(code_units, pos) the code assumes consumed counts code points and then advances pos by asking for each code point's UTF‑16 length:
+  - Lines in translate(): the for loop
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- But code_point_at(index) (lines 35–44 in your slice) raises IndexError if index >= len(code_units) (line 36). That can happen inside the for‑loop when pos reaches length and you still call code_point_at.
+
+Why it fails (root cause)
+- There is a mismatch between what translate_codepoint returns and how the caller advances pos.
+  - If translate_codepoint returns the number of code units consumed (UTF‑16 code units), the for-loop treats that number as a count of code points and then calls code_point_at repeatedly starting at the same pos. On the second or later iteration code_point_at can be called with index == len(code_units) and raise IndexError (line 36).
+  - If translate_codepoint returns number of code points consumed, the caller still calls code_point_at(pos) and advances pos by char_count. That can still call code_point_at when pos == len(code_units) if consumed was larger than the remaining codepoints, producing the same IndexError.
+- Concretely: suppose pos points to the last code unit (pos == length-1) and translate_codepoint returns consumed = 1. The for loop runs once and calls code_point_at(pos) — OK. But if translate_codepoint returns consumed = 2 (or the loop iterates more times than there are codepoints left), the second iteration calls code_point_at(pos) with pos == length and IndexError is raised at line 36.
+
+Where it happens (specific places)
+- translate(): the for pt in range(consumed) loop (the block starting "for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))").
+- code_point_at(): index bounds check at line 35–36 ("if index < 0 or index >= len(code_units): raise IndexError(...)").
+
+How to fix it (concrete steps)
+Pick one of these fixes depending on the intended contract of translate_codepoint:
+
+1) If translate_codepoint should return the number of UTF‑16 code units consumed:
+   - Replace the for-loop with a single advance by consumed code units:
+     pos += consumed
+   - Reason: consumed already tells you how many code units to skip, so you must not call code_point_at inside the loop.
+
+2) If translate_codepoint should return the number of code points consumed:
+   - Keep the loop but guard calls to code_point_at and stop when pos >= length:
+     for _ in range(consumed):
+         if pos >= length:
+             break
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+   - Or better: make translate_codepoint return the actual number of code points it consumed (never more than remaining), so the loop never requests past-end positions.
+
+3) Simpler defensive change (if you can't change translate_codepoint signature immediately):
+   - Before calling code_point_at inside the loop, check pos < length and raise a clearer error if not:
+     if pos >= length:
+         raise ValueError(f"translate_codepoint reported consuming {consumed} code points but only {length - initial_pos} remain")
+   - This makes the failure explicit and points to the contract violation.
+
+Which to choose
+- Prefer option 1 if translate_codepoint was implemented to work with UTF‑16 code units (the comment “they have to understand codepoints and they just took care of a surrogate pair” is ambiguous).
+- Prefer option 2 if translate_codepoint's contract is meant to count code points.
+
+Summary (short)
+- The loop advances pos by calling code_point_at repeatedly based on consumed, but consumed and pos advancement are mismatched. That leads to code_point_at being called with index == len(code_units), which triggers IndexError at line 36. Fix by making translate_codepoint and the caller agree on whether consumed counts code units or code points, and advance pos accordingly (either pos += consumed, or loop with a bounds check and advance by char_count each iteration).

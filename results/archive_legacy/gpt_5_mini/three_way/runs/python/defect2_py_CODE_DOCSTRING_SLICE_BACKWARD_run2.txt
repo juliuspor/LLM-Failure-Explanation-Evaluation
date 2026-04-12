@@ -1,0 +1,49 @@
+What happened (root cause)
+- At line 71 you compute g using the original parameter value:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  but at lines 56–58 you explicitly clamp value into v:
+  v = max(value, self._lower_bound)
+  v = min(v, self._upper_bound)
+- You never use the clamped variable v when computing g. If the caller passes a value outside the [self._lower_bound, self._upper_bound] range, g can be < 0 or > 255 and then the method raises the ValueError at line 74. In short: you clamp into v but compute with value, so the clamp has no effect.
+
+Other related failures to watch for
+- If self._upper_bound == self._lower_bound the divisor (self._upper_bound - self._lower_bound) at line 71 is zero and you'll get a ZeroDivisionError.
+- The ValueError message at line 75 is not helpful: it says "Color parameter outside of expected range: Red Green Blue" instead of including the computed g or the offending inputs.
+
+Where it occurs
+- Primary logic bug: line 71 (calculating g) uses value instead of v.
+- Guard/exception: line 74–75 raises an exception because of that calculation.
+- Potential separate crash: division by zero at line 71 if bounds are equal.
+
+Concrete, ordered fixes (changes you can apply)
+1. Use the clamped variable v when computing g:
+   Replace line 71 with something like:
+     g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+2. Prevent division-by-zero when bounds are equal:
+   - Add an early check before the division, for example:
+       if self._upper_bound == self._lower_bound:
+           return (0, 0, 0)  # or define desired behavior for zero-length range
+3. Make the range validation robust and the error message informative:
+   - After computing g, clamp it to [0,255] instead of raising unless you want to treat out-of-range as an error:
+       g = max(0, min(255, g))
+     Or, if you must raise an error, include the values:
+       raise ValueError(f"Computed grayscale {g} out of range [0,255] for value={value}, bounds=({self._lower_bound},{self._upper_bound})")
+4. (Optional) Use rounding instead of truncation if you want more accurate mapping:
+     g = int(round(...))
+
+Minimal corrected example (apply these three changes)
+- Check equal bounds, use v, clamp g, and return tuple:
+   if self._upper_bound == self._lower_bound:
+       return (0, 0, 0)
+   v = max(value, self._lower_bound)
+   v = min(v, self._upper_bound)
+   g = int(round((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0))
+   g = max(0, min(255, g))
+   return (g, g, g)
+
+Why this fixes the failure
+- Using v ensures values outside the configured bounds are actually constrained before conversion, so g will be in [0,255].
+- Checking for equal bounds avoids division by zero.
+- Clamping or clearer error messages prevents surprising exceptions and tells you what went wrong if you still treat out-of-range as an error.
+
+That pinpoints the bug (line 71 using value instead of v), the place where the exception is raised (line 74), the additional edge-case (zero divisor), and gives exact steps + code to fix it.

@@ -1,0 +1,49 @@
+What happened (where)
+- At line 396 the code unconditionally rejects negative minute values:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+  This prevents any call that supplies a negative minutes_offset (e.g. (0, -15) or (-2, -15)), even though the docstring explicitly allows negative minutes in some combinations.
+- At lines 402–405 the code then tries to combine hours and minutes by switching signs/adding/subtracting minutes:
+  minutes_offset = hours_in_minutes - minutes_offset
+  minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  That logic is confusing and incorrect for the allowed sign combinations. It uses an absolute hours_in_minutes (positive) and then subtracts/ adds minutes_offset in a way that can flip the sign or produce the wrong total minutes. That leads to the later check at line 407 ("Offset is too large") or to producing the wrong offset sign/value.
+
+Why it fails (root cause)
+1. The minutes range check at line 396 enforces 0..59. The API allows minutes in -59..+59 for some combinations. Rejecting negative minutes causes valid inputs (per the docstring) to fail immediately.
+2. The combination logic at 402–405 is wrong. Instead of computing a single signed total minute count from hours_offset and minutes_offset, it manipulates an absolute hours value and then adds/subtracts minutes in ways that:
+   - produce the wrong sign when hours is negative and minutes is positive (e.g. (-2, 15) should become -135 minutes but the current arithmetic can yield +105 or other incorrect values),
+   - or yield a magnitude that exceeds the allowed limit and triggers the "Offset is too large" error at line 407.
+
+What you should change (concrete steps)
+1. Fix the minutes range check (change line ~396) to allow -59..+59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Implement clear, correct combination rules instead of the current subtraction/addition logic. For example:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (doc forbids +hours with -minutes).
+   - Compute total_minutes like this:
+       if hours_offset > 0:
+           # minutes_offset is 0..59 here
+           total_minutes = hours_offset * 60 + minutes_offset
+       elif hours_offset < 0:
+           # minutes_offset can be 0..59 or negative; for positive minutes the result becomes more negative
+           if minutes_offset >= 0:
+               total_minutes = hours_offset * 60 - minutes_offset
+           else:
+               total_minutes = hours_offset * 60 + minutes_offset   # minutes_offset negative => add
+       else:  # hours_offset == 0
+           total_minutes = minutes_offset   # sign of minutes determines sign of offset
+   - Then compute offset milliseconds with:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Keep the existing final range check (line ~407) that rejects offsets beyond +/- 23:59:59.000 after computing offset.
+
+Why this fixes it
+- Allowing -59..+59 accepts valid inputs the doc permits.
+- Computing one signed total_minutes using explicit cases guarantees the sign and magnitude are correct for every documented combination, so you won't produce wrong positive offsets for negative-hour inputs nor spuriously trigger "Offset is too large".
+
+References to exact places in the code
+- Rejecting negative minutes: line 396.
+- Incorrect combination arithmetic: lines 402–405.
+- Final magnitude rejection: line 407 (the symptom you see after the incorrect arithmetic).
+
+If you want, I can produce the exact corrected code snippet to drop into the method.

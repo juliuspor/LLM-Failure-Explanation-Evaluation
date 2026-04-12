@@ -1,0 +1,55 @@
+What happened (root cause)
+- The runtime error is a Java ClassCastException: an Object[] (array of java.lang.Object) cannot be cast to String[] (array of java.lang.String).
+- In your Python-level code the relevant variables and lines are:
+  - line 337: branch handling element when element is not None
+  - line 340: you set inferred_type = object
+  - lines 346–347: you check `if inferred_type == object and expected_type != object:` and then raise a TypeError
+- That TypeError is raised because earlier you ended up with an array whose runtime component type is Object (Object[]) while some part of the program expects a String[] and a cast was attempted. The Java VM refuses to cast an Object[] to a String[], producing the ClassCastException you see in the log, and your code converts that into the Python TypeError at lines 346–347.
+
+Why that happens (clear, concrete explanation)
+- Arrays in the JVM are covariant but their element type is enforced at runtime. If you build an array from mixed or unknown elements, the array’s runtime type becomes Object[].
+- If any code later tries to treat that array as a String[] (for example by casting, or by passing it to a method that expects String[]), the JVM will throw ClassCastException because Object[] is not the same as String[].
+- In your code base this situation is recognized at runtime: `inferred_type` ends up as `object` (line 340) while `expected_type` is something more specific (not `object`), and you hit the check at lines 346–347 which signals the mismatch. The underlying Java cast already failed (Object[] -> String[]) and that is why you see the ClassCastException text.
+
+Exactly where to look
+- Inspect the code that constructs the array/list of elements (the branch around line 337 where `element` is handled). That construction is resulting in an Object[] (or an equivalent list with heterogeneous types).
+- Inspect the code that later casts or passes that container as a String[] (the point that leads to the Java ClassCastException). The check at lines 346–347 is detecting the mismatch but the actual failed cast originates where the array is used as a String[].
+
+Concrete fixes (step-by-step options)
+Pick one that fits your situation:
+
+1) If all elements are logically strings but the array was created as Object[]:
+   - Convert the array to a proper String[] before the cast/use.
+   - Example approach (Java-side): Arrays.copyOf(originalObjectArray, originalObjectArray.length, String[].class) — this creates a new String[] and copies elements (throws if an element is not a String).
+   - Python-side (if building via a bridge): ensure you create/return a String[] rather than an Object[].
+
+   Steps:
+   - At/near line 337 where elements are added, ensure you add only String instances.
+   - Before passing to the code that expects String[], convert:
+     - In Java: String[] sarr = Arrays.copyOf((Object[])arr, ((Object[])arr).length, String[].class);
+
+2) If elements can be non-String and the consumer must accept any type:
+   - Change the expected type to object (or Object[]) so no cast to String[] is attempted.
+   - Edit the check at 346–347: allow inferred_type == object when expected_type == object, or remove the strict raise.
+
+   Steps:
+   - Decide whether `expected_type` should be `object` in this branch and update the code accordingly.
+   - Remove/adjust the TypeError raise at 346–347 if that branch is valid.
+
+3) If you need a String[] but some elements are null or non-string:
+   - Normalize each element to a String (e.g., element == null ? null : element.toString()) and place into a new String[].
+   - Validate element types before attempting the conversion and raise a clear error with element index if conversion fails.
+
+   Steps:
+   - Create a new String[] of the right length.
+   - For i in range: check element[i] instanceof String (or convert), assign to result[i].
+   - Pass result to the code expecting String[].
+
+What to change in your code now (concrete edits)
+- At/near line 337–340: stop making `inferred_type = object` as the final outcome unless you truly want an untyped Object[].
+- Before the cast/use guarded by the check at 346–347:
+  - If you expect strings: perform safe conversion/copy to a String[] and then set `inferred_type = str` (or set `expected_type` appropriately).
+  - If you expect objects: set `expected_type = object` and avoid trying to treat the array as String[].
+
+Single-sentence summary
+You built or returned an Object[] (inferred_type == object) but later code expects and attempts to use a String[] (expected_type != object); JVM forbids casting Object[] to String[], so either produce a real String[] or change the consumer to accept Object[] — and fix the code around lines 337, 340, and 346–347 accordingly.

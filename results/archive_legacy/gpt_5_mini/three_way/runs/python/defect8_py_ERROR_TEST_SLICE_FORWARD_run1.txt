@@ -1,0 +1,36 @@
+What happened (where — lines and values)
+- The failing input is "fr__POSIX".
+- At the code slice shown (lines 243–247) the method assumes that when a locale string contains underscores the country code always occupies indices 3 and 4 and that a variant (if present) starts at index 6.
+- For "fr__POSIX" the characters by index are:
+  - 0:'f', 1:'r', 2:'_', 3:'_', 4:'P', 5:'O', ...
+- The code executes the branch that reaches line 245/246 and does:
+  - locale_str[3:5] → '_' + 'P' (expected two uppercase letters for country, but it's "_P")
+  - then checks locale_str[5] != '_' (index 5 is 'O'), so the check fails and it raises ValueError("Invalid locale format: fr__POSIX").
+- In plain terms: the code never recognizes the language__variant format (empty country between two underscores). It treats the first underscore after the language as the start of a two-letter country and thus mis-indexes and rejects "fr__POSIX".
+
+Why this is the root cause (explicit variables and lines)
+- The code relies on fixed indices:
+  - It uses locale_str[3:5] as the country (line 243).
+  - It expects a '_' at locale_str[5] to indicate presence of a variant (line 245) and then uses locale_str[6:] for the variant (line 247).
+- For language__variant the country should be the empty string and the variant should start at index 4, but the code never checks for two consecutive underscores at locale_str[2] and locale_str[3], so it slices incorrectly and raises at line 246.
+
+Concrete fix (exact change and steps)
+1. Detect the empty-country pattern before slicing country:
+   - At or just before line 243 add a check for double underscore at indices 2 and 3:
+     - if locale_str[2] == '_' and locale_str[3] == '_': return Locale(locale_str[0:2], "", locale_str[4:])
+2. Otherwise keep the existing country/variant parsing, but validate characters before slicing:
+   - ensure locale_str[3:5] are uppercase letters before treating them as a country
+   - ensure the variant-index check uses the correct offsets only when country is present
+
+Minimal example patch (conceptual; apply at lines ~242–247):
+- Insert before current country slicing:
+  if len(locale_str) > 3 and locale_str[2] == '_' and locale_str[3] == '_':
+      # language__variant -> empty country, variant starts at index 4
+      return Locale(locale_str[0:2], "", locale_str[4:])
+- Then keep existing logic for language_country and language_country_variant.
+
+Why this fix works
+- It explicitly recognizes the language__variant format (empty country) and returns Locale(language, "", variant).
+- It prevents the slices locale_str[3:5], locale_str[5], locale_str[6:] from being misaligned when there are two underscores, so the ValueError raised at line 246 will no longer occur for inputs like "fr__POSIX".
+
+If you want, I can produce a precise patch against the file showing the exact lines to add/replace.

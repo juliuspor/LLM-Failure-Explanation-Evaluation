@@ -1,0 +1,46 @@
+What happened (root cause)
+- At line 400 the code checks minutes_offset and rejects any negative values:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later (lines 406–408) the code intentionally adjusts minutes_offset to represent a negative total offset in minutes when the hour sign is negative:
+  minutes_offset = hours_in_minutes - minutes_offset
+  minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because the validation at line 400 runs before the adjustment, a valid parsed minutes component of -15 (for an offset like -1:-15 or an intermediate negative minutes value produced by parsing) is rejected immediately with ValueError: Minutes out of range: -15, even though the later logic expects to handle negative minute values.
+
+Where it occurred
+- The failure happens in the method that builds an offset from hour/minute parts (the method that eventually returns cls.for_offset_millis(offset)).
+- Specific lines: the pre-adjustment validation at 400–401 rejects minutes_offset = -15; the adjustment logic that would compute the final minutes-based offset is at 406–408; the code then multiplies minutes_offset by MILLIS_PER_MINUTE at 409 and returns at 412.
+
+Why this is wrong
+- The validation is done too early. The code intends to accept minute values that will be combined with hour sign logic (lines 406–408), but the early check treats negative minutes as invalid before that combination happens.
+- As a result, valid offsets that require negative minute-handling are incorrectly rejected.
+
+Concrete fixes (clear step-by-step changes)
+Option A — move the range check after adjustment
+1. Remove or comment out the block at lines 400–401.
+2. After the adjustment logic (after line 408, before line 409), add a validation that checks the absolute minutes value:
+   if abs(minutes_offset) > hours_in_minutes + 59:
+       raise ValueError(f"Minutes out of range after adjustment: {minutes_offset}")
+   Or more simply, validate the minute component before sign application and validate total minutes after sign application (see Option B).
+3. This lets the sign-handling code (406–408) run first and then validate the final minutes_offset that will be turned into milliseconds.
+
+Option B — validate the raw minute component correctly and then apply sign
+1. Replace the early check with:
+   if raw_minutes < 0 or raw_minutes > 59:
+       raise ValueError(f"Minute component out of range: {raw_minutes}")
+   (where raw_minutes is the parsed minute part before any sign adjustments)
+2. Keep the sign-handling logic at 406–408; after the sign application validate the final minutes_total if needed (for overflow).
+3. This ensures parsed minute parts are within 0–59 but allows final minutes_offset to be negative when the hour sign is negative.
+
+Exact minimal code change example (preferred)
+- Change the line at 400 from:
+    if minutes_offset < 0 or minutes_offset > 59:
+to:
+    if raw_minute_component < 0 or raw_minute_component > 59:
+- Ensure minutes_offset is computed from raw_minute_component only after deciding the sign and combining with hours_in_minutes.
+
+Why this will fix it
+- The fixes let the code accept a valid minute component (15) and a negative sign on the hour, or accept minute values that become negative only after applying the hour sign. That prevents rejecting valid offsets such as -1:15 and stops the ValueError on minutes = -15.
+
+If you want, paste the few surrounding lines of the method (how minutes_offset is parsed and how hours_in_minutes is defined) and I’ll produce an exact patch you can drop in.

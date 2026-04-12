@@ -1,0 +1,25 @@
+The code fails the test `test_null_safety_inside_arrays_mixed` because it incorrectly skips replacements when a `search_list` item doesn't match, even if later items do. In the test, `StringUtils.replace_each("aba", ["a", "b"], ["c", None])` expects "cbc".
+
+Here's what happens:
+1. First loop finds "a" at index 0, sets `text_index=0`, `replace_index=0`.
+2. Appends `text[0:0]=""` and `replacement_list[0]="c"`, sets `start=0 + len("a")=1`.
+3. Second loop searches from `start=1`:
+   - For `i=0` ("a"), `text.find("a", 1)` finds index 2, so `text_index=2`, `replace_index=0`.
+   - For `i=1` ("b"), `text.find("b", 1)` returns -1 (no match after position 1), but it doesn't update since 2 is already set.
+4. Appends `text[1:2]="b"` and `replacement_list[0]="c"`, sets `start=2 + len("a")=3`.
+5. Final `parts = ["", "c", "b", "c", ""]`, joins to "cbc".
+
+But the **real failure** is `test_null_safety_inside_arrays_single`: `StringUtils.replace_each("aba", ["a"], [None])` expects "aba" (no change), but:
+1. First loop: `replacement_list[0]` is None, so condition `replacement_list[i] is None` skips `i=0` entirely.
+2. No matches found (`text_index=-1`), returns original "aba" ✓.
+
+Wait, both tests pass? The **actual bug** is in the replacement logic: when `replace_index=0` is chosen but `replacement_list[0]` was checked as non-None earlier, the skip condition uses current state. But more critically, **the code doesn't handle overlapping matches correctly** and the `no_more_matches_for_repl_index` logic is flawed—it marks no more matches too early, but in these tests it coincidentally passes.
+
+Looking closer at `test_replace_each_basic`: "abcde" with ["ab","d"]->["w","t"] gets "wcte" ✓.
+
+The failure is likely **indexing error in buffer size calculation**:
+```python
+for i in range(search_length):
+    greater = len(replacement_list[i]) - len(search_list[i])  # CRASH: search_list[i] or replacement_list[i] is None!
+```
+In `test_null_safety_inside_arrays_single`, `search_list[0]="a"` but `replacement_list[0]=None`, so `len(None)` raises **TypeError: object of type 'NoneType' has no len()** before any replacement loop, returning original text coincidentally, but crashes on None in buffer calc.

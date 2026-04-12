@@ -1,0 +1,41 @@
+What happened (where)
+- The failure occurs inside LocaleUtils.to_locale, specifically around the code that validates and extracts the country when the input has an underscore (see lines referenced in your slice: lines 237–247).
+- For the input "fr__POSIX" the characters are:
+  - locale_str[0:2] = "fr"
+  - locale_str[2] = '_' (separator)
+  - locale_str[3] = '_' (start of what the code expects to be a 2-letter country)
+- The code unconditionally reads ch3 = locale_str[3] and ch4 = locale_str[4] and then checks if they are uppercase letters:
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError (lines 237–240)
+- Because ch3 is '_' (not an uppercase letter), the condition is true and a ValueError is raised with "Invalid locale format". That is exactly the Java test case you quoted: language__variant (empty country) is treated as invalid.
+
+Why it happened (root cause)
+- The method assumes that when a separator '_' appears at index 2, a two-letter uppercase country code must start at index 3. It never handles the valid special case where the country is empty and there are two consecutive underscores (language__variant).
+- In short: LocaleUtils.to_locale treats the second underscore (index 3) as if it must be an uppercase letter, so "fr__POSIX" fails validation because '_' is not in 'A'..'Z'.
+
+How to fix it (concrete steps, with variable names and locations)
+1. After computing length and confirming locale_str[2] == '_' (i.e. we have at least "xx_..."), check whether locale_str[3] == '_' to detect the empty-country case before accessing locale_str[3:5] and validating them as letters.
+2. If locale_str[3] == '_':
+   - The country is the empty string: country = ""
+   - The variant is the substring after the second underscore: variant = locale_str[4:] (or locale_str[3+1:], depending on indices)
+   - Return Locale(locale_str[0:2], "", variant) after any needed length/format checks for variant.
+3. Otherwise (locale_str[3] is not '_'), proceed with the existing behavior: validate ch3 and ch4 as uppercase letters and return Locale(locale_str[0:2], locale_str[3:5]) or with variant if there is a further '_' at index 5.
+
+Example code sketch (insert near the current checks at lines ~231–247):
+- after confirming locale_str[2] == '_':
+    if len(locale_str) < 4:
+        raise ValueError(...)
+    if locale_str[3] == '_':                       # empty country case
+        # variant starts at index 4 (may be empty or non-empty)
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # existing code: validate locale_str[3] and [4] are uppercase letters
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    ...
+
+What to watch for
+- Ensure you check length bounds before reading locale_str[3] and locale_str[4] to avoid IndexError.
+- Decide whether an empty variant (e.g., "fr__") is allowed or should be rejected; validate variant presence if required by your rules.
+- Keep the language-case and country-case checks intact for other inputs.
+
+Summary
+The code fails because it validates the country letters at fixed indices without handling the valid "language__variant" pattern (double underscore indicating empty country). Add an explicit branch to detect locale_str[3] == '_' and return Locale(lang, "", variant) to fix the bug.

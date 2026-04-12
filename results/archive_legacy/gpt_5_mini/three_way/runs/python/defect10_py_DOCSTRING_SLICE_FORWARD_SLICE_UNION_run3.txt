@@ -1,0 +1,50 @@
+What happened (root cause)
+- The parser removes a trailing numeric qualifier (the "l"/"L") from the input string, producing an empty string for inputs like "l" or "L".
+- Later the code calls the routine that returns s[index]. That routine checks bounds and raises IndexError if index >= len(s) (lines 30–32):
+  - 30: if index < 0 or index >= len(s):
+  - 31:     raise IndexError(f"String index out of range: {index}")
+  - 32: return s[index]
+- When s is empty and index is 0, the check at line 30 is true and the function raises IndexError. The parser therefore reports an IndexError ("String index out of range: 0") instead of the correct ValueError for an invalid numeric literal.
+
+Why this is wrong
+- The IndexError comes from a low-level character-access helper, not from parsing logic. For inputs that are syntactically invalid (single-letter qualifiers with no digits), the parser should detect the invalid token and raise ValueError, not let a character-access helper leak an IndexError.
+- The immediate cause is that the code strips the qualifier and does not verify that anything remains before trying to access s[0].
+
+Exact locations to change
+- The access that fails is at line 32 (return s[index]) after the bounds test at line 30.
+- The problematic operation originates in the parser that stripped the qualifier; you must add a validation after qualifier removal and before any character access.
+
+Concrete fixes (pick one, explicit steps)
+
+Option A — Preferred: validate after stripping qualifier in the parser
+1. Locate the code that removes the trailing qualifier (the code path that handles inputs ending with 'l' or 'L').
+2. Immediately after removing the qualifier, add a non-empty check:
+   - if len(s) == 0:
+         raise ValueError(f"Invalid numeric literal: {original_input}")
+   Use original_input (the unmodified input string) in the error message so callers see the offending token.
+3. Keep the existing character-access routine unchanged (it remains a generic index helper).
+
+Example patch (conceptual — insert right after qualifier removal):
+- before:
+    s = s[:-1]   # strip 'l' or 'L'
+    ... proceed to parse characters ...
+- after:
+    s = s[:-1]   # strip 'l' or 'L'
+    if len(s) == 0:
+        raise ValueError(f"Invalid numeric literal: {original_input}")
+    ... proceed to parse characters ...
+
+Option B — Defensive change in the char-access helper
+1. Change the bounds-check at lines 30–31 to raise ValueError instead of IndexError when the caller context is parsing numeric input. That is only appropriate if this helper is parser-specific.
+2. Replace:
+    if index < 0 or index >= len(s):
+        raise IndexError(f"String index out of range: {index}")
+   with:
+    if index < 0 or index >= len(s):
+        raise ValueError(f"Invalid numeric literal (empty after removing qualifier): {original_input}")
+3. This is less clean because a generic string-index helper should not assume parsing semantics. Use only if the helper is parser-local.
+
+Recommended action
+- Implement Option A: validate s is non-empty right after you strip the qualifier. This keeps error semantics in the parser (ValueError for invalid input) and avoids changing a generic index helper. Add a unit test for inputs "l" and "L" asserting ValueError is raised with a helpful message.
+
+This explains where (line 32), why (s becomes empty after removing qualifier), and how to fix it (add a non-empty check after qualifier removal or change the helper to raise ValueError).

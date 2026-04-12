@@ -1,0 +1,58 @@
+What happened (where it fails)
+- At lines 32–33 you immediately raise IndexError when any of these are true:
+  - start < 0
+  - end < 0
+  - start > end
+  - start > len(s)
+  - end > len(s)
+- That check runs in both the SLICE_BACKWARD and SLICE_BLOCK code paths (same lines 32–33).
+- Then line 34 (SLICE_FORWARD) returns s[start:end].
+
+Why it fails (root causes, exact variables and lines)
+1. The code rejects start > end unconditionally (line 32). But a backward slice (one with a negative step) normally has start > end; rejecting start > end prevents any backward slicing from working. The label SLICE_BACKWARD implies you intended to support that case, but the guard at line 32 blocks it.
+
+2. The code rejects negative indices (start < 0 or end < 0 at line 32) before normalizing them. In Python negative indices are valid for slicing (they are translated by adding len(s)), so rejecting start < 0 / end < 0 here incorrectly disallows valid slices.
+
+3. The error message uses end regardless of which index is bad: raise IndexError(f"String index out of range: {end}") at line 33. If start caused the error, the message still prints end, hiding the actual offending variable and value.
+
+4. Bound handling is imprecise: the code uses start > len(s) and end > len(s). For slicing, start == len(s) or end == len(s) can be valid (e.g., s[len(s):] returns ""), so you must be careful about whether to allow equality depending on intent. The current checks may incorrectly treat valid boundary indices as errors if you intended different semantics.
+
+What to change (concrete steps you can apply)
+1. Decide whether you are implementing Python-style slicing or an index-checking slicing. If Python-style:
+   - Allow negative indices by normalizing them before bounds checks:
+     - if start < 0: start += len(s)
+     - if end < 0: end += len(s)
+   - After normalization clamp to [0, len(s)] (so indexes outside that range are adjusted or error depending on policy).
+   - Do not treat start > end as an error if the slice step is negative; treat it as an error only when step is positive and you require start <= end.
+
+2. If you must keep an explicit validation step (instead of normalizing first), base the start> end check on the step:
+   - If step is None or step > 0: require start <= end
+   - If step < 0: require start >= end
+   (Put that logic in the same block that handles SLICE_BACKWARD vs SLICE_FORWARD so you don't reject valid reverse slices.)
+
+3. Fix the error message at line 33:
+   - Raise an error that reports the actual offending variable and value, e.g.:
+     - raise IndexError(f"String index out of range: start={start}") or
+     - raise IndexError(f"String index out of range: end={end}")
+   - Or include both when unsure: raise IndexError(f"String indices out of range: start={start}, end={end}")
+
+4. Adjust boundary checks to the intended semantics:
+   - If you follow Python slicing semantics, treat indexes >= 0 and <= len(s) as allowed after normalization; do not reject start == len(s) or end == len(s).
+   - If you want strict indexing (not Python slice rules), be explicit and document that behavior.
+
+Minimal corrected example (illustrative)
+- Normalize negatives first:
+  if start < 0:
+      start += len(s)
+  if end < 0:
+      end += len(s)
+- Then validate depending on step:
+  if step is None or step > 0:
+      if start < 0 or end < 0 or start > len(s) or end > len(s) or start > end:
+          raise IndexError(f"String indices out of range: start={start}, end={end}")
+  else:  # step < 0
+      if start < 0 or end < 0 or start > len(s) or end > len(s) or start < end:
+          raise IndexError(f"String indices out of range for negative step: start={start}, end={end}")
+
+Summary
+- The immediate bug is the unconditional start > end rejection at line 32 (breaks backward slices) and rejecting negatives before normalization. Also the error message at line 33 always prints end, which misleads you about which index failed. Fix by normalizing negative indices, validating relative to the step direction, and using a correct, informative error message.

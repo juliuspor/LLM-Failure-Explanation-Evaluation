@@ -1,0 +1,52 @@
+What happened (what failed)
+- The code raised IndexError at line 36:
+  raise IndexError(f"String index out of range: {index}")
+  with index == 2.
+- That check compares index against len(code_units) (line 35: if index < 0 or index >= len(code_units):).
+- The caller passed index==2 thinking it was an index into the original Python string s (a character index).
+- But code_units is a list of UTF‑16 code units created in to_utf16_code_units(s). For strings containing characters that become surrogate pairs in UTF‑16, len(code_units) can be smaller or larger than len(s). In this run len(code_units) was 2, so index 2 was out of range for code_units even though index 2 might be a valid character index in s.
+
+Why it happened (root cause)
+- The code mixes two different index spaces:
+  - index is a character index into the Python string s (each Python str element is a Unicode code point).
+  - code_units is a list of 16‑bit UTF‑16 code units (some code points become two code units).
+- The boundary check at line 35 uses len(code_units) to validate index, but the index refers to characters in s, not positions in code_units. That mismatch caused a false out‑of‑range error.
+
+Where it occurred (lines and variables)
+- to_utf16_code_units(s: str) builds code_units (line ~10–line ~34).
+- At line 35 the code does: if index < 0 or index >= len(code_units):
+- At line 36 it raises IndexError(f"String index out of range: {index}") when index==2 and len(code_units)==2.
+- The problematic variables: index, code_units, and s. The code uses index against the wrong length.
+
+How to fix it (clear, step-by-step options)
+Pick one of these depending on intended behavior:
+
+Option A — The function should validate a character index into s
+1. If index is meant to index characters of s, compare against len(s), not len(code_units):
+   - Replace line 35 with:
+     if index < 0 or index >= len(s):
+         raise IndexError(f"String index out of range: {index}")
+2. When you later need the corresponding UTF‑16 code unit offset, compute it by scanning s up to index and counting code units (see Option C for mapping).
+
+Option B — The function should validate a UTF‑16 code unit index
+1. If index is meant to index code_units, ensure callers pass a code unit index, not a character index.
+2. Keep the check as-is (len(code_units)) but update callers or API documentation to make clear that indices refer to UTF‑16 code units.
+
+Option C — Provide a reliable mapping from character index to code_unit index (recommended when callers expect character indexing)
+1. While building code_units, also build a mapping array char_to_cu_start where char_to_cu_start[i] = code unit index where s[i] starts:
+   - Initialize char_to_cu_start = []
+   - For each character ch in s (loop over indices i):
+       append current len(code_units) to char_to_cu_start
+       if ch needs a surrogate pair:
+           append two code units to code_units
+       else:
+           append one code unit
+2. When validating an index that is a character index, use len(s) (or len(char_to_cu_start)).
+3. To access code_units for character index i, use base = char_to_cu_start[i]; then operate on code_units[base] (and code_units[base+1] if surrogate).
+
+Concrete minimal code edits (where to change)
+- Replace the check at line 35 (currently using len(code_units)) with the correct check per the chosen option.
+- If you choose Option C, add the mapping creation in the loop that builds code_units (before line 35), and use that mapping whenever converting from character index to code unit offset.
+
+Summary
+The error came from using index (a string-character index) against len(code_units) (a UTF‑16 code unit count). Fix by validating against len(s) when index targets characters, or build/use a mapping between characters and UTF‑16 code unit positions so you use the right length and offsets.

@@ -1,0 +1,56 @@
+I can’t point to exact line numbers because you only pasted the docstring, not the implementation or the stack trace. To explain correctly I need the failing method body (and the call that fails). That said, based on the docstring and the ways this kind of factory usually gets implemented, the failure almost always comes from one of two specific, easy-to-mis-implement places:
+
+1) sign/validation logic that rejects legitimate negative offsets (e.g. (-2, -15))  
+2) magnitude check that compares hours+minutes incorrectly (e.g. treats -02:15 as +2:15 or computes total seconds with the wrong sign)
+
+Below I explain the root causes you are likely to hit, how you can confirm which one you have, exactly where to look in the code, and a concrete, minimal correct implementation you can use or compare against.
+
+What probably happened (two common root causes)
+- Cause A — Wrong sign normalization or validation:
+  - Symptom: the code raises ValueError for inputs that your docstring says are valid, for example (-2, -15) should be -02:15 but the method rejects it.
+  - Why: the implementation probably has a check like "if minutes < 0 and hours != 0: raise ValueError" or it does sign normalization by applying hours_sign = sign(hours); minutes = abs(minutes) and then reattaches the sign incorrectly (or always requires minutes >= 0). That incorrectly rejects the case where both hours and minutes are negative (which should be allowed and interpreted as a single negative offset).
+  - Where to look: the validation block at the start of the factory method where it enforces ranges and matches signs, and any code that computes total_seconds = hours*3600 + minutes*60 without first making minutes carry the hours sign.
+
+- Cause B — Incorrect magnitude/overflow check:
+  - Symptom: the method raises because "resulting offset exceeds +/- 23:59:59.000" even for valid inputs like (23, 59) or (-23, -59).
+  - Why: the implementation likely computes total_seconds = hours*3600 + minutes*60 but if minutes has the wrong sign relative to hours you can produce a magnitude > 23*3600+59*60 (for example, 23 hours and -59 minutes computed as 23*3600 + (-59)*60 = 79200 - 3540 = 75660 which is less than 86399, but if you mistakenly take abs(hours) + abs(minutes) you may get 23*3600 + 59*60 = max but applied to the wrong sign check). Or it might check maximum using hours > 23 or minutes > 59 separately without considering combined sign, leading to false positives.
+  - Where to look: the code that converts hours/minutes to an offset in seconds (or milliseconds) and then enforces the +/- 23:59:59.000 bound.
+
+How to confirm which one it is (quick tests)
+- Call factory(2, -15). According to the docstring this should raise ValueError. If it does not raise, the code is not enforcing that rule; if it raises for (-2, -15) then you have an overly strict sign rule (Cause A).
+- Call factory(-2, -15). It should succeed and produce -2h15m. If this call raises ValueError, you have the sign/normalization bug (Cause A).
+- Call factory(23, 59). If that raises with an overflow error, you have a magnitude check bug (Cause B).
+
+Concrete minimal correct implementation (replace your current method with this to test)
+- This code shows the correct sign handling and bound checking:
+
+def timezone_from_h_m(hours_offset, minutes_offset):
+    # Validate ranges first
+    if not (-23 <= hours_offset <= 23):
+        raise ValueError("hours_offset must be in -23..23")
+    if not (-59 <= minutes_offset <= 59):
+        raise ValueError("minutes_offset must be in -59..59")
+    # Disallow positive hours with negative minutes (docstring rule)
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("minutes cannot be negative when hours are positive")
+    # Compute total seconds preserving sign
+    # Attach the sign of hours to minutes if hours != 0 and minutes has opposite sign
+    # (But earlier rule prevents hours>0 & minutes<0; we still need to allow hours<0 & minutes<0)
+    total_seconds = hours_offset * 3600 + minutes_offset * 60
+    # Now enforce maximum absolute offset of 23:59:59 (i.e. 86399 seconds)
+    if abs(total_seconds) > (23 * 3600 + 59 * 60 + 59):
+        raise ValueError("resulting offset exceeds +/- 23:59:59.000")
+    # Construct and return your DateTimeZone using total_seconds
+    return DateTimeZone(total_seconds)  # replace with how your code builds the zone
+
+Why this fixes the two causes
+- It does range checks on hours and minutes separately (so you get clear errors if the raw inputs are out of spec).  
+- It enforces the docstring rule that hours > 0 and minutes < 0 is invalid.  
+- It computes total_seconds with sign preserved (so (-2, -15) becomes -8100 seconds) and then checks the absolute value against the allowed maximum. That avoids false overflow detection caused by mixing up signs or using abs() on components instead of on the resulting offset.
+
+Exact steps for you to do now
+1. Paste the actual method body and the stack trace/call that fails (the caller input values). I will point to exact lines and show the offending expression.  
+2. If you’d rather quickly test the diagnosis, try the three calls I suggested (2,-15), (-2,-15), (23,59) and tell me which ones fail. That will tell me whether you have Cause A or Cause B.  
+3. If you want an immediate quick fix, replace your current implementation with the snippet above (adapt construction of the DateTimeZone to your codebase) and rerun your tests.
+
+If you paste the method body and the failing input / stack trace I will point to the exact line and show the exact minimal code change to fix it.

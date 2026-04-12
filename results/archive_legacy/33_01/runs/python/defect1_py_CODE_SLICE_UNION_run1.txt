@@ -1,0 +1,48 @@
+What goes wrong
+- Where it happens: lines 396–405 (the minutes validation and the computation of the total offset in minutes).
+- What you see: callers that pass a negative minutes_offset (for example hours_offset = -1, minutes_offset = -30) get a ValueError on line 396 ("Minutes out of range"), even though they expect a valid -1:30 offset. That causes the call to fail before the code reaches the arithmetic block that builds the final offset.
+- Why it happens (root cause): the method assumes minutes_offset is always non‑negative and enforces 0..59 (line 396). But some callers supply a negative minutes_offset to mean “subtract these minutes from the hour part” (for negative offsets). The code later already handles sign by combining hours_in_minutes and minutes_offset with a subtraction on line 402, so the earlier validation contradicts that later logic. In other words, the code both (a) forbids negative minutes and (b) tries to consume negative minutes as part of the later arithmetic — the validation blocks legitimate negative-minute inputs that the arithmetic would have handled.
+
+Why this is clearly wrong in the code
+- Line 396: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+  - This rejects negative minute values outright.
+- Lines 401–405: hours_in_minutes = hours_offset * 60 ... and then minutes_offset = hours_in_minutes - minutes_offset (for negative hours) or + minutes_offset (for positive hours)
+  - Those lines assume minutes_offset can be subtracted from hours_in_minutes (i.e. that minutes_offset represents a magnitude you may subtract). That makes no sense if you already forbade negative minutes.
+
+Symptoms you will see
+- Passing minutes_offset < 0 triggers the ValueError at line 396.
+- Passing minutes_offset >= 0 but intending a negative combined offset must be encoded by making hours_offset negative and minutes_offset positive (which some callers may not do), so behavior is confusing and brittle.
+- The code is fragile because it repurposes the parameter minutes_offset as a running total (reassigning it) instead of computing a separate total_minutes variable.
+
+Concrete fixes (step‑by‑step)
+Pick one consistent convention and implement it; two common options:
+
+Option A — require minutes_offset to be non‑negative, document that callers must pass minutes as a non‑negative magnitude, and compute a separate total_minutes:
+1. Keep the validation on line 396 (minutes must be 0..59).
+2. Replace the in-place reassignment of minutes_offset with a new variable total_minutes:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - minutes_offset
+     else:
+         total_minutes = hours_in_minutes + minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE and pass it to for_offset_millis.
+4. Add a comment documenting that minutes_offset must be non‑negative and that hours_offset carries the sign.
+
+Option B — accept signed minutes_offset (allow negative minutes) and normalize:
+1. Change the validation (line 396) to allow -59..59 and disallow minutes with magnitude >= 60:
+   - if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+2. Compute total_minutes cleanly:
+   - total_minutes = hours_offset * 60 + minutes_offset
+   - Optionally validate that total_minutes is within -1439..1439 (or whatever range you need)
+3. Multiply total_minutes by MILLIS_PER_MINUTE and pass to for_offset_millis.
+
+Extra cleanup (always do)
+- Use a new local variable name (total_minutes or offset_minutes) instead of reusing minutes_offset. That removes the confusing mutation.
+- Add a unit test for edge cases:
+  - hours = -1, minutes = 30 (expect -90 minutes)
+  - hours = -1, minutes = -30 if you choose Option B
+  - hours = 23, minutes = 59 and hours = -23, minutes = 59 (boundary values)
+  - hours = 0, minutes = 0 (returns UTC)
+
+Summary
+The method fails because the minutes validation (line 396) conflicts with the later arithmetic that expects to be able to subtract minutes for negative hours. Fix by choosing one consistent convention for minute sign, compute the total minutes in a separate variable, and add tests.

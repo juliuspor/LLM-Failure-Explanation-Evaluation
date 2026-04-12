@@ -1,0 +1,66 @@
+What happened (what failed)
+- The code raised ValueError("Minutes out of range: -15") at the check on lines 396–397:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means minutes_offset had the value -15 when the code reached that check, so the condition minutes_offset < 0 was true and the exception was raised.
+
+Why it happened (root cause)
+- The check on line 396 expects minutes_offset to be in the inclusive range 0..59.
+- A negative value (-15) indicates minutes_offset was computed or parsed incorrectly earlier, or the code is using a representation where sign is stored separately and minutes are allowed to be negative.
+- Common ways this can happen:
+  - minutes_offset was derived from a signed total offset (for example total_minutes = -195; minutes_offset = total_minutes % 60 or minutes_offset = total_minutes % 60 - this can produce a negative result if sign handling is wrong).
+  - minutes_offset was copied directly from parsed input like "-15" without handling the hour sign separately.
+- The check is correctly catching an invalid minutes value for the chosen invariant (minutes_offset must be 0..59), so the real bug is earlier where minutes_offset got the value -15.
+
+Where to look (exact variables / likely locations)
+- Search for the code that sets minutes_offset before line 396. Typical patterns to inspect:
+  - minutes_offset = something derived from total_seconds / 60, total_minutes, or parsing a string like "+HH:MM" or "-HHMM".
+  - Any code that computes minutes_offset from a signed integer (e.g., total_minutes = sign * (hours*60 + minutes)) and then splits sign/hours/minutes incorrectly.
+- Check any parsing function that handles timezone offsets or timedelta decomposition and any place that uses modulo or integer division on negative numbers.
+
+Concrete fixes (step-by-step options)
+Pick one of these depending on intent (whether minutes_offset is supposed to be unsigned 0..59 or may be negative):
+
+1) If minutes_offset must be 0..59 and sign is stored separately
+   Steps:
+   - Find where minutes_offset is assigned. Suppose you computed total_minutes (signed).
+   - Set sign = -1 if total_minutes < 0 else 1
+   - Compute absolute minutes and hours:
+       total_minutes = abs(total_minutes)
+       hours_offset = total_minutes // 60
+       minutes_offset = total_minutes % 60
+   - Keep sign in a separate variable and use it when building the offset.
+   - This guarantees minutes_offset is in 0..59 and prevents the ValueError.
+   Example replacement (conceptual):
+       total_minutes = ...  # maybe negative
+       sign = -1 if total_minutes < 0 else 1
+       total_minutes = abs(total_minutes)
+       hours_offset = total_minutes // 60
+       minutes_offset = total_minutes % 60
+
+2) If minutes_offset may legitimately be negative (design change)
+   Steps:
+   - Decide on allowed range for minutes_offset (e.g., -59..59) and update the validation.
+   - Change the check at line 396 to reflect that, for example:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+   - Ensure downstream code interprets negative minutes correctly (may require combining hours and minutes with the same sign).
+
+3) Quick defensive fix (if source unclear)
+   Steps:
+   - Before the check at line 396, normalize minutes_offset into 0..59:
+       minutes_offset = abs(minutes_offset) % 60
+   - But only use this if you have confirmed the sign is tracked elsewhere or the minutes sign should be discarded. Otherwise use option (1).
+
+What to change in code (exact lines)
+- Replace the computation that assigns minutes_offset (the code immediately before line 396) following the pattern in option 1.
+- Or, if you choose option 2, change lines 396–397 to:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Add tests
+- Add unit tests for the parsing/decomposition code with inputs that produce negative total offsets (e.g., -195 minutes) to confirm minutes_offset becomes 15 with sign -1 (option 1) or becomes -15 only if your design requires it (option 2).
+
+Summary
+- The exception occurred because minutes_offset was -15 and the code on line 396 explicitly rejects negatives.
+- Fix by correcting the earlier computation that produced minutes_offset so minutes are always 0..59 with a separate sign, or by changing the validation and downstream logic if negative minutes are intended. Follow the step-by-step changes above depending on which design you want.

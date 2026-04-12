@@ -1,0 +1,57 @@
+What happened (what fails)
+- The code tries to infer the element/component type using
+  inferred_type = type(array)
+  when array is not None (first branch). But type(array) returns the Python list class (e.g. <class 'list'>), not the element type stored inside the list.
+- Because of that, ArrayUtils._copy_list_grow1 is being passed the wrong type (a list class instead of the element class). This breaks the type logic and later leads to the code thinking the inferred type is "object" in some cases and raising the TypeError you see in tests.
+- Specifically, in the failing test you call ArrayUtils.add(None, None, expected_type=str). Both array and element are None, so code sets inferred_type = object. It then goes on, and because expected_type is str it executes the TypeError branch:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  That raises TypeError, but the test expects to get [None] without any error.
+
+Where it happens (specific lines & variables)
+- Line: inferred_type = type(array) — wrong value: returns list class, not element/component type.
+- Line: new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — receiving the wrong component type.
+- Line: if inferred_type == object and expected_type != object: raise TypeError(...) — raises for the test case when both array and element are None.
+
+Why that causes the failure (root cause)
+- The code conflates the container type (the list object itself) with the element/component type. A list's Python type is not the same as the type of items it contains. Because of that, the component-type inference logic is wrong in all these situations:
+  - Non-empty array: should inspect an element to infer component type, not call type(array).
+  - Empty array: type(array) is still list; no element to inspect, so it should use expected_type if provided or fallback to element's type.
+  - array and element both None: code falls back to object, but if caller provided expected_type we should respect that and not immediately raise.
+
+Concrete fixes (step-by-step)
+1. Choose component_type in this priority:
+   - If expected_type is provided: use expected_type as component_type.
+   - Else if array is not None and len(array) > 0: use type(array[0]) as component_type.
+   - Else if element is not None: use type(element) as component_type.
+   - Else: use object as component_type.
+2. Pass component_type to _copy_list_grow1.
+3. Remove or change the TypeError check so it only triggers when you really cannot satisfy the expected_type (for example, when expected_type is incompatible with a known non-object component_type) — in the current failing test you must not raise when both element and array are None but expected_type is given; instead use expected_type as the new list component type.
+4. Ensure when array is non-empty you use an element (array[0]) to infer the element type (not type(array)).
+
+Minimal example replacement for the inference part (conceptual)
+- Replace:
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+  With:
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Why this will fix the failing test
+- For ArrayUtils.add(None, None, expected_type=str), inferred_type becomes str (from expected_type) and the method will return a list of length 1 ([None]) typed as string elements conceptually, and you will not hit the TypeError branch.
+- For non-empty arrays, using type(array[0]) gives the actual element type, so copying/growing the list will use the correct component type.
+- For empty arrays or None element cases, using expected_type first avoids incorrect "object" inference and premature TypeError.
+
+Summary
+- Root cause: using type(array) (the list class) instead of the element/component type (e.g., type(array[0]) or expected_type).
+- Fix: infer component type from expected_type first, then from an actual element (array[0] or element), and only fall back to object if nothing is known; adjust the TypeError logic accordingly.

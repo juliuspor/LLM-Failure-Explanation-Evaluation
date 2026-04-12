@@ -1,0 +1,54 @@
+Root cause (short): some code is constructing a time using a negative minute value (-15). The time-construction API you’re calling rejects minute values outside 0–59 and throws ValueError/IllegalArgumentException with the message "Minutes out of range: -15".
+
+Why this happened (step‑by‑step):
+1. Your program calls a time/construction method (for example: java.time.LocalTime.of(hour, minute) or org.joda.time.LocalTime(hour, minute) — whichever your code uses). Those methods validate the minute argument and throw when it is <0 or >59.
+2. The minute variable passed to that method contains -15 (probably the result of an arithmetic bug, a bad parse, or an off-by-one/negative offset).
+3. The API throws immediately with the message shown; that is what you see in the stack trace: "Minutes out of range: -15".
+
+Where to look now (concrete): open the stack trace you got. The topmost application frame (the first line in the trace that points to your code, not library code) will show the file name and the line number. That line is where your code calls the time constructor/method. Example stack-trace frame you should find and open:
+- com.example.YourClass.yourMethod(YourClass.java:123)
+Open YourClass.java at line 123 and find the call that looks like one of:
+- LocalTime.of(hour, minute)
+- new LocalTime(hour, minute)
+- someTimeConstructor(hourArg, minuteArg)
+
+What to check at that line (step list):
+1. Print/inspect the values of the hour and minute variables right before the call (or use the debugger). Confirm minute == -15.
+2. Trace back to where minute is computed or parsed:
+   - If parsed from a string, confirm the parser and the input string.
+   - If computed (e.g., minute = baseMinute - offset), check offset and ensure it cannot make minute negative.
+3. Decide desired behavior when minute would be negative:
+   - Reject the input earlier and surface a clear error.
+   - Normalize the time (e.g., borrow 1 hour and add 60 minutes).
+   - Use an API that accepts an offset/duration rather than raw fields.
+
+Specific fixes (pick the one that matches your intent):
+
+A. Reject invalid input (explicit validation)
+- Before calling the constructor, add:
+  if (minute < 0 || minute > 59) {
+      throw new IllegalArgumentException("minute out of range: " + minute);
+  }
+This makes the failure explicit and keeps the constructor call correct.
+
+B. Normalize negative minutes into a valid time (example for Java, adjusting hour/minute)
+- Example:
+  int totalMinutes = hour * 60 + minute;    // minute may be negative
+  if (totalMinutes < 0 || totalMinutes >= 24*60) { /* decide policy */ }
+  int normalizedHour = Math.floorDiv(totalMinutes, 60);
+  int normalizedMinute = Math.floorMod(totalMinutes, 60);
+  LocalTime t = LocalTime.of(normalizedHour, normalizedMinute);
+
+C. Use Duration arithmetic instead of setting fields directly
+- If you want to add/subtract minutes, start from a valid time and use Duration/plusMinutes:
+  LocalTime t = LocalTime.of(hour, 0).plusMinutes(minute); // minute may be negative; plusMinutes handles negatives
+
+D. Fix parsing logic
+- If you parse strings like "1:-15" or a negative offset, fix the regex/parse code or sanitize the parsed integers before constructing the time.
+
+How to confirm the fix:
+1. Re-run the code and confirm the same stack-trace location no longer passes negative minutes into the time constructor.
+2. Add unit tests for edge cases: minute = -15, minute = 0, minute = 59, minute = 60, minute = -1.
+3. If you normalized times, verify behavior across day boundaries (e.g., hour 0 minute -15 => previous day’s 23:45) if that is intended.
+
+If you want, paste the exact stack trace (the full trace) and the code around the noted line number. I’ll point to the exact line and give the minimal change to fix it.

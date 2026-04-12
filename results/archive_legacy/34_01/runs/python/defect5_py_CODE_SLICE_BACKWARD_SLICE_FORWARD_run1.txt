@@ -1,0 +1,39 @@
+What went wrong (root cause)
+- On line 337 you set inferred_type = type(array). That returns the Python type of the container (e.g. list), not the element type stored inside the list.
+- ArrayUtils._copy_list_grow1 is being called with inferred_type (line 342). The copy/grow implementation expects the element class/type, not the container class. Passing the container type means the new list is created with the wrong underlying element type information.
+- Later, on lines 346–347 you check if inferred_type == object to decide whether to raise a TypeError. Because inferred_type is the list class (e.g. <class 'list'>) when array was passed, that equality check never matches even when you intended to treat it as an "unknown element type". That makes the branch for the TypeError incorrect and allows invalid casts to proceed or misreports the error.
+- Concretely: when array is not None you end up using inferred_type == list (or whatever the container class is). That breaks both the copy/grow behavior and the runtime type-check logic that follows.
+
+Where it happens (exact lines)
+- inferred_type = type(array) — line 337 (this is the wrong value).
+- new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — line 342 (passes wrong type into copy).
+- if inferred_type == object and expected_type != object: — lines 346–347 (the condition will be false when it should sometimes be true because inferred_type is the container class).
+
+Why that causes the failure (plain)
+- You should be telling _copy_list_grow1 the element type (the type of items inside the list), not the list's class. Passing the list class confuses the copy/grow routine and the later cast check, so either you create an array that can't accept the new element or you don't raise the expected TypeError when you should.
+
+Clear steps to fix (concrete)
+1. Derive inferred_type from the element type in the array, not from the array object:
+   - If array is not None and len(array) > 0: use type(array[0]) for inferred_type.
+   - Else if element is not None: use type(element).
+   - Else if expected_type is not None: use expected_type.
+   - Else use object.
+2. Replace the current block (lines ~337–340):
+   - Current:
+     inferred_type = type(array)
+   - Replace with:
+     if array is not None and len(array) > 0:
+         inferred_type = type(array[0])
+     elif element is not None:
+         inferred_type = type(element)
+     elif expected_type is not None:
+         inferred_type = expected_type
+     else:
+         inferred_type = object
+3. Keep the rest of the logic (call to _copy_list_grow1 and the TypeError check) but now the inferred_type will be the actual element type so the copy and the cast check will behave correctly.
+
+Why this fix works
+- _copy_list_grow1 will receive the actual element class, so the new list will be prepared to hold elements of that class.
+- The condition inferred_type == object will correctly detect the genuinely unknown-element-type case, allowing the TypeError branch to behave as intended.
+
+If your lists can be heterogenous (mixed element types) and you need a deterministic element type choice, pick a policy (first element's type, element argument's type, or expected_type) and document it.

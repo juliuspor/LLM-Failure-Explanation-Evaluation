@@ -1,0 +1,74 @@
+What happened (where it fails)
+- The code clamps the input value into v on these lines:
+  ```py
+  v = max(value, self._lower_bound)
+  v = min(v, self._upper_bound)
+  ```
+  but then computes g using the original variable value instead of the clamped v:
+  ```py
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  ```
+- If value is outside the bounds, g will be computed from the unclamped value and can fall outside 0..255, which triggers the ValueError on the next lines:
+  ```py
+  if g < 0 or g > 255:
+      raise ValueError(...)
+  ```
+  So the clamping has no effect because the code never uses v when computing g.
+
+Why it fails (root cause)
+1. Wrong variable used: you clamp into v but then use value in the formula, so the clamp is ignored.
+2. Edge-case not handled: if self._upper_bound == self._lower_bound, the division ( ... / (self._upper_bound - self._lower_bound) ) will raise ZeroDivisionError.
+
+Where exactly (referencing code)
+- Clamping happens at the two lines creating v.
+- The failure occurs on the g = int(...) line because it uses value.
+- The ValueError is raised immediately after if g is outside [0,255].
+
+Clear fixes (step-by-step)
+1. Use the clamped variable v when computing g:
+   Replace
+   ```py
+   g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+   ```
+   with
+   ```py
+   g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+   ```
+2. Prevent division by zero when bounds are equal. Add an early check before computing g:
+   ```py
+   if self._upper_bound == self._lower_bound:
+       # decide desired behavior: return 0, 255, or some midpoint; example: return 0
+       return (0, 0, 0)
+   ```
+   or raise a clear ValueError with an explanatory message.
+3. Improve the error message to include the computed g and the bounds (so debugging is easier):
+   ```py
+   if g < 0 or g > 255:
+       raise ValueError(f"Computed color component g={g} out of range [0,255]; value={value}, clamped v={v}, bounds=({self._lower_bound},{self._upper_bound})")
+   ```
+
+Suggested corrected function (concise)
+- Use v in the formula and guard against zero range:
+  ```py
+  def get_paint(self, value: float) -> Tuple[int, int, int]:
+      v = max(value, self._lower_bound)
+      v = min(v, self._upper_bound)
+
+      if self._upper_bound == self._lower_bound:
+          return (0, 0, 0)  # or other defined behavior
+
+      g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+      if g < 0 or g > 255:
+          raise ValueError(f"Computed g={g} outside [0,255]; value={value}, v={v}, bounds=({self._lower_bound},{self._upper_bound})")
+
+      return (g, g, g)
+  ```
+
+Tests to add
+- value below lower_bound
+- value above upper_bound
+- value exactly at bounds
+- upper_bound == lower_bound
+
+That fixes the root cause (using the unclamped value) and prevents the division-by-zero edge case.

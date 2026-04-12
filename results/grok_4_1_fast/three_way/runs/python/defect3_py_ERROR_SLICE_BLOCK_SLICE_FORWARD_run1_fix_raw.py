@@ -1,0 +1,1 @@
+def code_point_at(code_units: List[int], index: int) -> int:\n    \"\"\"\n    Get the Unicode codepoint at the given index in a list of UTF-16 code units.\n    Equivalent to Java's Character.codePointAt().\n    \n    Raises:\n        IndexError:

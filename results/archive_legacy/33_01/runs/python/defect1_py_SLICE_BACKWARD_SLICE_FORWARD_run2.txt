@@ -1,0 +1,46 @@
+What happened (where it fails)
+- At lines 396–397 the code verifies the minutes component:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+  - That check is correct for the separate minutes component.
+- Later, at line 402 and 404 the same variable minutes_offset is reused to build the total offset in minutes:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- At line 405 that new minutes_offset is multiplied into milliseconds:
+  - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+The bug: the code chooses the wrong arithmetic for the minutes component when the hour part is negative, so the sign of the combined offset becomes wrong and can grow in magnitude unexpectedly (which later triggers the "Offset is too large" error). In other words, minutes_offset is first validated as a 0..59 minute component, then overwritten incorrectly when composing the full offset with hours_in_minutes.
+
+Why it fails (root cause)
+- hours_in_minutes already carries the sign of the hour part (for example, -5 hours → hours_in_minutes == -300).
+- If the hours are negative, the correct total minutes should be hours_in_minutes - minutes_component (for -5:30 → -300 - 30 = -330). If the code uses the wrong branch or wrong sign logic, the minutes get combined incorrectly and the total minutes end up with the wrong sign or magnitude.
+- Because minutes_offset is reused for both the minute component and the computed total minutes, it is easy to mix up which arithmetic to apply and end up with a wrong total. That wrong total then produces an incorrect offset and may trip the subsequent overflow/size checks (line 407 "Offset is too large").
+
+Exact places to look
+- Validation: lines 396–397 (minutes component range check)
+- Composition into total minutes: lines 402 and 404 (minutes_offset = hours_in_minutes - minutes_offset / + minutes_offset)
+- Use of the composed value: line 405 (safe_multiply) and line 407 (overflow check and error)
+
+How to fix it (concrete steps)
+1. Stop reusing minutes_offset for two different meanings. Introduce a new variable for the composed total minutes, e.g.:
+   - int minute_component = minutes_offset; // keep validated 0..59
+   - int total_minutes;
+2. Determine sign of hours_in_minutes and compose total_minutes explicitly and unambiguously:
+   - if (hours_in_minutes < 0)
+       total_minutes = hours_in_minutes - minute_component;
+     else
+       total_minutes = hours_in_minutes + minute_component;
+   This uses hours_in_minutes’ sign to add/subtract the minute component.
+3. Replace later uses of minutes_offset with total_minutes:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the original validation (lines 396–397) intact for the minute component; do not perform that check on the composed total minutes.
+5. Add unit tests for boundary cases:
+   - positive hours with non-zero minutes (e.g., +5:30 → +330 minutes)
+   - negative hours with non-zero minutes (e.g., -5:30 → -330 minutes)
+   - zero hours with minutes (0:30 → +30)
+   - verify offsets near overflow to ensure safe_multiply / "Offset is too large" behavior is correct
+
+Why these steps fix it
+- They avoid variable reuse confusion (clear separation of minute component vs total minutes).
+- They make the sign-handling explicit: if hours are negative, subtract the minute component; if hours are positive, add it. That produces the correct total minute offset and prevents the magnitude/sign errors that caused the failure.
+
+If you paste the surrounding conditional (the branch that chooses lines 402 vs 404), I can show an exact one-line replacement to drop into your method.

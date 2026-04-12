@@ -1,0 +1,80 @@
+I can’t point to the exact line that produced this result because you didn’t paste the code or the test file. To explain the failure without guessing, I’ll tell you exactly what to inspect, why the mismatch happens, and give concrete steps you can run (with exact method/field names) so you find the root cause in your code.
+
+What happened (high level)
+- The test expected the floating value to be negative zero (-0.0) but the function under test produced positive zero (0.0). Numerically these compare equal in many contexts, but they are different at the bit/sign level. Your test framework’s assertion compared in a way that considered the sign-bit difference relevant (or compared string/bit-level representations), so it reported "Expected -0.0, got 0".
+
+Why this happens (root cause)
+- Somewhere in the code path that produces the value you asserted on, a computation or conversion removed the negative sign bit. Common places this happens:
+  - A mathematical operation that yields +0.0 instead of -0.0 (e.g. dividing negative by infinity, or some branch that returns 0.0 unconditionally).
+  - Converting the value to an integer or to a string and back in a way that normalizes sign of zero.
+  - Using a library or helper method that returns 0.0 for small-magnitude results instead of preserving the sign bit.
+  - Using an assertion that formats the number (toString) and that formatting dropped the negative sign for zero.
+
+Exactly what to check (files, methods, and lines)
+1. Test file and assertion line:
+   - Open the test source that failed. Find the assertion line (the stack trace should show the test class and line number). Example names to look for: assertEquals(expected, actual), assertThat(actual, is(expected)), assertTrue(actual == expected).
+   - Note the variable names used there: e.g. expected = -0.0 or expectedValue, and actual = result or returnedValue.
+
+2. Function under test:
+   - Open the method that produced actual (the function name shown in the stack trace). Inspect every return statement and any conversions touching that value.
+   - Look for code patterns that may normalize sign of zero:
+     - Casting to/from integral types: (int)someDouble or Math.round / long conversions then back to double.
+     - Formatting: Double.parseDouble(String.format(...)) or new BigDecimal(double).doubleValue().
+     - Libraries: DoubleStream.sum(), lists with reduce(), or external utilities that apply Math.abs or similar.
+
+3. Intermediate assignments:
+   - Identify intermediate variables (e.g. temp, sign, scale). Add prints or logging of their values and of the final value right before return.
+
+How to prove the sign-bit difference (commands / lines to add)
+- Add a debug print right before the value is returned and in the test before the assertion. Use the language’s bit-probing method to show bits:
+
+  Java:
+  - Print raw bits:
+    - System.out.println("actual bits = " + Long.toHexString(Double.doubleToRawLongBits(actual)));
+    - System.out.println("expected bits = " + Long.toHexString(Double.doubleToRawLongBits(expected)));
+  - Or print sign:
+    - System.out.println("actual sign = " + Math.signum(actual));
+
+  JavaScript:
+  - console.log("--> actual === 0 ? 1/actual : actual", 1/actual);  // 1/0 = Infinity, 1/-0 = -Infinity
+  - Object.is(actual, -0)  // true if actual is -0
+
+  Python:
+  - import math, struct
+    - print(math.copysign(1.0, value))
+    - print(struct.pack('!d', value).hex())
+
+- Run the test and compare the printed bit strings or signum outputs. If expected shows the negative-sign bit (0x8000...) and actual doesn’t, you’ve confirmed the sign-bit flip happened inside the code path.
+
+Concrete likely scenarios and where to fix them (step-by-step)
+1. If you find a formatting/parse roundtrip:
+   - Problem: String.format or BigDecimal construction normalized zero.
+   - Fix: Avoid formatting/parse for internal arithmetic. If conversion is necessary, preserve sign by using doubleToRawLongBits or preserve logic that produces negative zero.
+   - Steps:
+     1) Replace Double.parseDouble(String.format(...)) with direct arithmetic.
+     2) Add a unit test that asserts the sign-bit using Double.doubleToRawLongBits (see debug prints above).
+
+2. If you find a function that calls Math.abs or a sign-clearing transform:
+   - Problem: Math.abs(someSmallNegative) -> +0.0
+   - Fix: Avoid Math.abs at that site or handle -0.0 explicitly.
+   - Steps:
+     1) Change code to preserve negative zero where it matters:
+        if (value == 0.0) return value; // preserves sign of incoming zero
+     2) Add a test verifying sign using bit inspection.
+
+3. If you find an arithmetic identity that yields +0.0 instead of -0.0:
+   - Problem: Expression produces +0.0 (e.g. (-x) * 0.0 or division by infinity).
+   - Fix: Determine whether negative zero is actually required for correctness; if yes, explicitly set it using Math.copySign(0.0, -1.0) or Math.copySign(0.0, sourceValue).
+   - Steps:
+     1) Identify the step that produced the zero.
+     2) If you must preserve negative zero, use Math.copySign(0.0, source) before returning.
+
+4. If the test’s assertion compares formatted representations:
+   - Problem: Test does string comparison or trims sign on zero.
+   - Fix: Change the test to compare bits or use a tolerant numeric comparison that ignores sign-bit if you don’t care about sign-of-zero.
+   - Steps:
+     1) Replace assertEquals(-0.0, actual) with one of:
+        - Assert that Double.doubleToRawLongBits(actual) == Double.doubleToRawLongBits(-0.0) if you require the sign.
+        - Or assertDoubleEqualsWithDelta(expected, actual, delta) if sign is unimportant.
+
+If you paste the failing test file and the implementation method (the stack trace line numbers and the method source) I will point to the exact line and show the single-line change needed. Right now those are the exact diagnostics and step-by-step checks you should run so you stop guessing and find precisely where the sign-bit was lost.

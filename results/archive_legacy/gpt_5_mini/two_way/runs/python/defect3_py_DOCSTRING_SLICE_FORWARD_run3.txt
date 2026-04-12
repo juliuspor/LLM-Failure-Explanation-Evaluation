@@ -1,0 +1,31 @@
+What happens (where)
+- At line 38 you load high = code_units[index].
+- Lines 39–41 detect a high surrogate (0xD800..0xDBFF) and look at the next code unit (low = code_units[index + 1]).
+- If the next unit is a low surrogate (0xDC00..0xDFFF) you combine them and return the full code point at line 43.
+- If the next unit is not a low surrogate (or there is no next unit) the function falls through to line 44 and returns high — i.e. the raw high-surrogate value (a number between 0xD800 and 0xDBFF).
+
+Why that fails (root cause)
+- A high surrogate value by itself is not a valid Unicode scalar. Returning the raw high-surrogate integer leaks an invalid code point into the rest of the pipeline.
+- Downstream code that expects valid Unicode scalars (or that will encode/serialize the value) can fail, raise exceptions, or produce invalid output when given a lone high surrogate.
+- The problem occurs specifically when a high surrogate is followed by a non-low surrogate (or when the high surrogate is at the end of the list). The code never treats that situation as an error or a replacement (line 39–44), it merely returns high unchanged.
+
+Where to change it (concrete fixes, step-by-step)
+1. Decide how you want to handle unpaired high surrogates:
+   - Option A — treat as error: raise a clear exception.
+     Example change after line 41:
+       raise ValueError(f"Unpaired high surrogate at index {index}: 0x{high:X}")
+   - Option B — return the Unicode replacement character U+FFFD instead of the raw surrogate and advance by one code unit.
+     Example change after line 41:
+       return 0xFFFD
+2. Implement the chosen behavior in the branch where the next unit is not a valid low surrogate (i.e. replace the implicit fall-through to line 44 with the explicit action). Concretely, add an else: block after line 41 and either raise the ValueError or return 0xFFFD.
+3. If callers rely on knowing how many code units were consumed, ensure this function's contract documents whether it consumes one or two units and that callers advance index accordingly. If the function should both return a code point and the number of units consumed, change the return type to a tuple (code_point, units_consumed) and update callers.
+
+Why these changes fix it
+- They stop an invalid surrogate value from propagating.
+- They make the behavior explicit (error or replacement), so callers and maintainers won't be surprised by hidden invalid data.
+- The raised exception or replacement character gives developers a clear signal (and exact index) of where the problem happened.
+
+References to the code
+- Problem region: lines 38–44.
+- Variables: code_units, index, high, low.
+- Exact failing behavior: falling through to line 44 returns an unpaired high surrogate value (0xD800..0xDBFF).

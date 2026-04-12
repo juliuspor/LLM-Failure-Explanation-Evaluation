@@ -1,0 +1,39 @@
+What happened (root cause)
+- The code double-advances pos after a translator reports it handled a codepoint/surrogate pair.
+- In the while loop you call consumed = self.translate_codepoint(code_units, pos, out). The contract (comment) says translators operate on codepoints and will have taken care of a surrogate pair — i.e. they report how many code units they consumed.
+- Then you do:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  That loop uses code_point_at(code_units, pos) repeatedly and also advances pos by char_count(...). But:
+  - code_point_at(code_units, pos) already reads the high surrogate and low surrogate (when present) and returns the full codepoint,
+  - char_count(codepoint) returns 2 for surrogate pairs,
+  - the translator already accounted for those code units by returning consumed.
+  So you end up advancing pos by the code unit count twice (or otherwise advancing more than consumed). That causes pos to move past the end of code_units and the next call to code_point_at(code_units, pos) triggers IndexError: String index out of range (raised at the index < 0 or index >= len(code_units) check in code_point_at — lines 35–36 in your slice).
+
+Where it fails (exact place)
+- The IndexError is raised inside code_point_at when it is called with pos == len(code_units). That call comes from the inner loop at the end of translate(): the call code_point_at(code_units, pos) is made when pos has been over-advanced. The check that throws the exception is on lines 35–36 of to_utf16_code_units/code_point_at (the index bounds check).
+
+How to fix it (concrete steps)
+1. Replace the inner for-loop that tries to recompute advances with a single increment by consumed. Example change (in translate()):
+   - Remove:
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+   - Replace with:
+       pos += consumed
+   Rationale: translate_codepoint already reports how many UTF-16 code units it consumed; simply advance pos by that many code units.
+
+2. Alternate (safer) approach if consumed semantics ever change:
+   - If consumed represents "number of codepoints" rather than code units, compute the advance without re-calling code_point_at on an out-of-range pos:
+       advance = 0
+       i = pos
+       for _ in range(consumed):
+           cp = code_point_at(code_units, i)   # safe because i < length at loop start and you maintain i
+           inc = char_count(cp)
+           advance += inc
+           i += inc
+       pos += advance
+   - This keeps all calls to code_point_at within bounds because you advance a local i and only call code_point_at while i < length.
+
+Summary
+- Root cause: pos is advanced incorrectly (double-advanced) by using code_point_at and char_count after translate_codepoint already consumed the code units, causing code_point_at to be called with pos == len(code_units) and raising IndexError.
+- Fix: advance pos by consumed (pos += consumed) or use the safe alternate loop that advances a separate index variable when computing the number of code units to skip.

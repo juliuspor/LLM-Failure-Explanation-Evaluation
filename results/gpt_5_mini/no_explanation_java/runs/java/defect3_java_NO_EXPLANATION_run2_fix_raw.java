@@ -1,0 +1,1 @@
+public abstract int translate(CharSequence input, int index, Writer out) throws IOException;

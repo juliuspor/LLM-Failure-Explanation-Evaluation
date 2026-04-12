@@ -1,0 +1,42 @@
+What went wrong (short)
+
+- The loop assumes translate_codepoint(...) returns a count of Unicode codepoints consumed.
+- Your translate_codepoint implementation returns the number of UTF‑16 code units (char units) consumed for a surrogate pair (2) instead of 1 codepoint.
+- Because consumed is treated as "codepoints" the code advances pos too far (it runs the inner loop consumed times, and each iteration advances pos by char_count(...), which for a surrogate codepoint is 2). That yields pos += 2 twice (4), skipping past the input and breaking the logic (wrong result or index errors).
+
+Where it happens (exact lines/variables)
+
+- Line: consumed = self.translate_codepoint(code_units, pos, out)
+  - Variable: consumed
+- Lines: for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))
+  - The code treats consumed as a number of codepoints and, for each codepoint, calls code_point_at and then char_count to advance by  correct number of UTF‑16 units.
+- The bug is exposed by the test with the supplementary character '\U0001F630' (a single Unicode codepoint represented by two UTF‑16 code units). If translate_codepoint returns 2 (UTF‑16 units) instead of 1 (codepoint), the for-loop runs twice and advances pos by 4, not 2.
+
+Why this is the root cause (clear reasoning)
+
+- The contract (comment) says translators must understand codepoints: they should return how many codepoints they consumed.
+- The rest of the code advances pos by inspecting codepoints at the current pos and adding char_count(codepoint) for each consumed codepoint. That correctly converts "codepoints consumed" → "UTF‑16 units to skip".
+- If translate_codepoint returns UTF‑16 unit count instead, the for-loop double-applies char_count, resulting in skipping too many units (consumed*char_count instead of the correct sum of char_count for each codepoint). For a single surrogate pair this becomes 2 * 2 = 4 instead of 2.
+
+How to fix it (concrete steps)
+
+Pick one of these two fixes (both are precise):
+
+1) Make translate_codepoint return codepoint count (preferred given the contract)
+   - Change translate_codepoint so that for a supplementary character (surrogate pair) it returns 1 (one codepoint), not 2.
+   - Example change: when you detect a high+low surrogate pair at pos, return 1; when you detect a single BMP unit, return 1; when you consumed N logical codepoints, return N.
+
+2) Or change the caller to treat consumed as UTF‑16 code units (if you prefer translators to return units)
+   - Replace the for-loop that advances pos with a single pos += consumed (because consumed already counts code units).
+   - Specifically, replace:
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+     with:
+       pos += consumed
+   - And update the contract/documentation so translate_codepoint is documented to return UTF‑16 code unit count.
+
+Which to choose
+- The in-code comment says "Contract with translators is that they have to understand codepoints", so the correct fix is to change translate_codepoint to return codepoint count (option 1). That keeps the current caller logic intact.
+
+Summary (one-line)
+translate_codepoint is returning UTF‑16 unit count for surrogate pairs (2) while translate(...) expects a count of codepoints; the mismatch makes pos advance too far (double-skip), which causes incorrect behavior for supplementary characters like '\U0001F630'. Fix by returning codepoint counts from translate_codepoint, or else change the caller to advance by consumed UTF‑16 units.

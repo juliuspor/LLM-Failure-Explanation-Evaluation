@@ -1,0 +1,43 @@
+What happened (where it fails)
+- The code rejects any negative minutes immediately at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because of that unconditional check, calls that should be allowed (for example hours_offset = -2, minutes_offset = -15) raise ValueError at line 396 and never reach the sign-handling code at lines 402–405 that would compute the correct offset.
+- In other words, the validation at line 396 prevents the branch logic at lines 402 and 404 from running, so legitimate combinations that use negative minutes for non-positive hours are treated as invalid.
+
+Why it fails (root cause)
+- The docstring and the table allow negative minute values in some combinations:
+  - (hours = 0, minutes < 0) should produce a negative offset (e.g. (0, -15) -> -00:15).
+  - (hours < 0, minutes < 0) should be handled as negative total minutes (e.g. (-2, -15) -> -02:15).
+- The code enforces minutes_offset >= 0 without regard to hours_offset. That unconditional check is too strict and contradicts the intended behavior.
+- The later code (lines 402 and 404) shows the intention to transform minutes based on sign of hours, but that code is never reached for negative minutes because of the early raise at line 396.
+
+Concrete example of the failing call
+- Input: hours_offset = -2, minutes_offset = -15
+- At line 396 the function raises ValueError("Minutes out of range: -15").
+- Expected behavior (per docstring): return a zone for -02:15.
+
+How to fix it (exact changes and steps)
+1. Change the minutes validation so it only rejects values outside the absolute allowed minute range, but allow negative minutes when permitted by the hours sign. For example:
+   - Replace the current check at line 396 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This allows negative minutes in the valid -59..+59 range and defers sign-specific checks to the subsequent logic.
+
+2. Add a specific check that forbids minutes being negative when hours are positive (this enforces the table rule):
+   - After the range check, add:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is not allowed")
+
+3. Keep (or add) the existing sign-handling logic at lines 402–405 so minutes_offset is converted appropriately when hours are zero or negative. Ensure those lines run by using the adjusted validation order above.
+
+4. Confirm the final overflow check (lines 406–407) still prevents offsets larger than ±23:59:59.000 and remains unchanged.
+
+Why these steps fix it
+- Step 1 prevents falsely rejecting legitimate negative minute values like -15.
+- Step 2 enforces the disallowed combination (positive hours with negative minutes) explicitly, matching the docstring.
+- Keeping the sign-adjustment code allows (-2, -15) and (0, -15) to be converted into the correct total-offset minutes and then into milliseconds.
+
+Summary
+- Bug: unconditional rejection of negative minutes at line 396 prevents valid combinations from being handled.
+- Fix: allow minutes in -59..+59, then explicitly forbid negative minutes only when hours > 0, and let the existing sign-handling logic (lines 402–405) run. This matches the documented valid combinations and stops the erroneous ValueError.

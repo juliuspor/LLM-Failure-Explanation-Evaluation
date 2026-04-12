@@ -1,0 +1,50 @@
+What happened (where it crashed)
+- The IndexError comes from this line inside the loop:
+  pos += char_count(code_point_at(code_units, pos))
+- That call to code_point_at(indexing into code_units) ran when pos == length (2 in the failing run), so code_point_at tried to read code_units[2] and raised "String index out of range: 2".
+
+Why it happened (root cause)
+- The code assumes it is safe to call code_point_at(code_units, pos) repeatedly inside the for pt in range(consumed) loop, but pos is being changed inside that loop and can reach length.
+- The variable consumed indicates how many codepoints/units the translator handled, but the loop increments pos incorrectly:
+  - You call code_point_at(code_units, pos) after you may already have advanced pos to length by earlier iterations of the same loop, so the next call is out of bounds.
+  - In short: you call code_point_at at an index that is no longer guaranteed to be valid.
+
+Exactly where the logic is wrong (lines)
+- The problematic code is this block:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- It calls code_point_at(code_units, pos) on every iteration without first ensuring pos < length and while pos is being moved inside the loop.
+
+How to fix it (precise, step-by-step options)
+You must make pos advance in a way that matches what translate_codepoint(consumed) reports.
+
+1) If translate_codepoint returns the number of UTF-16 code units consumed:
+   - Replace the whole loop with a single advance by consumed code units:
+       pos += consumed
+   - Rationale: translate_codepoint already moved past those code units; advancing by consumed units keeps pos correct and avoids repeated calls to code_point_at.
+
+2) If translate_codepoint returns the number of codepoints consumed (not code units), update the loop so you read the codepoint before advancing and check bounds:
+   - Change it to:
+       for pt in range(consumed):
+           if pos >= length:
+               raise IndexError("internal error: translator reported more codepoints than available")
+           cp = code_point_at(code_units, pos)
+           pos += char_count(cp)
+   - Rationale: you ensure pos is valid before calling code_point_at and compute the char_count from the codepoint read at the current pos.
+
+3) Defensive check (recommended in addition to 1 or 2):
+   - Add an assertion or explicit bounds check before calling code_point_at anywhere:
+       if pos >= length:
+           raise IndexError("pos out of range before reading code unit")
+   - This will make the failure fail earlier and clearer if upstream logic is wrong.
+
+Concrete minimal change (most likely correct)
+- If translate_codepoint's contract is "it consumed N code units", replace the loop with:
+    pos += consumed
+
+Why this will stop the IndexError
+- The repeated call to code_point_at(code_units, pos) is the direct cause of the out-of-range access. Either advance pos by the actual units consumed, or ensure each call to code_point_at is pre-checked and uses the codepoint read at the current index before incrementing pos.
+
+Summary
+- The loop increments pos in a way that allows code_point_at to be called when pos == length, causing the IndexError.
+- Fix by advancing pos according to what translate_codepoint actually returns (likely pos += consumed), or else read code_point_at only after confirming pos < length and before you increment pos for that iteration.

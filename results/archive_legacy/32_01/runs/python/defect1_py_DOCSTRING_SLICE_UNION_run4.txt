@@ -1,0 +1,47 @@
+What happened (root cause)
+- At lines 400–401 the code rejects any negative minutes:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- That unconditional check prevents valid inputs allowed by the docstring:
+  - (0, -15) should be allowed (result +00:15 or -00:15 depending on sign handling in code), and
+  - (-2, -15) should be allowed and should produce -02:15.
+- In other words, the code enforces "minutes must be non‑negative" for all cases, but the docstring and examples permit negative minutes when the hours are zero or negative. Because of the check at lines 400–401, the method raises ValueError for those valid combinations before it reaches the sign/assembly logic at lines 406–409.
+
+Where it occurs
+- The failure occurs in the same factory method that later computes offset millis (see lines 406, 408, 409 and the call to cls.for_offset_millis at line 412).
+- Specifically: the validation at lines 400–401 is too strict and runs before the code that adjusts minutes based on the sign of hours (lines 406 and 408).
+
+Why that causes the observed error
+- The later code (lines 406, 408) expects to be able to handle negative minutes when hours are zero or negative. But because the early check already rejected negative minutes, those code paths never run for legitimate inputs and the method raises ValueError for inputs the docstring says are valid.
+
+Exact places to change and step‑by‑step fix
+1. Replace the unconditional minutes check at lines 400–401 with a check that allows negative minutes when hours_offset <= 0:
+   - Require minutes_offset in the range -59..+59.
+   - Disallow negative minutes only when hours_offset > 0 (per the docstring examples).
+2. After that, compute the total offset minutes and verify the absolute offset does not exceed 23:59:59 (same final validation you already have at line 411).
+3. Keep the existing assembly logic (lines 406, 408, 409) that turns hours/minutes into milliseconds, but allow it to see negative minute values when appropriate.
+
+Concrete replacement logic (pseudocode you can paste in)
+- Remove lines 400–401 and add:
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  if minutes_offset < 0 and hours_offset > 0:
+      # positive hours with negative minutes is invalid per docstring
+      raise ValueError(f"Positive hours with negative minutes: {hours_offset}, {minutes_offset}")
+
+- Then proceed with the existing sign/assembly code (lines 406–409), then check for offset too large (line 411), then return cls.for_offset_millis(offset).
+
+Suggested tests to confirm correctness
+- Valid should succeed:
+  - (2, 15) -> +02:15
+  - (2, 0) -> +02:00
+  - (0, 15) -> +00:15
+  - (0, -15) -> -00:15
+  - (-2, 15) -> -02:15
+  - (-2, -15) -> -02:15
+- Invalid should raise:
+  - (2, -15) -> ValueError (positive hours with negative minutes)
+  - (24, 0) or (0, 60) -> ValueError (out of range)
+  - offsets exceeding +/- 23:59 should raise as before
+
+Summary
+- The method fails because it rejects any negative minutes at lines 400–401, but the docstring allows negative minutes when hours are zero or negative. Change the validation so negative minutes are only rejected when hours_offset > 0, and keep the remaining offset-assembly and bounds checks.

@@ -1,0 +1,53 @@
+What happened (quick summary)
+- The test expected get_max_middle_index() to return 1 but it returned 3.
+- get_max_middle_index() simply returns the field self._max_middle_index (lines 449–451). That means the wrong value was stored in _max_middle_index earlier; the getter itself is correct.
+- The failure therefore comes from some code path that sets self._max_middle_index to 3 when the code should have set it to 1. The two tags in the error output, [SLICE_BACKWARD] and [SLICE_UNION], indicate that the offending write likely happens in the slice_backward or slice_union code paths.
+
+Why this happened (root cause)
+- Somewhere before the assertion the code computes and assigns a value to self._max_middle_index with an off-by-one or off-by-two error, or fails to reset it before recomputing/merging values. Common concrete mistakes that produce 1→3 mismatches are:
+  1. Using inclusive end indexes where the algorithm expects an exclusive end (e.g., using range(start, end+1) when the rest of the algorithm expects range(start, end)).
+  2. Updating _max_middle_index multiple times without resetting it (so previous larger values remain and cause a max to be 3).
+  3. Using the wrong variable when computing the index (e.g., using an outer loop index or a length instead of the middle index).
+- Because get_max_middle_index is a pure getter, the only place to inspect is every assignment to self._max_middle_index. The problem is not in the getter but in the code that computes/assigns _max_middle_index (likely in slice_backward or slice_union).
+
+Where to look (specific places to inspect)
+1. Search your code for every assignment to _max_middle_index:
+   - grep / inspect lines that do "self._max_middle_index =" or "self._max_middle_index +=".
+2. Focus first on the implementations of slice_backward and slice_union (the tags in the error):
+   - In slice_backward: check any loop or calculation that computes a middle index and then writes self._max_middle_index.
+   - In slice_union: check any merging logic that sets self._max_middle_index (for example, taking max of two indices or adding offsets).
+3. At each assignment site check:
+   - Are you using inclusive end vs exclusive end? (Is the code using end+1 when it shouldn’t?)
+   - Are you accumulating instead of replacing? (Are you doing self._max_middle_index = self._max_middle_index + something?)
+   - Are you resetting _max_middle_index at the start of the operation? (Should be reset to a sentinel like -1 or 0 before computing a new value.)
+   - Are you using the correct variable for the "middle" index (middle_index vs i vs j vs length)?
+4. Add temporary debugging near the assignments to confirm the values and the code path:
+   - Right before each write to self._max_middle_index, log the computed value, the previous self._max_middle_index, and the code path name (slice_backward or slice_union). Example output to collect: "slice_union: old _max_middle_index=0 computed=3 -> setting to 3".
+
+Concrete quick fixes to try (ordered)
+1. If you find range(...) with an +1 that shouldn’t be there:
+   - Change range(start, end+1) to range(start, end) (or otherwise adjust the boundary) so the computed middle index is aligned with the rest of the code.
+2. If you find accumulation:
+   - Replace "self._max_middle_index += computed" with "self._max_middle_index = max(self._max_middle_index, computed)" if you mean to track the maximum, or simply assign the computed value if you mean to overwrite.
+3. If you find a missing reset at the start of an operation:
+   - Add "self._max_middle_index = 0" (or -1 if that’s the sentinel) at the start of slice_backward/slice_union before computing.
+4. If you find the wrong variable used:
+   - Replace the wrong index variable with the correct middle_index variable used by the rest of the algorithm.
+
+How to confirm the fix
+1. Add unit assertions inside the methods (temporary) immediately after computing and before assigning:
+   - assert computed_middle_index in expected range
+   - assert not wrongly larger than expected intermediate values
+2. Run the failing test and the related tests. The test failure should change from Expected 1 got 3 to passing.
+3. Remove temporary logging/asserts once the behavior is confirmed.
+
+Example diagnostic log to add (exact placement)
+- At each assignment to _max_middle_index, add:
+  print(f"{method_name}: old={self._max_middle_index} computed_middle={computed_middle_index} assigning->")
+  self._max_middle_index = computed_middle_index
+- Replace method_name with "slice_backward" or "slice_union" and computed_middle_index with whatever variable holds the value being assigned.
+
+Why this explanation solves the problem and not just hides it
+- The getter returns the stored value; the wrong value must originate at assignment sites. By inspecting every assignment and the control flow around slice_backward and slice_union, you will see precisely which line produced 3 when it should have produced 1 (likely due to inclusive/exclusive indexing or failing to reset). The steps above let you locate the exact line, reason about the off-by-one or accumulation, and fix it deterministically.
+
+If you want, paste the implementations of slice_backward and slice_union (or the lines where self._max_middle_index is assigned) and I will point to the exact line and give the minimal code change.

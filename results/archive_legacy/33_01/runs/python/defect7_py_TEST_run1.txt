@@ -1,0 +1,87 @@
+What failed
+- The test calls ClassUtils.to_class(['Test', None, 99.0]) and then asserts result == [str, type(None), float].
+- The call fails because ClassUtils.to_class does not return the class objects the test expects for the inputs. In particular:
+  - The string 'Test' is not being resolved to a class object (the test expects a class object such as str, or a class lookup result).
+  - None is not being converted to type(None).
+  - 99.0 is likely converted correctly to float by taking type(99.0), but the others are wrong so the overall assertion fails.
+
+Root cause (simple, exact)
+- Inside ClassUtils.to_class the code is treating string inputs as literal class objects instead of resolving them to classes. For example, it likely returns the original string 'Test' unchanged instead of mapping it to a class object.
+- Also inside ClassUtils.to_class it treats None as an absence of value and leaves None instead of returning type(None).
+- Concretely: the variable passed into the method is the list items ['Test', None, 99.0]. The method returns a list where the first element is still the string 'Test' (not a class), the second element is None (not type(None)), and the third element is float (correct). The assertion fails because result != [str, type(None), float].
+
+Where this happens
+- The bug is in the implementation of ClassUtils.to_class (the method named to_class). The failing behavior occurs when the method iterates the input list (the parameter name from your call was the literal list ['Test', None, 99.0]; in typical implementations that parameter might be named items). During that iteration the branch that should:
+  - resolve string names to class objects
+  - convert None to type(None)
+is either missing or implemented incorrectly, so the wrong values are appended to result.
+
+Why this happens (what the code probably does)
+- Typical mistaken implementations:
+  1. The code checks “if isinstance(item, type): append item” else “append item” (so strings and None are appended unchanged) — no resolution for strings and None.
+  2. Or the code attempts to resolve strings by looking up a name in globals() or locals() but uses the wrong namespace, so 'Test' cannot be found and the code falls back to returning the original string.
+  3. The code treats None as a sentinel meaning “skip” or “leave as-is” rather than converting it to type(None).
+
+Exactly what to change (step-by-step fixes)
+1. Decide the intended mapping rules and document them in code comments:
+   - If an element is already a class (isinstance(item, type)), keep it.
+   - If an element is None, convert to type(None).
+   - If an element is a string, resolve it to a class object by:
+     a) looking up builtins (e.g., 'str' -> str),
+     b) trying fully-qualified import paths (e.g., 'module.ClassName'), or
+     c) using a provided mapping/dictionary.
+   - If an element is an instance (e.g., 99.0), convert to its type via type(item).
+
+2. Implement explicit conversion rules. Example implementation to replace the buggy code:
+
+def to_class(items):
+    import builtins, importlib
+    result = []
+    for item in items:
+        # already a class
+        if isinstance(item, type):
+            result.append(item)
+            continue
+
+        # None -> type(None)
+        if item is None:
+            result.append(type(None))
+            continue
+
+        # instances -> their type
+        if not isinstance(item, str):
+            result.append(type(item))
+            continue
+
+        # item is a string: try builtins first, then import by dotted path
+        name = item
+        if hasattr(builtins, name):
+            result.append(getattr(builtins, name))
+            continue
+
+        # try dotted module path like 'package.module.ClassName'
+        try:
+            module_name, class_name = name.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            cls = getattr(module, class_name)
+            if isinstance(cls, type):
+                result.append(cls)
+                continue
+        except Exception:
+            pass
+
+        # if we reach here, resolution failed — raise a clear error
+        raise NameError(f"to_class: cannot resolve '{name}' to a class")
+
+    return result
+
+3. Tests to add
+- Add a test for a builtin name: assert to_class(['str'])[0] is str
+- Add a test for None: assert to_class([None])[0] is type(None)
+- Add a test for instances: assert to_class([99.0])[0] is float
+- Add a test for unknown string: expect NameError with a helpful message
+
+Why this fixes the failure
+- The fixes ensure the function explicitly handles string names (by looking up builtins or importing), explicitly maps None to type(None), and maps instances to their type. That makes to_class(['Test', None, 99.0]) behave predictably: either 'Test' resolves to a real class (if intended) or the function raises a clear NameError if 'Test' cannot be resolved. The original failing assertion failed because the code returned raw 'Test' and None where class objects were expected.
+
+If you want, paste the current ClassUtils.to_class implementation and I’ll point exactly which lines to change.

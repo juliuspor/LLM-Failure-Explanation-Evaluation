@@ -1,0 +1,44 @@
+What happened
+- The caller passed locale_str = "fr__POSIX" into LocaleUtils.to_locale().
+- to_locale splits locale_str into language, country, variant and then runs strict validation.
+- The function rejects the input because the country part is empty (the string contains two underscores: language + empty country + variant).
+- The validation code expects a country either to be absent (no second component) or to be a two-letter uppercase code; an empty country fails the country-length / uppercase checks, so the method raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it fails (root cause, with variable and method names)
+- In LocaleUtils.to_locale(locale_str) the code does something like:
+  - parts = locale_str.split('_')
+  - language = parts[0]; country = parts[1] if present; variant = parts[2] if present
+- For "fr__POSIX" you get language = "fr", country = "" (empty string), variant = "POSIX".
+- The country validation checks length and case (e.g. if len(country) != 2 or not country.isupper(): raise ValueError(...)).
+- Because country == "" the length check fails, so the method raises the ValueError you see. The failure occurs in the country-validation block inside LocaleUtils.to_locale (the code path taken after splitting locale_str and before constructing the Locale object).
+
+How to fix it (concrete steps you can apply)
+Option A — keep strict rules but accept empty country when a variant is present
+1. Change the country validation so it only enforces the two-letter uppercase rule when country is non-empty. Concretely:
+   - Replace
+       if len(country) != 2 or not country.isupper():
+           raise ValueError(...)
+     with
+       if country and (len(country) != 2 or not country.isupper()):
+           raise ValueError(...)
+2. This lets "fr__POSIX" be parsed as language="fr", country="", variant="POSIX" and avoids the exception.
+
+Option B — normalize input to a single underscore form
+1. Convert "fr__POSIX" to "fr__POSIX" -> normalized "fr_POSIX" or "fr__POSIX" -> "fr__POSIX" depending on desired semantics.
+2. If the intended standard is language + "_" + variant (no empty country), you could detect consecutive underscores and collapse them:
+   - if locale_str.count('_') >= 2 and parts[1] == "":
+         normalized = language + "_" + variant
+   - then validate normalized form (language + "_" + variant) against rules.
+
+Option C — reject empty country explicitly but give a better error message
+1. If you want to keep the current strictness, change the error message to say why:
+   - raise ValueError(f"Invalid locale format: {locale_str} — empty country between underscores")
+2. That would make the root cause obvious to callers.
+
+Which fix to choose
+- If you want to support the JDK-style variant notation where an empty country is allowed (language__variant), apply Option A.
+- If you want to require a single underscore and do not accept empty country at all, use Option B or C to either normalize or provide a clearer error.
+
+Summary (short)
+- The code fails because LocaleUtils.to_locale validates country as a 2-letter uppercase code but got an empty string for country when parsing "fr__POSIX" (language="fr", country="", variant="POSIX").
+- Fix by allowing empty country when a variant exists (change the country validation to run only when country is non-empty), or normalize/reject the double-underscore form and return a clearer error.

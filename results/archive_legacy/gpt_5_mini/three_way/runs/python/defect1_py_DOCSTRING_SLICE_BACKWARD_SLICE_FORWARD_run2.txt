@@ -1,0 +1,46 @@
+What went wrong
+- The code rejects any negative minutes at line 396:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check violates the documented behavior that minutes may be negative when the hours are zero or negative (examples: (0, -15) → -00:15, (-2, -15) → -02:15).
+- Because negative minutes are banned unconditionally at line 396, valid inputs such as hours_offset=0, minutes_offset=-15 raise ValueError immediately instead of being handled later by the sign-adjustment logic at lines 402/404.
+
+Where it happens
+- The root cause is the validation at lines 396–397 (minutes validation) being too strict and executed before the code uses hours_offset to interpret minutes’ sign.
+- The later code (402/404) expects minutes_offset possibly to be negative so it can combine hours and minutes into a total offset correctly, but it never gets that chance because of the early reject.
+
+Concrete example of failure
+- Call: hours_offset = 0, minutes_offset = -15
+- At line 396 the condition minutes_offset < 0 is true, so line 397 raises ValueError("Minutes out of range: -15").
+- According to the docstring this should be allowed and produce -00:15, but the early validation prevents it.
+
+How to fix (specific steps and code changes)
+1. Accept the full signed range for minutes when validating numeric range: permit -59..+59.
+   - Replace the check at lines 396–397 with a range check that allows negative minutes:
+     - Old:
+       - if minutes_offset < 0 or minutes_offset > 59:
+       -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+     - New:
+       - if minutes_offset < -59 or minutes_offset > 59:
+       -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Enforce the documented prohibition (minutes negative when hours positive) after you know hours_offset:
+   - Immediately after validating ranges, add:
+     - if hours_offset > 0 and minutes_offset < 0:
+     -     raise ValueError("Minutes must not be negative when hours is positive")
+   - This matches the doctable that (2, -15) is invalid.
+3. Keep the existing sign-combination logic at lines 402/404 as-is so that:
+   - For negative hours or zero hours with negative minutes, the code combines them into a single negative offset.
+   - For positive hours with positive minutes, it combines into positive offset.
+4. Ensure the existing overflow check (the "Offset is too large" raise around line 407) remains to protect > ±23:59:59.000.
+
+Why this fix works
+- It allows valid negative-minute cases that depend on the hours sign (e.g., (0, -15), (-2, -15)).
+- It still rejects invalid combinations per the docstring (e.g., (2, -15)), and rejects minutes outside ±59.
+- It preserves the later arithmetic that constructs the total offset (lines 402/404) because minutes_offset can now be negative when intended.
+
+Summary of exact changes to make
+- Modify lines 396–397 to check -59 <= minutes_offset <= 59 (replace minutes_offset < 0 with minutes_offset < -59).
+- Add a specific check after that to reject minutes < 0 when hours_offset > 0.
+- Leave the combine/offset code at lines 402, 404 and the overflow check at line 407 unchanged.
+
+This fixes the immediate ValueError for valid inputs like (0, -15) and (-2, -15) while still enforcing the documented constraints.

@@ -1,0 +1,50 @@
+What happened (root cause)
+- At line 396 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This only allows minutes in [0, 59]. The tests pass negative minute values (e.g. -15) and expect them to be accepted (minutes are allowed in -59..+59). Because of this single wrong comparison the tests that call for_offset_hours_minutes(..., -15) fail immediately with "Minutes out of range".
+
+Where it occurs (exact place)
+- Faulty check is at the minutes range validation on (file slice) line 396 in your snippet:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why that check is wrong
+- The intended valid range for minutes is -59..+59 (as the tests and Joda-Time semantics expect). The code only permits 0..59. That causes legitimate calls such as for_offset_hours_minutes(0, -15), for_offset_hours_minutes(-2, -15), and others to raise ValueError incorrectly.
+
+Other related issues to address (behavioral)
+- The code should also enforce disallowed mixed-sign combinations: the tests (and typical Joda behavior) expect a call like (2, -15) to raise ValueError. So you need an explicit sign-consistency check:
+  - If hours_offset > 0 and minutes_offset < 0 -> raise ValueError
+  - If hours_offset < 0 and minutes_offset > 0 -> treat the minutes as extending the negative magnitude (the existing code attempts that), or you may normalize consistently. The test suite expects (-2, 15) -> -02:15 and (-2, -15) -> -02:15, so positive minutes with negative hours should be accepted and treated as adding magnitude.
+
+Concrete fixes (exact changes and where)
+1) Fix minutes range check (change at line 396)
+   Replace:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   With:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2) Add a mixed-sign validation right after the hours range check (after the hours check at line ~393):
+   Insert:
+     # Disallow mixes like (+hours, -minutes)
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is invalid")
+   (Do not raise for hours_offset < 0 and minutes_offset > 0 — the rest of the function expects to accept that and compute a negative total.)
+
+3) (Optional but recommended) Avoid reusing minutes_offset when computing total minutes to make code clearer:
+   Replace the block starting at line 402 with:
+     hours_in_minutes = hours_offset * 60
+     total_minutes = hours_in_minutes
+     if hours_in_minutes < 0:
+         # for negative hours, minutes extend the negative magnitude
+         total_minutes = hours_in_minutes - minutes_offset
+     else:
+         total_minutes = hours_in_minutes + minutes_offset
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   This prevents accidental confusion from overwriting minutes_offset and makes the intent explicit.
+
+Summary
+- The failing tests come from the incorrect minutes range check (only permitting 0..59). Change it to -59..+59, add an explicit ban on (+hours, -minutes), and optionally use a separate total_minutes variable for clarity. These exact edits restore the expected behavior checked by your unit tests.

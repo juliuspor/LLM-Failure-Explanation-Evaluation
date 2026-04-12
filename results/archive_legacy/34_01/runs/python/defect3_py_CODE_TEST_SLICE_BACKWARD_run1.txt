@@ -1,0 +1,40 @@
+What happened
+- Your input is a supplementary Unicode code point (U+1F630). In UTF-16 that is encoded as a surrogate pair = two code units in code_units.
+- The code mixes two different unit systems: code_units (UTF-16 code units, indexed by pos) and Python/Unicode characters (one Python str element per code point).
+- The bug is the increment pos += len(c) inside the consumed == 0 branch. len(c) counts Python characters (1 for U+1F630), but pos indexes UTF-16 code units and must advance by 2 for a surrogate pair. Because pos is advanced by 1 instead of 2, later calls to code_point_at(code_units, pos) pass an index into the middle of a surrogate pair (or past the end), which causes to_utf16_code_units / code_point_at to raise IndexError ("String index out of range") — see the index check in to_utf16_code_units (lines 35–36 in your slice_backward).
+
+Where it occurs (exact statements)
+- In the consumed == 0 branch:
+  - codepoint = code_point_at(code_units, pos)
+  - c = to_chars(codepoint)
+  - out.extend(c)
+  - pos += len(c)    <-- this is the wrong increment (advances by Python char count, not UTF‑16 code units)
+- Later the code calls code_point_at(code_units, pos) (both in the next loop iteration and in the consumed>0 branch), which eventually triggers the IndexError in to_utf16_code_units (see lines 35–36).
+
+Why it fails (root cause)
+- pos indexes the list code_units produced by to_utf16_code_units (UTF-16 code units). For supplementary code points pos must advance by 2.
+- len(c) returns 1 for a single Python character representing the supplementary codepoint, so pos increments by 1 instead of 2. That leaves pos pointing into the low surrogate (or just beyond the array) and the next code_point_at call fails the bounds check in to_utf16_code_units, causing the IndexError mentioned in your stack slice.
+
+How to fix it (clear concrete steps)
+1. Replace pos += len(c) with an increment that counts UTF-16 code units. Two correct options:
+   - Use char_count(codepoint) if char_count(codepoint) returns 1 for BMP code points and 2 for supplementary ones:
+     pos += char_count(codepoint)
+   - Or compute the UTF‑16 unit length directly from the code point:
+     pos += 2 if codepoint > 0xFFFF else 1
+2. Make sure all places that advance pos always count UTF‑16 code units, never Python str length. Concretely:
+   - Change the line "pos += len(c)" to "pos += char_count(codepoint)".
+   - Keep the consumed>0 branch as-is (it already uses char_count on code_point_at(...)), but double-check that translate_codepoint returns the number of code points consumed (not code units). If translate_codepoint returns code units instead, adjust that contract consistently.
+3. Add an assertion during development to catch this class of mismatch:
+   assert 0 <= pos <= len(code_units), "pos must index UTF-16 code_units"
+   (or log the value when debugging).
+
+Why these steps fix it
+- Using char_count(codepoint) advances pos by the actual number of UTF-16 code units for that codepoint (1 or 2), keeping pos aligned with code_units. That prevents calls to code_point_at with an index inside a surrogate pair or past the end, so to_utf16_code_units (lines 35–36) no longer throws IndexError.
+
+Minimal patch (conceptual)
+- Replace:
+    pos += len(c)
+  with:
+    pos += char_count(codepoint)
+
+That single change fixes the unit mismatch that caused the IndexError in your test with U+1F630.

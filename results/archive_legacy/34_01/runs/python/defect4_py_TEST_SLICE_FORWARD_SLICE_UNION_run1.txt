@@ -1,0 +1,47 @@
+What happened
+- The getter get_max_middle_index() (lines 449–451) simply returns the stored attribute self._max_middle_index.
+- That attribute is maintained by the add(...) logic when you insert new TimePeriod entries.
+- In your sequence you first call:
+  1) add(SimpleTimePeriod(0, 100), 1.0)
+  2) add(SimpleTimePeriod(100, 200), 2.0)
+  After these two entries the internal index tracking (self._max_middle_index) is correct for the two-item list.
+- Then you insert two earlier periods:
+  3) add(SimpleTimePeriod(0, 50), 3.0)
+  4) add(SimpleTimePeriod(50, 100), 4.0)
+  Those two additions are inserted before the existing entries (they are earlier in time), so they shift the positions of existing items in the internal list.
+- The bug: the add(...) code updates or increments self._max_middle_index without taking into account that items can be inserted at an earlier index (list.insert). As a result self._max_middle_index becomes inconsistent with the actual list order and points to the wrong entry by index. get_max_middle_index() simply returns that stale/wrong number, so the assert fails.
+
+Why this is the root cause (plain language)
+- The code assumes adding always appends at the end (so indexes do not change) or it updates the index incorrectly for insert-at-front cases.
+- But you did inserts that change the indices of elements that were already present. The code that maintains self._max_middle_index does not adjust correctly for that shift.
+- Because get_max_middle_index() returns the stored attribute (line 451), you see the wrong index instead of the correct current index.
+
+Where to look in the code
+- The getter (lines 449–451): return self._max_middle_index — this just exposes the stored value.
+- The add(...) method (the place that sets or mutates self._max_middle_index). Review the branch that handles insertion (list.insert or bisect insertion). That is where the index bookkeeping is wrong.
+
+Concrete fixes (specific steps)
+1. Short-term patch (minimal change)
+   - When you insert an entry at index insert_idx, adjust _max_middle_index accordingly:
+     - If insert_idx <= self._max_middle_index: increment self._max_middle_index by 1 (or otherwise adjust by number of inserted items before that index).
+   - Example:
+     - insert_idx = the index you used for list.insert(...)
+     - if hasattr(self, "_max_middle_index") and insert_idx <= self._max_middle_index:
+         self._max_middle_index += 1
+
+   - Place this immediately after the code that inserts into the internal list but before any other code that assumes indices.
+
+2. More robust alternative
+   - Recompute the max-middle index after each structural change instead of trying to incrementally maintain it. This avoids subtle off-by-one errors:
+     - Walk the internal list and recompute self._max_middle_index from the actual stored items (use the same criteria the rest of the class expects).
+     - This is slightly less efficient but safe and simple.
+
+3. Tests to add
+   - Add unit tests that insert items in non-monotonic time order (inserts at head, middle, tail) and assert get_max_middle_index() after each insertion to catch regressions.
+   - Specifically add the failing sequence you posted as a unit test.
+
+Why these fixes will work
+- The minimal patch makes the stored index track the list index shifts caused by insertions.
+- The recompute approach eliminates any incremental bookkeeping errors by deriving the index from the canonical source of truth (the list contents).
+
+If you want, paste the add(...) method and I will show exactly where to insert the adjustment or provide a ready patch.

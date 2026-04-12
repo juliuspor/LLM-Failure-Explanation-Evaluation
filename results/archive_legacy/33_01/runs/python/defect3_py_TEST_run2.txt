@@ -1,0 +1,49 @@
+What happened
+- You passed the Python literal '\U0001F630' into escaper.translate_string. In Python that literal is already a single Unicode character (U+1F630).
+- CsvEscaper.translate_string returned a different string, so the assert failed.
+
+Why it failed (root cause)
+- translate_string is written so it treats each Python str element as a 16‑bit code unit rather than as a full Unicode code point. Concretely, inside CsvEscaper.translate_string the code iterates characters (e.g. "for c in s:" or by index) and calls ord(c) or otherwise escapes each character independently.
+- For characters outside the Basic Multilingual Plane (code points ≥ U+10000) Python strings on some builds/representations are represented as surrogate pairs. That means the single logical character U+1F630 is internally two 16‑bit code units. translate_string sees two separate items, escapes each half separately, and returns two escapes (or two characters), not the original single character. The result therefore != '\U0001F630'.
+- In short: the method assumes one iteration step == one Unicode code point; that assumption is false for characters above U+FFFF in the implementation it was run under.
+
+Where it happened in your code
+- Variable: escaper (instance of CsvEscaper)
+- Method: CsvEscaper.translate_string(s) — the bug is in the loop that processes the string and calls ord(c) / emits escapes per c.
+- Input variable: the string literal '\U0001F630' (a single non‑BMP character) triggers the bug.
+
+How to confirm quickly
+- Print the lengths and ord values:
+  - print(len('\U0001F630'))  # if >1, your runtime represents it as surrogate pairs
+  - print([hex(ord(c)) for c in '\U0001F630'])  # shows surrogate halves like 0xd83d, 0xde30 if surrogate pair
+- If translate_string is emitting two escapes / two chars, you’ll see the mismatch.
+
+Concrete fixes (pick one and apply the exact steps)
+1) Work at the code‑point level using UTF-32
+   - Change translate_string so it iterates real Unicode code points by decoding to UTF-32 and iterating 4‑byte units:
+     - Encode the input: bs = s.encode('utf-32-be')
+     - Iterate 4‑byte chunks: for i in range(0, len(bs), 4): cp = int.from_bytes(bs[i:i+4], 'big')
+     - Use cp (an integer code point) to decide escaping and to produce the output
+   - This guarantees each loop sees a full code point, including U+1F630.
+
+2) Detect and combine surrogate pairs (if you must support surrogate internal representation)
+   - In translate_string, when you see a high surrogate (0xD800–0xDBFF) check the next character for a low surrogate (0xDC00–0xDFFF) and combine them:
+     - hi = ord(c); lo = ord(next_c); cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+     - Advance the loop index by 2 when you consumed a pair
+   - This keeps the rest of your per‑codepoint logic unchanged but fixes non‑BMP handling.
+
+3) Use Python 3.3+ unified string iteration (if code runs on older builds)
+   - Ensure your environment is Python 3.3+ (PEP 393) where iterating a str yields full code points. If you must run on older narrow builds, use fix (1) or (2) instead.
+   - Note: changing runtime is an environment-level fix, not a code fix.
+
+Which fix I recommend
+- Option 1 (UTF‑32 chunking) is the simplest robust change: it makes translate_string code unambiguous about code points and works on all Python builds.
+
+What to change in your code (exact places)
+- In CsvEscaper.translate_string, replace the character iteration and ord(c)-based logic with UTF‑32 chunking (as shown above), or implement the surrogate-pair combine logic at the top of the loop.
+- After the change, rerun your test:
+  - escaper = CsvEscaper()
+  - result = escaper.translate_string('\U0001F630')
+  - assert result == '\U0001F630'  # should pass
+
+If you paste the current translate_string implementation I can show the exact patch to apply.

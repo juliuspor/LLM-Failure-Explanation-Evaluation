@@ -1,0 +1,63 @@
+What happened (what you saw)
+- The code raises IndexError("String index out of range: {index}") coming from to_utf16_code_units (lines 35–36 in your slice). That happens because code_point_at(code_units, pos) is being called with pos equal to length (or otherwise out of bounds) inside translate(), which causes an out-of-range index access.
+
+Why it fails (root cause, with lines/variables)
+- In translate(), when a translator returns consumed != 0, you run this loop:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+  (this is the block starting just after the comment "Contract with translators..." in translate()).
+
+- Inside that loop you call code_point_at(code_units, pos). code_point_at expects pos to be a valid index into code_units; if pos == length (pos is at or past the end) code_point_at will attempt to read code_units[pos] and to_utf16_code_units raises the IndexError you saw (lines 35–36).
+
+- The loop advances pos by char_count(...) repeatedly. On the final iteration pos can be incremented so that the next call to code_point_at is made with pos == length (out of range). The code calls code_point_at before guarding pos against the end of the array, so you attempt to read past the end.
+
+- In short: you are calling code_point_at(code_units, pos) at a pos that is not guaranteed to be valid. The logic that interprets consumed (number of code points the translator handled) and the code that advances pos are out of sync, producing an out-of-bounds access.
+
+Where exactly (line references)
+- The failing call is inside translate(), in the for pt in range(consumed): loop just after the "Contract with translators..." comment. The IndexError is raised inside to_utf16_code_units (lines 35–36 in your slice) because code_point_at tried to index code_units with an invalid index.
+
+Concrete, step-by-step fixes (do these exact changes)
+1. Decide what consumed represents
+   - If consumed is the number of UTF-16 code units the translator consumed, then after the translator returns you should advance pos by consumed (pos += consumed). Do not call code_point_at at all inside that loop.
+   - If consumed is the number of code points (Unicode scalar values) the translator consumed, then you must iterate consumed times and on each iteration:
+     a) Validate pos < length before calling code_point_at
+     b) Read the codepoint at the current pos, compute the number of code units that codepoint occupies (char_count), then advance pos by that number.
+
+2. Implement one of these two fixes (pick the one matching your translators' contract):
+   - If consumed is code units:
+     Replace the whole for-loop with: pos += consumed
+     (This is simple and safe; it avoids calling code_point_at here.)
+
+   - If consumed is code points:
+     Replace the for-loop with:
+
+       for _ in range(consumed):
+           if pos >= length:
+               raise IndexError(f"Ran out of input while skipping {consumed} code points at pos={pos}")
+           cp = code_point_at(code_units, pos)    # safe because we checked pos
+           pos += char_count(cp)
+
+     This ensures you never call code_point_at with pos >= length.
+
+3. Add defensive checks and clearer errors
+   - Before entering the loop, you can check if the remaining code units are sufficient for the claimed consumed value (if you can compute that cheaply), otherwise use the guarded loop above and raise a meaningful error if the input ends early.
+   - Return or raise a clear error message that mentions pos, length, and consumed so the caller can diagnose mismatched contracts.
+
+Minimal example fix (if consumed is code units)
+- Replace:
+
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+  with:
+
+    pos += consumed
+
+Why this fix works
+- It prevents calling code_point_at with an out-of-range pos. If consumed is code units, advancing by consumed matches what the translator already consumed, so you must not re-inspect those code units. If consumed is code points, the guarded loop ensures each call to code_point_at occurs only with a valid index and never reads past the end.
+
+Summary
+- Root cause: code_point_at was called with pos >= length inside the for-loop, causing IndexError (to_utf16_code_units lines 35–36).
+- Fix: make the loop advance pos in a way compatible with what consumed actually means (either pos += consumed, or check pos < length before each code_point_at call). Add clear checks and an informative error if the translator's consumed value doesn't match the remaining input.

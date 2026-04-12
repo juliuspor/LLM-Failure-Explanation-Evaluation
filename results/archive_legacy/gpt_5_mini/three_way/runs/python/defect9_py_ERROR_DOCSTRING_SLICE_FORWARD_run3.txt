@@ -1,0 +1,47 @@
+What happened (where it crashed)
+- The TypeError happened at line 94: parts.append(replacement_list[replace_index]) followed immediately by start = text_index + len(search_list[replace_index]). At that len(...) call Python tried to evaluate len(search_list[replace_index]) but search_list[replace_index] was None, so len(None) raised TypeError: object of type 'NoneType' has no len().
+
+Why that None got there (root cause)
+- The code that chooses replace_index is in the match-search loop (lines 108–114). That loop uses text.find(search_list[i], start) (line 108) and sets replace_index = i when it finds an earlier match (lines 111–113).
+- The loop is supposed to skip candidate i when search_list[i] is None (or empty) or when replacement_list[i] is None. The intended skip test is the combined condition at lines 102–104:
+    no_more_matches_for_repl_index[i]
+    or search_list[i] is None
+    or len(search_list[i]) == 0
+    or replacement_list[i] is None
+- But because of the way the code actually executes, an index i with search_list[i] is None still gets chosen as replace_index. That allows search_list[replace_index] to be None when control reaches line 94, and len(None) raises the TypeError.
+
+Exactly why the skip test failed for that i
+- The skip condition includes len(search_list[i]) == 0. If search_list[i] is None, calling len(search_list[i]) would raise, so the code relies on short-circuit evaluation to avoid calling len(...) when search_list[i] is None. However the symptom (None being chosen) shows that the loop that sets replace_index did not always execute that skip branch for i — in other words, the code path reached text.find(search_list[i], start) with a None search_list[i]. That means the skip condition was not executed for that iteration (for example, because the skip condition is in a different block or the loop structure allows falling through), so search_list[i] was passed to text.find and later used in len(...).
+- Practically: either the skip check is not in the same loop/branch that calls text.find, or its evaluation order/placement allowed a None search string to be considered as a candidate. The end result is the same: replace_index can point at an index whose search_list entry is None, and later code blindly does len(search_list[replace_index]).
+
+How to fix it (step-by-step, deterministic)
+1. Ensure the candidate-skip check runs before any use of search_list[i], and that it unconditionally skips i when search_list[i] is None or empty:
+   - Move the block
+       if (no_more_matches_for_repl_index[i]
+           or search_list[i] is None
+           or len(search_list[i]) == 0
+           or replacement_list[i] is None):
+           continue
+     so it is executed before calling text.find(search_list[i], start) for that i.
+2. Avoid calling len(search_list[i]) unless you have already confirmed search_list[i] is not None. For clarity and safety prefer this order:
+       if no_more_matches_for_repl_index[i]:
+           continue
+       if search_list[i] is None or len(search_list[i]) == 0:
+           no_more_matches_for_repl_index[i] = True
+           continue
+       if replacement_list[i] is None:
+           no_more_matches_for_repl_index[i] = True
+           continue
+   This guarantees len(...) is only called when search_list[i] is not None.
+3. Add a final guard before using replace_index at line 94:
+       if search_list[replace_index] is None:
+           # skip this replacement (or recalc replace_index)
+   That prevents len(None) if some other logic path still allowed None through.
+4. Add tests covering:
+   - search_list contains None entries
+   - replacement_list contains None entries
+   - mixed lengths (empty strings) and overlapping matches
+   Confirm the code now ignores pairs where search_list is None or empty, and ignores replacements that are None.
+
+Summary
+The crash occurs because an index with search_list[i] == None can be selected as replace_index, then the code calls len(search_list[replace_index]) at line 94. Fix by ensuring the “skip if None/empty” checks run before any use of search_list[i], avoid calling len(...) on possible None values, and add a defensive guard before the length call.

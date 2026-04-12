@@ -1,0 +1,65 @@
+What happened
+- You called LocaleUtils.to_locale('fr__POSIX').
+- Inside LocaleUtils.to_locale the input is validated and parsed; the validator rejected the string and raised ValueError("Invalid locale format: fr__POSIX").
+- The root reason: the parser/validator does not accept the form language + empty country + variant (the double-underscore form). It expects either:
+  - language (e.g. "fr")
+  - language_country (e.g. "fr_FR")
+  - language_country_variant (e.g. "fr_FR_POSIX")
+  but not language__variant (e.g. "fr__POSIX").
+
+Why this fails (root cause, concrete)
+- The validation uses a regular expression or equivalent that requires the country component (the token between the first and second underscore) to be either present and match a country pattern or the whole country part to be absent. It does not allow an empty token between two underscores.
+- For example, a common regex used for this purpose is:
+  ^([a-z]{2,3})(?:_([A-Z]{2}|\d{3}))?(?:_(.+))?$
+  That regex makes the country group optional, but it does not match an empty country token when two underscores are present. Given "fr__POSIX" the regex fails, so validation rejects the input and throws the ValueError.
+- In short: the code treats "_" as "start country" and the country must be non-empty if the second underscore exists. A double underscore was intended to mean "no country, but there is a variant", but the current validator doesn't implement that rule.
+
+Where it occurs (what method/step)
+- In the method LocaleUtils.to_locale: the failure happens at the validation/parsing step (the code path that checks the input string against the locale format regex or pattern) before constructing and returning Locale('fr', '', 'POSIX').
+
+How to fix it — exact steps
+1. Update the parser so it allows an empty country token between underscores and treats that as country = '' and variant = token after the second underscore.
+   - Preferred approach: split the input on '_' but preserve empty tokens, then assign parts by position instead of relying on a strict regex.
+     - Example pseudo-logic:
+       - parts = input.split('_')  (preserve empty tokens)
+       - if len(parts) == 1:
+           language = parts[0]; country = ''; variant = ''
+         elif len(parts) == 2:
+           language = parts[0]; country = parts[1]; variant = ''
+         else:
+           language = parts[0]; country = parts[1]; variant = '_'.join(parts[2:])
+       - Validate language (non-empty, lower-case letters) and country/variant format as desired.
+2. Or, if you prefer patching the regex, make the country group match either the country pattern or an empty string when a second underscore exists. Example adjusted regex (illustrative):
+   ^([a-z]{2,3})(?:_(([A-Z]{2}|\d{3})?))?(?:_(.+))?$
+   - But be careful: this kind of change can be confusing. Splitting and positionally handling tokens is clearer and robust for cases like multiple underscores in the variant.
+3. Add a unit test for the specific case:
+   - assert LocaleUtils.to_locale('fr__POSIX') == Locale('fr', '', 'POSIX')
+   - Also add tests for:
+     - 'fr' -> Locale('fr','','')
+     - 'fr_FR' -> Locale('fr','FR','')
+     - 'en__POSIX' -> Locale('en','','POSIX')
+     - malformed examples that should still be rejected (e.g. '', '1fr', 'fr_foo_BAR' if your rules forbid it).
+4. If your codebase uses Apache Commons or another library, check whether your implementation diverged from the library behavior; adjust accordingly.
+
+Concrete minimal code example (Python-like) to parse properly
+- This shows a safe, explicit parser (replace with your language/actual method body inside LocaleUtils.to_locale):
+
+def to_locale(s):
+    if s is None or len(s) == 0:
+        raise ValueError("Invalid locale format: {}".format(s))
+    parts = s.split('_')  # preserves empty tokens in most languages
+    language = parts[0]
+    if not language.isalpha() or not (2 <= len(language) <= 3):
+        raise ValueError("Invalid language: {}".format(language))
+    country = ''
+    variant = ''
+    if len(parts) == 2:
+        country = parts[1]
+    elif len(parts) >= 3:
+        country = parts[1]  # may be empty
+        variant = '_'.join(parts[2:])  # allow underscores inside variant
+    return Locale(language, country, variant)
+
+Summary
+- The error occurs because the parser/validator in LocaleUtils.to_locale does not accept the "language__variant" form (double underscore = empty country, variant present).
+- Fix by parsing positionally (split preserving empty tokens) or adjusting validation to allow an empty country token when a variant follows, and add unit tests including 'fr__POSIX'.

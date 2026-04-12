@@ -1,0 +1,42 @@
+What happened (where and when)
+- The failure occurred inside CsvEscaper.translate_string, when it was given the input '\U0001F630' (the single supplementary Unicode code point U+1F630).
+- The error was raised by the check at lines 35–36:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  The exception message shows index == 2 and len(code_units) == 2, so the code attempted to read code_units[2] (a third element) when only two elements exist.
+
+Why it failed (root cause)
+- translate_string is treating the input as a sequence of code units (e.g., UTF-16 surrogates or a split representation) and so U+1F630 was represented as two code units in code_units.
+- The method increments index as it consumes one or two code units. At some point it sets index to 2 (meaning “past the last element”), then later tries to access code_units[index] without first verifying that index is still within bounds.
+- The check at lines 35–36 only runs at one place (presumably at the start of a loop or before some accesses). It does not prevent a later access that uses index after index has been advanced to len(code_units). As a result code_units[index] is accessed with index == len(code_units), causing IndexError: String index out of range: 2.
+
+Concrete reproduction steps
+- Call translate_string('\U0001F630') where the implementation splits the input into two code units.
+- The code processes the first code unit, advances index by 1 (or 2) so index becomes equal to len(code_units).
+- The code then reaches a line that reads code_units[index] (or tries to form a pair using code_units[index] and code_units[index+1]) without checking index < len(code_units) (or index+1 < len(code_units)). That read triggers the IndexError shown.
+
+How to fix it (precise, step-by-step)
+1. Find every place that reads code_units[index] or code_units[index+1]. The buggy read is occurring after index has been advanced; you must guard those reads.
+2. Replace single global bound check (lines 35–36) with local checks right before each access that could be out of range. Concretely:
+   - Before reading code_units[index], ensure index < len(code_units).
+   - Before reading code_units[index+1], ensure index+1 < len(code_units).
+3. Prefer a safer loop structure. For example:
+   - Use while index < len(code_units): (so any access to code_units[index] inside the loop is safe)
+   - If you need to look ahead one unit, check if index+1 < len(code_units) before accessing code_units[index+1].
+4. Alternatively, avoid working with surrogate/code-unit arrays entirely and work with full Unicode code points:
+   - Iterate the original Python string (for ch in s:) and use ord(ch) to get the code point; Python strings are sequences of code points, so you won't get surrogate-pair splitting.
+   - This avoids all manual index arithmetic around code units.
+5. Add unit tests that cover:
+   - Supplementary characters (e.g. '\U0001F630')
+   - Sequences ending with a high surrogate-like element so you exercise index+1 checks.
+
+Minimal concrete check to add before the failing access
+- If the code later does something like second = code_units[index+1], change it to:
+  if index+1 >= len(code_units):
+      raise IndexError(f"String index out of range: {index+1}")
+  second = code_units[index+1]
+
+Why these steps fix it
+- They ensure you never read beyond the end of code_units. The current single check at lines 35–36 does not cover the moment after index is advanced, so adding explicit checks before each read or using a while index < len(...) loop prevents the index==len(...) read that produced IndexError: String index out of range: 2.
+
+If you want, paste the translate_string implementation here and I will show exactly where to add the checks and produce the corrected code.

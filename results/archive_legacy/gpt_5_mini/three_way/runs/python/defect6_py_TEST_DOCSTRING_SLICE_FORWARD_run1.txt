@@ -1,0 +1,36 @@
+What happened (root cause)
+- At line 177 the code does value = int(x). Converting x to int strips the sign bit for zero: int(-0.0) == 0 and loses the negative-zero information.
+- Later branches decide which string form to emit based on value and mantissa, and one of those branches calls self.add(str(value)) (line 192) or otherwise avoids calling the fallback str(x) (line 194). Because value == 0, the code takes the integer/rounded path and emits "0" (or other integer form) instead of "-0.0".
+- The result: negative zero (x == -0.0) becomes "0" in output. The test expects "-0.0". The negative zero sign was lost by the int() conversion before any special-case check for negative zero.
+
+Where it occurs
+- The problem happens at and after line 177 (value = int(x)), and the incorrect output arises when the logic later emits str(value) at line 192 (or any other branch that relies on the integer value) instead of preserving the original sign-aware representation (str(x) would produce "-0.0").
+- There is no early guard that checks for negative zero before the int() conversion, so the negative-zero detection is never used here.
+
+Why the current check order fails
+- Negative zero is a real IEEE float with value equal to  numeric zero but with a negative sign bit. int() and equality comparisons lose that information. So the code must detect negative zero before converting to int or otherwise mutating the value.
+- Because the detection/conversion order is wrong, the code never preserves the negative sign for zero.
+
+Concrete steps to fix (exact changes to make)
+1. Add a negative-zero check before line 177 (before value = int(x)). Use the existing utility CodeConsumer.is_negative_zero(x).
+2. If x is negative zero, emit "-0.0" and return immediately (so no further integer conversion runs).
+
+Example change (pseudocode showing exact placement)
+- Immediately before line 177 insert:
+
+    if self.is_negative_zero(x):
+        # preserve sign of negative zero
+        self.add("-0.0")
+        return
+
+3. Keep the rest of the logic unchanged. This guarantees -0.0 is printed as "-0.0" and other numbers follow the existing formatting rules.
+
+Why this fix works
+- is_negative_zero checks the float sign bit without losing it (e.g., using math.copysign or bit-level test). Doing that before int(x) guarantees the negative-zero case is handled explicitly instead of being converted away.
+- For other values, the existing integer rounding/formatting code still runs.
+
+Alternative safe options
+- Another approach is to avoid using int(x) for zero values: check if x == 0.0 and then test sign with is_negative_zero, but the simplest and least invasive fix is the early guard above.
+
+Summary (one-line)
+The code converts -0.0 to int at line 177 which removes the negative sign bit and later prints str(value) (line 192), producing "0"; fix by checking is_negative_zero(x) before converting to int and emitting "-0.0" immediately.

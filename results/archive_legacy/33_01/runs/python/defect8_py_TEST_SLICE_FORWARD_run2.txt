@@ -1,0 +1,39 @@
+What happened (where — exact lines and values)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- At line 243 the code returns Locale(locale_str[0:2], locale_str[3:5]). For 'fr__POSIX' the string index layout is:
+  - 0='f', 1='r', 2='_', 3='_', 4='P', 5='O', ...
+- locale_str[0:2] correctly becomes 'fr', but locale_str[3:5] becomes '_P' (characters at indices 3 and 4), not the empty country string you expect.
+- After that the function continues (or another branch runs) and at line 245 it checks if locale_str[5] != '_' and then raises ValueError. For this input locale_str[5] == 'O', so the check fails and a ValueError is raised.
+
+Why that fails (root cause)
+- The code assumes country occupies indices 3–4 only when there is a two-letter country. It does not correctly handle the case where the country is empty (two underscores in a row: 'fr__...').
+- Because of fixed-index slicing, when the country is empty the slice locale_str[3:5] picks up one underscore plus the first letter of the variant ('_P'), corrupting the country field and shifting expected positions for the later underscore check (line 245). That causes the ValueError and the wrong Locale object.
+
+Exactly where to change it (concrete steps)
+1. Detect the empty-country pattern explicitly. For example, replace the fixed slices around lines 243–247 with logic that checks whether locale_str[2] == '_' and locale_str[3] == '_' to mean an empty country.
+2. If the country is empty:
+   - set country = ''
+   - set variant = locale_str[4:] (variant starts at index 4)
+   - return Locale(locale_str[0:2], country, variant)
+3. Otherwise handle the normal two-letter country+optional variant case using slices that assume country present, for example:
+   - country = locale_str[3:5]
+   - if there's a variant (check for underscore at index 5), set variant = locale_str[6:]
+4. Alternatively, replace the index-based parsing entirely with a split approach:
+   - parts = locale_str.split('_', 2)
+   - Then map parts to (language, country, variant) with empty strings allowed.
+
+Minimal concrete patch (conceptual)
+- At/around line 243, change to:
+
+  if locale_str[2] == '_' and locale_str[3] == '_':
+      # empty country
+      return Locale(locale_str[0:2], '', locale_str[4:])
+  # else existing two-letter-country handling:
+  country = locale_str[3:5]
+  if len(locale_str) <= 5:
+      return Locale(locale_str[0:2], country)
+  if locale_str[5] != '_':
+      raise ValueError(...)
+  return Locale(locale_str[0:2], country, locale_str[6:])
+
+This ensures 'fr__POSIX' yields Locale('fr', '', 'POSIX') and avoids the index-shift error.

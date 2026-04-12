@@ -1,0 +1,55 @@
+What happens
+- At lines 6–8 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Later, at lines 10–14 the code assumes minutes_offset is always a positive unsigned quantity and applies the sign from hours_offset:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+Why that causes the failure
+- There is a mismatch between what callers may supply and what the function accepts and expects.
+  - Some callers pass a negative minutes_offset to indicate a negative component (for example hours_offset = -1, minutes_offset = -30 to mean -1:30). The code later assumes minutes_offset may be negative or positive as part of the total, but the validation (lines 6–8) disallows negative minutes and immediately raises ValueError for those callers.
+  - Conversely, the code’s later arithmetic assumes minutes_offset is an unsigned minute magnitude that must be added or subtracted depending on the sign of hours_offset (it expects minutes_offset >= 0). If callers do pass negative minutes (contrary to the current validation), the arithmetic becomes wrong: with hours_offset < 0 and minutes_offset negative you get hours_in_minutes - (negative) which flips the sign and produces the wrong total minutes.
+
+Where it occurs (exact lines)
+- Validation rejecting negative minutes: lines 6–8 (the minutes_offset < 0 check).
+- Sign application and total-minute computation: lines 10–14 (hours_in_minutes = hours_offset * 60 then the if hours_in_minutes < 0 branch).
+- The discrepancy causes a ValueError to be raised for callers that provide negative minute components, or produces an incorrect total when callers provide negative minutes but the arithmetic expects non-negative minutes.
+
+How to fix it (concrete steps)
+Pick one of two consistent behaviors and implement it. Two safe fixes:
+
+A) Require minutes_offset to be a non-negative magnitude (current intention). Make the sign come only from hours_offset.
+1. Keep the minutes validation (lines 6–8) so minutes_offset must be in 0..59.
+2. Compute total_minutes into a new variable (avoid reusing minutes_offset) to make intent clear:
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+3. Multiply total_minutes and continue:
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return cls.for_offset_millis(offset)
+This preserves the current validation but removes the confusing reuse of minutes_offset and uses hours_offset (not hours_in_minutes) to test the sign.
+
+B) Accept signed minutes (let callers give negative minute components).
+1. Change validation to allow -59..59:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(...)
+2. Compute total_minutes by adding hours and minutes directly:
+    total_minutes = hours_offset * 60 + minutes_offset
+3. Check total_minutes range if needed, then multiply:
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return cls.for_offset_millis(offset)
+This is simpler and avoids sign-branching logic.
+
+Why these fixes are concrete and safe
+- Both options remove the mismatch between caller input and internal assumptions.
+- Option A keeps the original contract (minutes are a positive magnitude) but makes the sign logic explicit and avoids mutating the parameter variable.
+- Option B is simpler: it accepts signed minutes and computes total directly, which prevents the current wrong behavior if callers pass negative minute values.
+
+Pick the fix that matches your intended API contract.

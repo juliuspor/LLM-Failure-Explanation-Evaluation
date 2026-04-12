@@ -1,0 +1,48 @@
+What happened (where it failed)
+- The exception is raised in code_point_at(code_units, pos), which checks the index and throws IndexError when index < 0 or index >= len(code_units). The stack fragment shows that check at lines 35–36 inside to_utf16_code_units / code_point_at.
+- That call happens on this line in translate (near the end of your snippet):
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The immediate symptom: code_point_at was called with pos == len(code_units) (or otherwise out of range), so the index check failed.
+
+Why it happened (root cause)
+- The loop that advances pos after a translator returned consumed uses code_point_at(code_units, pos) repeatedly for each value in range(consumed).
+- The contract between translate and translate_codepoint is inconsistent: translate treats consumed as “how many code points the translator consumed” and then tries to advance pos by re-reading code points starting at the current pos. But translate_codepoint (your translators) actually report a consumed value measured in code units (UTF-16 code units / char[] positions), not in code points — or vice versa. Because of that mismatch the loop runs the wrong number of iterations or advances pos incorrectly.
+- Concretely, if consumed is measured in code units but the loop treats it as count of code points, the loop will call code_point_at more times than there are code units left, eventually calling code_point_at with pos == len(code_units) and triggering the IndexError at lines 35–36.
+- Or the opposite: if consumed is in code points but you advance pos by char_count for each and the translator actually already advanced over code units differently, you can skip ahead incorrectly and end up with pos out-of-range on the next code_point_at call. Either way the mismatch between the meaning of consumed and the way you advance pos causes pos to move incorrectly and to be used out of bounds.
+
+Exactly what variables and lines are involved
+- pos (local loop index in translate)
+- consumed (value returned by self.translate_codepoint(code_units, pos))
+- code_units (list returned by to_utf16_code_units(input_seq))
+- The failing check is at lines 35–36 (in code_point_at or to_utf16_code_units): if index < 0 or index >= len(code_units): raise IndexError(...)
+- The offending call is code_point_at(code_units, pos) inside the for pt in range(consumed) loop.
+
+Concrete, actionable fixes (choose one depending on intended contract)
+1) If translate_codepoint should return the number of UTF-16 code units consumed:
+   - Change the advancement loop to simply increment pos by consumed (no further calls to code_point_at):
+     pos += consumed
+   - Reason: consumed already tells you how many code_units to skip, so re-reading code points is unnecessary and causes out-of-range calls.
+
+2) If translate_codepoint should return the number of Unicode code points consumed:
+   - Keep the loop, but ensure translate_codepoint implementations actually count code points (not code units).
+   - Also make sure you never call code_point_at when pos == length by changing the outer while to guard or by validating consumed before the loop:
+     if pos + needed_code_units > length: break / raise
+   - Or collect each codepoint and advance defensively using helper functions that return both codepoint and its unit length.
+
+3) Make the contract explicit and enforce it:
+   - Pick one canonical meaning (units or code points). Document it in the translate_codepoint docstring.
+   - Add an assertion right after translate_codepoint returns:
+     if consumed < 0 or (pos + consumed) > length: raise ValueError("translate_codepoint returned invalid consumed count")
+   - If you prefer defensive coding, compute new_pos = pos + consumed and validate new_pos <= length before any code_point_at calls.
+
+Minimal code change implementing fix #1 (if consumed is units):
+Replace the for loop at the end with:
+    pos += consumed
+
+Why that is safest
+- It avoids repeated calls to code_point_at that can be out-of-range when consumed was counted in code units.
+- It makes pos movement proportional to what translate_codepoint already reported, removing the mismatch causing the IndexError.
+
+Summary
+The crash is caused by a mismatch between what translate_codepoint reports in consumed and how translate advances pos. That mismatch leads to code_point_at being called with pos == len(code_units), triggering the IndexError at lines 35–36. Fix by deciding whether consumed counts code units or code points, make that explicit, and advance pos consistently (recommended: if consumed is code units then do pos += consumed).

@@ -1,0 +1,36 @@
+What happened (where it fails)
+- At line 335 the code inspects the variable array and sets inferred_type = type(array) (line 336).
+- The runtime type of array is an Object[] (an array whose component type is java.lang.Object), not String[].
+- Later the code attempts to use that array where a String[] is required, triggering a ClassCastException: "[Ljava.lang.Object; cannot be cast to [Ljava.lang.str;".
+- The error is detected by the guard starting at line 346–347: because inferred_type == object while expected_type != object the code raises a TypeError. That TypeError is reporting the underlying class-cast problem.
+
+Why this happened (root cause)
+- inferred_type became object because the array you passed in was created (or ended up) as an Object[] rather than a String[]:
+  - either the array was created empty or with mixed/unknown element types so its runtime component type is Object, or
+  - the code that produced the array used a generic collection -> toArray() call without supplying a String[] (toArray(new String[0])), producing an Object[].
+- When code later treats that array as a String[] (expected_type != object), the JVM does not allow casting Object[] to String[] and throws ClassCastException. The check at lines 346–347 then surfaces that by raising TypeError.
+
+Exactly where to look and fix
+1. Where the array is created or returned (call site before line 335):
+   - If you call collection.toArray() with no argument, change it to collection.toArray(new String[0]) so the JVM creates a String[] instead of an Object[].
+   - If you create the array manually, use new String[n] instead of new Object[n].
+2. If the code infers type from element instead of array:
+   - Make sure element (line 337) is non-null and is a String when you expect a String[]; passing a null element forces inferred_type to object (see the fallback to object at line 340).
+3. Defensive fix inside this method (lines 335–347):
+   - If you must accept Object[] inputs, convert/copy into a new String[] before casting, e.g. create String[] result = new String[array.length]; for (i) result[i] = (String) array[i]; — but only if you know elements are actually Strings (otherwise check and fail with clear message).
+   - Or, change the expectation logic so expected_type can accept object arrays when required.
+
+Concrete minimal steps to fix (pick the one that matches your call site):
+- Preferred: At the call site that produces the array, replace toArray() with toArray(new String[0]) or create the array as new String[n].
+- If you cannot change the caller, add a conversion in this method before casting:
+  - if (array.getClass().getComponentType().equals(Object.class) && expected_type.equals(String.class)) {
+      String[] copy = Arrays.copyOf(array, array.length, String[].class);
+      array = copy;
+    }
+  - Or iterate and cast each element with a clear error if any element is not a String.
+
+Why vague fixes will not help
+- Simply suppressing the TypeError or changing the equality check at lines 346–347 won't fix the underlying ClassCastException. You must ensure the runtime array component type matches expected_type or explicitly convert elements to that type.
+
+Summary in one sentence
+The failure is because array has runtime type Object[] (inferred_type == object) while expected_type is String, and the code tries to treat/cast that array as String[] — which fails; fix by constructing a String[] (e.g. toArray(new String[0])) or by copying/converting elements into a String[].

@@ -1,0 +1,43 @@
+What happened (root cause)
+- At line 52 the code computes gap = end - start and immediately does:
+  if gap <= 0: raise ValueError("bound must be positive")
+- That check fires when start == end (gap == 0). The test calls RandomStringUtils.random(3, 5, 5, False, False) so start and end are both 5; gap == 0 and the ValueError is raised.
+- The test expects a ValueError whose message mentions the parameter names "start" and "end" (matching the original Java test). Instead the code raises ValueError("bound must be positive"), which neither mentions "start" nor "end". The mismatch in the message is why the test fails.
+
+Where it happens
+- File: hit11_randomstringutils.py
+- Line 52: the check if gap <= 0 and the raise ValueError("bound must be positive")
+- Lines 56–57: the code later does ch = chr(start + _RANDOM.randrange(gap)) and checks the character; randrange(gap) requires gap > 0, which is the reason the author tried to guard against gap == 0, but the guard is both too strict and uses a non-descriptive message.
+
+Why this is wrong
+- The guard is too strict: start == end is a legitimate case in many APIs (meaning a single code point is allowed). Raising on gap == 0 disallows that valid case.
+- The error message is generic and does not mention the offending parameter names "start" and "end", so tests that assert those words in the exception message fail.
+- The code also fails to handle the gap == 0 case correctly: randrange(gap) cannot be used when gap == 0, but the correct behavior when start == end is to deterministically use that single code point (or to raise a ValueError that references start/end explicitly if the intended API forbids equal endpoints).
+
+Concrete fixes (step-by-step)
+1. Change the condition to only raise when end < start (i.e. gap < 0), not when gap == 0:
+   Replace
+     if gap <= 0: raise ValueError("bound must be positive")
+   with
+     if gap < 0:
+         raise ValueError(f"'end' ({end}) must be >= 'start' ({start})")
+   This makes the validation correct and provides a descriptive message mentioning start and end.
+
+2. Handle the gap == 0 case so randrange is not called with 0:
+   - Either treat gap == 0 as a valid single-value range and pick that value directly:
+       if gap == 0:
+           ch = chr(start)
+       else:
+           ch = chr(start + _RANDOM.randrange(gap))
+   - Or keep a single code path but use randrange(gap + 1) if the intended range is inclusive on end (adjust as per API semantics). Most code uses end exclusive or inclusive consistently; choose accordingly.
+
+3. Ensure the exception message contains "start" and "end" (the test asserts those substrings). The example message above does that. If you must keep the old short message, at minimum change it to:
+     raise ValueError(f"Invalid range: start={start}, end={end}")
+
+Why these fixes solve the failing test
+- Changing the condition to gap < 0 prevents raising when start == end, so the method will not raise the unexpected ValueError("bound must be positive") on RandomStringUtils.random(3,5,5,...).
+- If you still intend to treat start == end as invalid, the new ValueError message will include "start" and "end", satisfying the test's message checks.
+- Handling gap == 0 before calling randrange avoids calling randrange(0), which is another source of runtime error.
+
+Summary
+- The test fails because the code raises ValueError("bound must be positive") at line 52 when start == end (gap == 0). The message does not include "start" or "end" as the test expects. Fix by validating only for end < start, handle the gap == 0 case without calling randrange, and use a descriptive ValueError message that mentions start and end.

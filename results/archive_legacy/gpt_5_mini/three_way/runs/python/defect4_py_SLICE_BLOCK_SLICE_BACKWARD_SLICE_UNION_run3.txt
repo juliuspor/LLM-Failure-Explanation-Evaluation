@@ -1,0 +1,52 @@
+What fails
+- At lines 341–347 the code tries to compare start with min_start:
+  - min_start is created only inside the nested if at line 342–343 (when min_start_period is a SimpleTimePeriod).
+  - If min_start_period is not a SimpleTimePeriod, min_start is never assigned, yet line 346 still does if start < min_start: — this raises an UnboundLocalError / NameError (min_start referenced before assignment).
+- There is also a logic bug at line 349: self._min_start_index = index is executed unconditionally. That makes the conditional assignment at line 347 pointless and causes _min_start_index to be overwritten on every pass (so the “minimum” index tracking never works as intended).
+
+Where it happens (exact references)
+- Initialization: self._min_start_index = -1 (line 253)
+- Fetch current period start: lines 331–335 set start depending on period type
+- Compare to stored minimum:
+  - check for existing minimum: if self._min_start_index >= 0 (line 340)
+  - read stored period: min_start_period = self.get_data_item(self._min_start_index).get_period() (line 341)
+  - only if min_start_period is SimpleTimePeriod do you set min_start (lines 342–345)
+  - then you do if start < min_start: (line 346) — min_start may not exist here
+- Overwrite unconditionally: self._min_start_index = index (line 349)
+
+Why it happened (root causes)
+1. Missing initialization / incomplete branch coverage for min_start: the code assumes min_start will always be defined when it reaches line 346, but only defines it in one branch (SimpleTimePeriod). If that branch isn’t taken, you reference a variable that doesn’t exist.
+2. Broken control flow / wrong indentation: the unconditional assignment at line 349 defeats the earlier conditional update at line 347, so the “choose smaller start” logic doesn’t work.
+
+Concrete fixes (step-by-step)
+1. Ensure min_start is always defined before you use it, or avoid using it when not defined.
+   - Option A (preferred): compute a numeric min_start for every period type the same way you computed start (mirror the logic at lines 331–335), so min_start always exists.
+   - Option B: only perform the comparison if min_start was actually set (wrap the comparison in the same isinstance check that sets min_start).
+2. Fix the unconditional overwrite at line 349:
+   - Only set self._min_start_index = index when either no minimum has been set yet (self._min_start_index < 0) or when the new start is strictly smaller.
+   - Remove the unconditional assignment at line 349 or move it into the else branch for the “first-set” case.
+
+Minimal example of corrected structure (pseudocode using your variables)
+- At the start of the loop/update:
+    if isinstance(period, SimpleTimePeriod):
+        start = period.get_start_millis()
+    else:
+        start = int(period.get_start().timestamp() * 1000)
+- When checking existing minimum:
+    if self._min_start_index >= 0:
+        min_period = self.get_data_item(self._min_start_index).get_period()
+        if isinstance(min_period, SimpleTimePeriod):
+            min_start = min_period.get_start_millis()
+        else:
+            min_start = int(min_period.get_start().timestamp() * 1000)
+        if start < min_start:
+            self._min_start_index = index
+    else:
+        # first time setting a minimum
+        self._min_start_index = index
+
+Why this will fix it
+- min_start is always defined before comparison, so no NameError.
+- _min_start_index is updated only when appropriate (first assignment or found smaller start), so the tracked index actually reflects the minimum start.
+
+If you want, paste the surrounding method and I’ll make the exact patch lines to replace (including corrected indentation and consistent timestamp handling).

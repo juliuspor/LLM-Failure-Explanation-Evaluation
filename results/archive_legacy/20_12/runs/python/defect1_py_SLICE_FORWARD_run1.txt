@@ -1,0 +1,53 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- In for_offset_hours_minutes (lines ~392–412) the code validates minutes_offset with:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because the function rejects any negative minutes_offset up front, it raises ValueError: Minutes out of range: -15 (the error you see).
+
+Why it fails (root cause)
+- The method is intended to accept negative minutes when hours is negative (see the docstring and the allowed sign combinations). The current validation (lines 402–404 in your slice) disallows negative minutes unconditionally, so valid inputs such as (-2, -15) are treated as invalid.
+- Specifically:
+  - At line ~394 you compute hours_in_minutes = hours_offset * 60.
+  - Later you want to combine hours_in_minutes and minutes_offset with a sign-aware formula (lines 406–409).
+  - But the earlier check (minutes_offset < 0) prevents reaching that logic for negative minutes.
+
+Where it occurs
+- The check is in DateTimeZone.for_offset_hours_minutes, at the validation stage just before the conversion logic (the "Minutes out of range" ValueError raised at the top of your RELEVANT_SLICE). The failing line is the minutes validation such as:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+How to fix (clear steps)
+1. Change the minutes validation to allow negative minutes when hours_offset is negative or zero. Replace the unconditional check with logic matching the docstring rules. For example:
+   - Validate absolute range: if abs(minutes_offset) > 59: raise ValueError(...)
+   - Then enforce sign combinations:
+       if hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes must be positive when hours is positive")
+   - (Allow minutes negative when hours is zero or negative, per doc.)
+2. Alternatively, normalize combination early: convert hours and minutes into a signed total minutes using the docstring rules, and only after that validate the final offset does not exceed +/-23:59:59.999. For example:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - abs(minutes_offset)
+     else:
+         total_minutes = hours_in_minutes + abs(minutes_offset)
+   - Ensure total_minutes within -143999 .. +143999 (millis check later)
+3. Keep the existing later arithmetic/overflow checks (FieldUtils.safe_multiply) as they are; they still should run after computing total minutes.
+
+Minimal concrete change (pseudo-patch)
+- Replace:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  With:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must not be negative when hours is positive")
+
+Why this fix works
+- It allows valid cases like (-2, -15) while still rejecting invalid input (e.g. hours=2, minutes=-15, or minutes beyond +/-59). It then reaches the combination/normalization logic (lines 406–409) which computes the signed total minutes correctly and proceeds to build the milliseconds offset.
+
+References to your code
+- Method: DateTimeZone.for_offset_hours_minutes
+- Validation lines raising the exception: the minutes check in that method (your RELEVANT_SLICE lines 406–409 context)
+- Combination logic you want preserved: lines 406–409 that use hours_in_minutes and build minutes_offset before multiplying by MILLIS_PER_MINUTE
+
+If you want, I can provide an exact small patch to paste into your file.

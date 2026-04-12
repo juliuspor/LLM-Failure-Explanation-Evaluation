@@ -1,0 +1,87 @@
+What happened (where it fails)
+- At the top of add(), inferred_type is computed on these lines:
+  - if array is not None:
+      inferred_type = type(array)
+  - elif element is not None:
+      inferred_type = type(element)
+  - else:
+      inferred_type = object
+- When both array and element are None (the failing test), inferred_type becomes object (because of the else branch).
+- Then you call new_list = ArrayUtils._copy_list_grow1(array, inferred_type) which creates a list whose component type is treated as object.
+- After that the code runs this check:
+  - if expected_type is not None:
+      if inferred_type == object and expected_type != object:
+          raise TypeError(...)
+
+Because inferred_type is object and expected_type is str, the code raises the TypeError. The test expected ArrayUtils.add(None, None, expected_type=str) to produce [None], not a TypeError.
+
+Why this is wrong (root causes)
+1. Wrong use of type(array)
+   - When array is a Python list, type(array) returns list, not the element type. So using type(array) will never give you the component type (e.g. str or int). This makes inferred_type meaningless for component type decisions.
+2. Wrong ordering of expected_type vs inference
+   - You only consult expected_type at the very end and treat inferred_type==object as an irrecoverable mismatch. But expected_type is a caller hint: if expected_type is provided, it should guide creation of the resulting array when there is no stronger evidence to the contrary (for example, when array and element are both None).
+3. Incorrect inference when array contains only None
+   - If array has only None values, your code will treat element types as object (because you used type(array) / element is None), but expected_type can and should override that.
+4. The raising condition is too strict and located too late
+   - You raise when inferred_type == object and expected_type != object even though no incompatible existing concrete component type was present. That throws for the legitimate case of creating a typed list from no information.
+
+Exact lines to focus on
+- Line where inferred_type is set: inferred_type = type(array) — this is wrong (gives list class, not element class).
+- The else branch inferred_type = object when both array and element are None — should use expected_type if provided.
+- The check:
+    if expected_type is not None:
+        if inferred_type == object and expected_type != object:
+            raise TypeError(...)
+  — incorrectly raises for the test case.
+
+Concrete fixes (step-by-step)
+1. Prefer expected_type early:
+   - If expected_type is provided, use it as the initial component type candidate before constructing the new list.
+2. If array is not None, inspect its elements to determine element type:
+   - Walk the array and find the first non-None element; use type(first_non_none_element) as the component type candidate.
+   - If all elements are None, fall back to expected_type (if given) or object.
+   - Do not use type(array) (the list class) to infer element type.
+3. If array is None and element is not None, use type(element).
+4. Only raise a TypeError when you have a concrete incompatible component type in the existing array:
+   - For example, if array has a concrete element type A (not object) and expected_type is B and A is incompatible with B, then raise.
+   - Do not raise when inferred_type == object and expected_type != object — instead just create a list typed to expected_type.
+5. Ensure _copy_list_grow1 gets the resolved component type candidate you determined (expected_type first, then inferred from array/element).
+
+Minimal example patch sketch
+Replace the inference block with something like:
+
+    # choose component_type in this precedence:
+    # 1) expected_type if provided and compatible
+    # 2) element type from existing array (first non-None element)
+    # 3) type(element) if element is not None
+    # 4) object
+    component_type = expected_type if expected_type is not None else None
+    if component_type is None and array is not None:
+        # find first non-None element for type inference
+        for item in array:
+            if item is not None:
+                component_type = type(item)
+                break
+    if component_type is None and element is not None:
+        component_type = type(element)
+    if component_type is None:
+        component_type = object
+
+    # If array has a concrete element type that conflicts with expected_type, raise:
+    if expected_type is not None and array is not None:
+        # find a concrete element type in array to compare
+        for item in array:
+            if item is not None:
+                if type(item) is not expected_type:
+                    raise TypeError("Cannot cast ...")  # or a clearer message
+                break
+
+    new_list = ArrayUtils._copy_list_grow1(array, component_type)
+    new_list[len(new_list) - 1] = element
+
+Why this will fix the failing test
+- For add(None, None, expected_type=str) the new code sets component_type to expected_type (str) at the start, so no TypeError is raised and _copy_list_grow1 will create the list with that intended component type. The result will be [None] as expected by the test.
+
+Summary
+- The code raised because inferred_type was object (both inputs None) and you treated that as incompatible with expected_type rather than allowing expected_type to determine the component type.
+- Also using type(array) to infer component type is incorrect; you must inspect array elements (or prefer expected_type) to decide the element type. Implement the ordered logic above and only raise when you see an actual incompatible concrete type inside the existing array.

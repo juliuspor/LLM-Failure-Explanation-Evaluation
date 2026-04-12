@@ -1,0 +1,113 @@
+The code fails because it uses the original `text` object for `text.find(search_list[i], start)` calls inside the while loop (lines 291-296), instead of searching only in the remaining unreplaced portion of `text` starting from `start`. This causes it to find matches that occur before the current `start` position, leading to incorrect left-to-right replacement order.
+
+**What happens:**
+- After the first replacement, `start` advances past the matched portion (line 277).
+- But `text.find(..., start)` still searches the full original `text`, so if an earlier search string matches again before `start`, it gets picked incorrectly.
+
+**Example:**
+text = "aba", search_list = ["a", "ab"], replacement_list = ["X", "Y"]
+- First match: "ab" at index 0, replace with "Y", parts = ["Y"], start=2
+- Next find("a", 2) on "aba" finds index 2 (the last 'a'), replace correctly
+- But if text = "aaba", after replacing first "aa"? Wait, more clearly:
+
+text = "abab", search_list=["ab","a"], replacement_list=["X","Y"]
+- First: "ab" at 0, parts=["X"], start=2
+- Next find("ab",2) on "abab" finds index 2, parts=["X","X"], correct
+- But find("a",2) on "abab" would find index 2 ('a' in second "ab"), but since "ab" is earlier at same pos, ok
+
+**Root cause - Overlapping/earlier matches:**
+text = "aa", search_list=["a","aa"], replacement_list=["X","Y"]
+- First: "aa" at 0 (len=2), parts=["Y"], start=2, correct
+
+Worse: text="abcabd", search=["bc","abd"], repl=["P","Q"]
+- First "bc" at 1, parts=["a","P"], start=3 (pos of 'a' in "abd")
+- Next loop: text.find("bc",3) = -1, text.find("abd",3) on "abcabd" returns 3 (!), so text_index=3, replace_index=1
+- parts.append(replacement_list[1]) = "Q"
+- start = 3 + len("abd") = 6
+- parts = ["a","P","Q"], result="aPQ" ✓ correct
+
+**ACTUAL FAILURE CASE:** The bug is subtler - it fails when a search string matches EARLIER than current start due to multiple finds.
+
+**Clear failure:** text = "abacaba", search=["aba","a"], repl=["X","Y"]
+But let's trace:
+
+The real issue is in the INITIAL find loop (before while) and inconsistent search scope.
+
+**CRITICAL BUG (lines 260-266 first find vs 291-296 loop):** In the *first* match finding loop (before while), it uses `text.find(search_list[i])` WITHOUT `start=0`, so finds global earliest. Then in loop uses `text.find(..., start)`.
+
+But main bug: `no_more_matches_for_repl_index` is set to True if NO match from current start (line 293), but since find is from `start`, it correctly skips future.
+
+**THE BUG IS:** If a search string S1 matches at pos P1 >= start, but another S2 matched earlier at P2 < start (but wasn't picked because P1 was smaller then), no - the selection always picks the smallest temp_index >=start.
+
+Wait, actually the code *mostly* works, but **FAILS ON OVERLAPPING MATCHES where a later search's match starts before current start but overlaps**.
+
+**Concrete failing example:**
+text = "aaa", search_list = ["aa", "a"], replacement_list = ["X", "Y"]
+
+Docstring says left-to-right, earliest next match.
+
+- First loop: find("aa")=0, find("a")=0, picks first i=0 ("aa" at 0), text_index=0, replace_index=0
+- parts.append(text[0:0]) = ""
+- parts.append("X")
+- start = 0 + 2 = 2
+- no_more_matches_for_repl_index[0] still False
+
+- Next while iter: find from start=2
+  - i=0 "aa".find("aa",2) on "aaa" = -1, set no_more[0]=True
+  - i=1 "a".find("a",2) = 2, text_index=2, replace_index=1
+- parts.append("X")
+- parts.append("Y")
+- start=2+1=3
+- parts=["", "X", "Y"], result = "XY"
+
+**CORRECT per docstring** (earliest matches left-to-right: "aa" at 0 -> "X", then "a" at 2 -> "Y").
+
+If it picked "a" first? Would be wrong.
+
+**ACTUAL FAILURE:** The code fails when replacement lengths change the effective positions incorrectly, but wait.
+
+Looking at [SLICE_FORWARD], the issue is likely **IndexError or wrong replacement** because `replace_index` can be -1 inside while loop but code doesn't check.
+
+**FOUND THE BUG!**
+
+After setting start = text_index + len(search_list[replace_index])
+The while condition is `while text_index != -1:` but INSIDE the loop, after finding next, if NO match found, text_index remains -1 from previous init, but the find loop may not set replace_index if all skipped.
+
+No: look:
+
+while text_index != -1:
+  parts.append(...)
+  start = ...
+  text_index = -1   # <<<< RESET
+  replace_index = -1
+  for i in range(...):
+    if skip: continue
+    temp_index = text.find(..., start)
+    if temp_index == -1:
+      no_more... = True
+    elif text_index == -1 or temp_index < text_index:  # text_index is -1 initially
+      text_index = temp_index
+      replace_index = i  # SET ONLY IF found
+
+If the for loop runs and NO valid i finds temp_index != -1, then text_index stays -1, replace_index stays -1
+
+Then next while iteration: `while text_index != -1` is False, exits, does parts.append(text[start:]) ✓
+
+**REAL BUG IDENTIFIED from logic:**
+
+The buffer size calculation (lines 266-268) has `len(replacement_list[i]) - len(search_list[i])` but **search_list[i] or replacement_list[i] can be None or empty string**, but earlier checks skip if None/empty, but here i loops all, so `len(None)` → **TypeError: object of type 'NoneType' has no len()** at line 266-267.
+
+**Yes! That's the failure.**
+
+**Why it fails:** At lines 266-267:
+```python
+for i in range(search_length):
+    greater = len(replacement_list[i]) - len(search_list[i])
+```
+`search_list[i]` or `replacement_list[i]` can be None (allowed per function signature Optional[str]), and earlier checks (line 287-288) skip them in finding but buffer calc doesn't skip.
+
+**Example:** search_list=["a", None], replacement_list=["X", "Y"] → len(None) crashes.
+
+**Where:** Lines 266-267, during buffer size estimation, before any replacements.
+
+**Root cause:** Buffer preallocation loop doesn't skip None/empty entries like the match-finding loops do (compare to line 286-288 conditions).

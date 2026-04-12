@@ -1,0 +1,61 @@
+I can explain exactly what's happening and how to fix it, but I need one small thing from you: the few lines of code (the function under test and the test assertion) or the filename and line numbers where the value is produced and where the assertion runs. Without that I can't point to the exact line numbers or variable names. That said, here is a precise, non‑jargon explanation of the root cause, where to look, how to reproduce the difference, and a list of concrete fixes you can apply.
+
+What the failure means (root cause)
+- Your test expected the floating point number -0.0, but the code under test produced +0.0 (printed as 0). IEEE 754 floating point distinguishes +0.0 and -0.0; they compare equal with a normal numeric equality check in many languages, but their bit patterns differ (the sign bit is set for -0.0).
+- The sign of zero was lost between where the value was produced and where it was asserted. That loss can happen in several specific, common ways listed below.
+
+Where to look (precise places to inspect)
+1. The function that returns the value (method name and its return line). Check the return statement. Example places:
+   - A line like `return x / y;` where x or y can be 0 or -0.
+   - A line that calls a library function: `return Math.abs(z);` or `return Math.sqrt(z);`.
+2. Any place the value is transformed before the assertion:
+   - Formatting or string conversion (`String.format`, `toString`, JSON serializer) — some serializers canonicalize zero sign.
+   - Conversions to/from integers or unsigned types, or to single precision float (`(float) value`).
+   - Taking absolute value (`Math.abs`, `fabs`) or using `max/min` with a positive 0 constant.
+3. The test assertion line. Which assertion method is used? For example:
+   - JUnit `assertEquals(expected, actual)` using boxed Doubles can call Double.equals which compares bit patterns (so -0.0 != +0.0).
+   - Your test might explicitly compare bits or expect a negative zero.
+
+How to reproduce the bit difference and confirm the cause
+- Print the raw bits of the double right before returning and in the test before asserting:
+  - In Java: `System.out.printf("value=%f bits=0x%016X%n", v, Double.doubleToRawLongBits(v));`
+  - In Python (struct): `import struct; print(hex(struct.unpack('<Q', struct.pack('<d', v))[0]))`
+- If you see bits 0x8000000000000000 the number is -0.0 (sign bit set). If bits are 0x0000000000000000 it's +0.0.
+
+Common specific causes and fixes (step-by-step)
+1. Cause: code calls Math.abs, or otherwise forces nonnegative
+   - Example: at line 42 `double result = Math.abs(candidate); return result;`
+   - Why: Math.abs(+0.0) -> +0.0 and Math.abs(-0.0) -> +0.0
+   - Fix:
+     - If you must preserve sign, remove the Math.abs call.
+     - If you only wanted magnitude in other cases, add an explicit rule to preserve negative zero if needed:
+       - Java: `if (Double.doubleToRawLongBits(candidate) == 0x8000000000000000L) return -0.0;`
+       - Or avoid Math.abs and use a conditional that preserves sign.
+
+2. Cause: value is constructed or returned using a literal or operation that yields +0.0
+   - Example: `return 0.0;` or `return a - a;` where both are +0.0
+   - Fix:
+     - If you need negative zero, explicitly return `-0.0;` on that branch.
+     - Or compute using an operation that preserves sign (e.g., `-0.0d` or `-1.0 * 0.0` when sign is required).
+
+3. Cause: serialization / parsing strips sign bit (JSON serializer, printf, BigDecimal conversions)
+   - Example: code converts to string and back, or JSON library normalizes zero sign.
+   - Fix:
+     - Avoid round-tripping through string/serializer if sign matters.
+     - If you must serialize, use a representation that preserves sign (serialize raw bits or record sign separately).
+
+4. Cause: test assertion uses an equality method that treats +0.0 and -0.0 differently than you expect
+   - Example: in Java, `assertEquals(Double.valueOf(-0.0), Double.valueOf(actual))` will fail if actual is +0.0 because Double.equals compares raw bits.
+   - Fix:
+     - If the test really should require negative zero, assert on bits: `assertEquals(Double.doubleToRawLongBits(-0.0), Double.doubleToRawLongBits(actual));`
+     - If sign of zero is irrelevant, change the test to consider them equal: use `Double.compare(expected, actual) == 0` or assert with a numeric delta (for JUnit `assertEquals(expected, actual, 0.0)` or use `Double.compare` or `assertTrue(Math.signum(expected) == Math.signum(actual) || expected == actual)` depending on intent.
+
+Concrete next steps I recommend you run now
+1. Paste or point me to:
+   - The function (method) that computes/returns the value (include line numbers if possible).
+   - The test assertion line (include the assertion code and line number).
+2. Run this quick check and paste the output (or run locally and tell me the bits):
+   - Print raw bits of the value right before returning and in the test before the assertion (examples above).
+3. Based on that output I will give the exact single-line change (with file and line number) to either preserve the negative zero in production code or to change the test to the correct behavior.
+
+If you paste the code now I will point to the exact line(s) — e.g. “File Foo.java line 37 returns Math.abs(x) which converts -0.0 to +0.0; change to …” and provide the exact replacement text.

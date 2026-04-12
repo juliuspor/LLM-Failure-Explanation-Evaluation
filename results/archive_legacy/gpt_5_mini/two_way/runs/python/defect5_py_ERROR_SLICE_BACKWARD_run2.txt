@@ -1,0 +1,64 @@
+What happened (root cause)
+- The code computed inferred_type for a passed-in collection and decided that inferred_type == object (line 340).  
+- expected_type at the call site was str (or a Java String array), so the code hits the guard at line 346:
+  if inferred_type == object and expected_type != object:
+    raise TypeError(...)
+  That guard raises the TypeError: "Cannot cast object list to str list".
+- In short: the function was handed a list whose element type could not be determined (inferred_type became object), while the caller required a list of str. The code refuses to perform the cast and raises the TypeError instead of succeeding.
+
+Exactly where it failed
+- The decision to treat the input as a generic object list happens at line 340: inferred_type = object.
+- The check that raises the error happens at lines 346–347. The variables involved are:
+  - array (line 335) — the passed collection
+  - element (line 337) — the inspected element used to infer type
+  - inferred_type (lines 336, 340) — the type computed for items in array
+  - expected_type (line 346) — the caller’s required element type (str)
+
+Why the code concluded inferred_type == object
+- The code sets inferred_type to object (line 340) when it cannot determine a more specific type from the data. That happens when:
+  - array is a generic container (e.g. a Python list) and the code does not inspect element types, or
+  - element is None / missing so there is no concrete element to use for type inference, or
+  - the inspected element has a type that the code treats as unknown/heterogeneous.
+- Because inferred_type is object, the function refuses to cast to a more specific expected_type (str) and raises the error.
+
+How to fix it (concrete steps)
+Choose one of these fixes depending on what you want the behavior to be:
+
+1) If the caller really must pass a list of strings: validate / convert before calling
+- Make sure array contains only Python str objects:
+  array = [str(x) for x in array]
+  # then call the function so inferred_type will be str
+- Or explicitly check and fail earlier with a clear message:
+  if not all(isinstance(x, str) for x in array):
+      raise TypeError("array must contain only str")
+
+2) If you’re interoperating with Java (ClassCastException in the message suggests that), construct a Java String[] instead of a generic object list
+- Using JPype or Jython-like interop, convert explicitly:
+  from jarray import array as jarray
+  java_str_array = jarray([str(x) for x in array], 'java.lang.String')
+- Pass java_str_array so the receiver sees a String[] not Object[].
+
+3) If the function should accept generic lists and coerce them to expected_type, change the code around lines 336–346
+- Replace the hard fail with explicit coercion of elements and a clearer error if coercion fails. Example (pseudo-code patch around those lines):
+  if array is not None:
+      inferred_type = type(array)
+  elif element is not None:
+      inferred_type = type(element)
+  else:
+      inferred_type = object
+  if inferred_type == object and expected_type != object:
+      # attempt coercion instead of immediate failure
+      try:
+          array = [expected_type(x) for x in array]   # e.g. expected_type is str
+          inferred_type = expected_type
+      except Exception:
+          raise TypeError(f"Cannot coerce array elements to {expected_type}")
+
+- This makes it explicit that you try to convert elements to str rather than assuming you can cast the container type.
+
+What to check next (quick checklist)
+- Inspect the value passed as array at the call site: is it a Python list of mixed types, or a Java Object[]? (If it’s Java Object[], you must convert it to Java String[] before cast.)
+- Confirm expected_type is exactly str (or java.lang.String) where the function is called.
+- Decide whether you want conversion, stricter validation, or to accept generic object lists — then apply one of the concrete fixes above.
+
+If you paste the call site (the variable passed as array and the expected_type there), I can give the exact one-line fix to convert it to a String[] or to coerce the list items.

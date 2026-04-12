@@ -1,0 +1,62 @@
+What failed
+- Root cause: the code incorrectly rejects valid negative minute values because of the check on lines 396–397:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That condition treats any negative minutes as out of range, so calls that should accept negative minutes (for example DateTimeZone.for_offset_hours_minutes(-2, -15) or (0, -15)) raise ValueError immediately.
+- Where it occurs: the failure happens in for_offset_hours_minutes around lines 396–405 (the slice you gave). The guard at 396–397 runs before the logic that handles negative hours/minutes combinations (lines 402 and 404) and therefore prevents the later code from executing.
+
+Why this is wrong
+- The minutes parameter is allowed to be negative in the design: valid minutes are in the range -59..+59, not 0..59. The current check enforces 0..59.
+- Because minutes can legitimately be negative (e.g. (-2, -15) → -02:15, (0, -15) → -00:15), rejecting all negative minutes causes tests that expect negative minute handling to fail.
+- At the same time, the code intends to reject the mixed-sign case (e.g. (2, -15) should raise), but the premature blanket rejection prevents correct handling of valid negative-minute cases when hours are negative or zero.
+
+Exactly which tests fail
+- test_negative_hours_negative_minutes (expects (-2, -15) to produce -02:15) — fails because minutes -15 is rejected at line 396.
+- test_zero_hours_negative_minutes (expects (0, -15) → -00:15) — fails for the same reason.
+- test_mixed_signs_invalid also expects that (2, -15) raises ValueError, but the current check is too coarse and prevents correct handling in other cases.
+
+Suggested fix with concrete steps and code
+1. Change the minutes range check so negatives down to -59 are allowed:
+   - Replace the lines:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Ensure mixed-sign combinations are handled explicitly after the range check:
+   - If hours > 0 and minutes < 0: raise ValueError (mixed signs not allowed when hours positive)
+   - If hours < 0 and minutes > 0: treat minutes as negative (so (-2, 15) → -02:15)
+   - If hours == 0: sign is taken from minutes
+
+Concrete replacement logic (pseudocode matching existing variables):
+- After the corrected range check:
+    hours_in_minutes = hours_offset * 60
+    # Mixed-sign validation and normalization:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes is not supported")
+    if hours_offset < 0 and minutes_offset > 0:
+        # treat minutes as extending negative offset
+        minutes_offset = -minutes_offset
+    # Now combine:
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    return cls.for_offset_millis(offset)
+
+3. Verify tests:
+   - After these changes:
+     - (-2, -15) -> total_minutes = -120 + (-15) = -135 -> -02:15 ✔
+     - (-2, 15) -> minutes_offset normalized to -15 -> same result ✔
+     - (2, -15) -> explicit ValueError raised ✔
+     - (0, -15) -> hours==0, minutes=-15 -> -00:15 ✔
+
+Why this fix is safe
+- It preserves the intended bounds (-59..+59).
+- It allows legitimate negative-minute inputs and only rejects the invalid mixed sign case that should raise.
+- It keeps the later offset computation (multiplying minutes by MILLIS_PER_MINUTE) intact.
+
+Exact lines to edit
+- Replace the check at lines 396–397 with the corrected bounds check.
+- Add the explicit mixed-sign handling just before the code that calculates minutes_offset into milliseconds (around lines 402–405 in your slice).
+
+If you want, I can produce a ready-to-paste patch for the exact function body (showing before/after) given the full for_offset_hours_minutes implementation.

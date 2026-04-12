@@ -1,0 +1,46 @@
+What happened (root cause, plain):
+
+- The code mixes two different kinds of indexes: Python string indexes (which count Unicode code points) and UTF-16 code-unit indexes (which count 16-bit units). That mismatch leads to calling code_point_at with an index that is out of range for the UTF-16 code-unit array and raising the IndexError at lines 35–36.
+
+Where it occurs (specific lines / variables):
+
+- to_utf16_code_units(s) builds a list called code_units (see start of that function around line 10).
+- code_point_at(index) expects index to refer to positions inside that code_units list; it checks bounds and raises at lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(...)
+- code_point_at then inspects code_units[index] and, if it's a high surrogate and index+1 < len(code_units), looks at code_units[index+1] (lines 38–44) to form a supplementary code point.
+- The translator that calls code_point_at iterates over the Python string using a loop variable i (a Python string index / code-point index), and advances i by 1 per loop. When the string contains a character that becomes two UTF-16 code units (a supplementary character, e.g. an emoji), the UTF-16 list has one extra element. The translator increments i only by 1 (Python code-point indexing) but then calls code_point_at with that same numeric i, which is now larger than the number of remaining UTF-16 code units. That makes index == len(code_units) (or otherwise out of range) and triggers the IndexError at lines 35–36.
+
+Why that causes the observed failure (example sequence):
+
+- Example input "\U0001F630A" (emoji + 'A'):
+  - Python sees two code points: [emoji, 'A'] — indices 0 and 1.
+  - to_utf16_code_units produces three code units for the same string: [high_surrogate, low_surrogate, ord('A')] — indices 0,1,2.
+  - The translator loop visits i=0 (first code point, the emoji), calls code_point_at(0) which consumes the surrogate pair (correctly returns the emoji) but the translator only increments i by 1 (to move to the next Python code point).
+  - Now translator calls code_point_at(1). But code_point_at's index=1 refers to code_units[1] which is the second surrogate half; code_point_at will try to combine it with code_units[2] only if it recognizes it as a high surrogate. But often the code expects a high surrogate at index 1 and tries index+1, or the mismatch leads to other bad indexing paths. In other cases the translator ends up calling code_point_at with index equal to len(code_units) (off by one) and hits lines 35–36 and raises IndexError.
+
+Concrete fixes (specific steps you can implement):
+
+Option A — Keep UTF-16 logic, iterate using UTF-16 indexes
+1. In the translator, call utf16 = to_utf16_code_units(s) once.
+2. Iterate an index k over range(len(utf16)), not over Python string indices.
+3. When code_point_at(k) returns a supplementary code point, increment k by 2 (because you consumed two UTF-16 code units); otherwise increment k by 1.
+4. When producing output, convert the obtained code points back to Python chars (chr(cp) or appropriate escape) before appending.
+
+Option B — Simpler and recommended for Python — drop UTF-16 indexing
+1. Remove to_utf16_code_units and code_point_at usage entirely.
+2. Iterate over the Python string s using normal Python indices i and use ord(s[i]) to get the Unicode code point.
+3. Since Python str already represents supplementary characters as single code points, you do not need surrogate-pair logic: ord(s[i]) will be > 0xFFFF for emoji and you can handle it directly.
+4. Append chr(ord(s[i])) (or whatever escaping logic you need), and advance i by 1 each iteration.
+
+Why Option B is better for this codebase:
+- The original bug arose because the code tried to emulate Java's UTF-16 indexing in a language (Python) that uses Unicode code points for str indexing. That emulation is both unnecessary and error-prone. Using ord() and Python’s native code points removes the index mismatch entirely.
+
+Minimal example of the failing spot to change:
+- The IndexError is raised at these lines in code_point_at:
+  if index < 0 or index >= len(code_units):   # lines 35–36
+      raise IndexError(...)
+- Fix by ensuring the index passed to code_point_at is always a UTF-16 code-unit index (Option A) or stop calling code_point_at and use ord(s[i]) (Option B).
+
+Summary (one-sentence):
+The code fails because it mixes Python string (code-point) indexes with UTF-16 code-unit indexes: the translator advances the Python index by 1 after a surrogate pair but still calls code_point_at with that same numeric index, which is invalid for the UTF-16 code_units list and triggers the IndexError at lines 35–36. The robust fix is to stop emulating UTF-16 indexing in Python and use ord()/Python code points, or else iterate explicitly over the UTF-16 code_units list and advance by 1 or 2 appropriately.

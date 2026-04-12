@@ -1,0 +1,80 @@
+Short answer: the test expected a negative zero (-0.0) but the code produced a positive zero (0.0). Many numeric operations and conversions erase the sign bit of a zero value, so an operation in your code turned -0.0 into +0.0 before the assertion ran.
+
+I can’t point to exact line numbers in your project without the file, but here are the concrete things that typically cause this exact failure, how to confirm which one happened in your code, and exactly how to fix it.
+
+What happened (root cause)
+- A variable that should have held a negative zero lost its sign bit and became +0.0.
+- Common ways that happens:
+  - A math operation that yields zero (e.g. x + y, x - x, dividing 0 by a positive number) produced +0.0 rather than preserving -0.0.
+  - You converted the float to an integer or to a string in a way that discards the sign bit.
+  - Serialization or JSON encoding/decoding normalized -0.0 to 0.
+  - A library function you called returns a canonical +0.0.
+- In floating point, +0.0 and -0.0 compare equal (==) but differ in their sign bit. Your test is checking the sign bit (expected -0.0) but the code returned +0.0, so the assertion reports Expected -0.0, got 0.
+
+How to confirm exactly where it happened (step-by-step)
+1. Identify the values your test compares. In your test file (for example tests/test_foo.py), find the assert line — typical names:
+   - expected = -0.0
+   - actual = result or actual = value
+   - assertEqual(expected, actual) or self.assertEqual(expected, actual)
+2. Print or log the value immediately before the assertion with a representation that shows sign:
+   - Python: add these lines right before the assertion:
+     - print("expected repr:", repr(expected))
+     - print("actual repr:  ", repr(actual))
+     - import math; print("signbit(actual):", math.copysign(1.0, actual) < 0)
+     - or use struct to inspect bits:
+       - import struct
+       - print("actual bits:", struct.unpack(">Q", struct.pack(">d", actual))[0])
+   - JavaScript (Node): console.log(Object.is(actual, -0) , actual)  // Object.is distinguishes -0 and +0
+   - Java: System.out.println(Double.doubleToRawLongBits(actual)); and Double.compare( actual, -0.0 )
+3. If the print shows actual is +0.0 (signbit false) but you expect -0.0, trace back from where actual is set:
+   - Search for arithmetic, conversions (int(), parseFloat(), JSON), or library calls between where the value originates and where it’s assigned to actual.
+   - Add the same repr/logging at the earlier assignment sites to see where the sign changes.
+
+Concrete examples of causes and fixes
+- Cause: you did result = a - a or some operation that returns 0.0 (positive) even if inputs contained -0.0.
+  Fix: avoid canceling ops if sign matters. If you need to preserve -0.0, compute sign explicitly and reapply:
+  - Python:
+    - import math
+    - if math.copysign(1.0, a) < 0: result = -0.0 else: result = +0.0
+  - Or when you need to keep sign across normalization: result = math.copysign(0.0, a)
+- Cause: JSON or serialization normalized -0.0 to 0.
+  Fix: JSON and many text formats do not preserve sign bit. If you must preserve sign, store an explicit flag or use a binary format that preserves IEEE sign bit (or store string "-0.0").
+  - Example: instead of json.dump(value), dump {"value": value, "is_negative_zero": math.copysign(1.0, value) < 0}
+- Cause: you converted float to integer (int(-0.0) → 0) or to string that omitted the minus.
+  Fix: avoid the conversion or keep an explicit signed-zero flag, or reconstruct with math.copysign.
+- Cause: the test used literal -0.0 but the function returned 0 (an integer) rather than float 0.0.
+  Fix: ensure the function returns float 0.0. In Python return float(0) or 0.0, or in JS return -0 explicitly (Object.is(-0, value) can test).
+- Cause: library function you relied on intentionally returns canonical +0.0.
+  Fix: consult the library docs; if it canonicalizes zero you must post-process result with math.copysign to reapply sign where appropriate.
+
+How to fix the failing test (step-by-step)
+1. Reproduce the difference in a small snippet near where result is produced:
+   - Insert logging as shown above (repr, bit pattern, math.copysign) right after the function returns and before the assertion.
+2. If sign was lost, decide whether the sign of zero should matter:
+   - If it should matter (test is correct), preserve sign:
+     - Python: when constructing the zero value use math.copysign(0.0, original_value) or math.copysign(0.0, -1.0) as needed.
+     - Java: use Double.longBitsToDouble(Double.doubleToRawLongBits(x) with sign bit set) or Double.longBitsToDouble(0x8000000000000000L) to get -0.0
+     - JS: use -0 to produce negative zero explicitly.
+   - If sign should not matter, change the test to not require -0.0. Replace assertEqual with something that treats -0.0 and +0.0 as equal (most equality assertions already do), or assertAlmostEqual, or change expected to 0.0.
+3. Update the code where the sign was lost:
+   - If a normalization step removed the sign, change it to preserve sign (use math.copysign(0.0, source_value)).
+   - If serialization removed sign and you need to round-trip it, add a companion flag as mentioned above.
+4. Re-run the test.
+
+Examples of verification commands
+- Python quick check:
+  - >>> import math, struct
+  - >>> x = -0.0
+  - >>> repr(x)
+  - '-0.0'
+  - >>> struct.unpack(">Q", struct.pack(">d", x))[0]
+  - 9223372036854775808  (bit pattern has sign bit set)
+  - >>> math.copysign(1.0, x) < 0
+  - True
+- JavaScript quick check:
+  - > Object.is(-0, 0)
+  - false
+  - > Object.is(-0, -0)
+  - true
+
+If you paste the test file lines (the assertion) and the function that produced the value (the method that sets result), I will point to the exact line causing the sign loss and give the minimal code change to fix it.

@@ -1,0 +1,57 @@
+Short answer: the test failed because the code produced a positive zero (0) while the test expected a negative zero (-0). Positive zero and negative zero compare equal with normal numeric equality, so a simple equality check can hide the sign; your test framework reported the difference because it inspects the sign bit. The root cause is somewhere in your code you removed or normalized the negative sign (common culprits: Number()/+ conversion, Math.abs, string formatting/parsing, JSON.stringify/parse, or a cast to an integer type), so the value that reaches the assertion is 0 not -0.
+
+I don’t have your source file, so I can’t point to the exact line number yet. To find the exact place and fix it, follow these concrete steps.
+
+1) Reproduce the observed value and check its sign
+- Insert these checks at the test failure site (replace variableName with the variable asserted):
+  - In JavaScript:
+    - console.log('value', variableName)
+    - console.log('Object.is(variableName, -0):', Object.is(variableName, -0))
+    - console.log('=== 0:', variableName === 0)
+    - console.log('1/value:', 1 / variableName) // -Infinity for -0, +Infinity for +0
+  - In Python:
+    - import math, struct
+    - print('value', variableName)
+    - print('math.copysign(1.0, variableName):', math.copysign(1.0, variableName)) # -1.0 for -0.0
+    - print('1.0/variableName:', 1.0 / variableName)
+    - # To see bits:
+      bits = struct.pack('!d', variableName); print('bits hex', bits.hex())
+
+What you will see
+- If you get Object.is(variableName, -0) === false and 1/variableName === Infinity (JS) or math.copysign(1.0, variableName) === 1.0 (Python), the value is +0, not -0.
+
+2) Search for conversions that drop the negative sign
+Look for any of these in the function that produces the value (example function names/placeholders: produceValue(), compute(), parseResult()):
+- Numeric casts: Number(x), +x, float(x), int(x) (int will remove sign if it truncates to 0)
+- Math.abs(x) or similar absolute-value calls
+- Formatting then parsing: x.toString(), String(x), JSON.stringify(x) followed by parse, parseFloat, parseInt
+- Operations that mathematically produce +0: x - x, x * 0, Math.max(0, x), rounding to integer that yields 0
+- Serialization/deserialization (e.g., sending through JSON or text) that prints "0" and is parsed back as +0
+
+3) Where to look in your codebase (concrete places)
+- The function under test (e.g., functionName at file.js:lineNN)
+- Any helper that normalizes sign or absolute value (e.g., sanitizeNumber, normalize, toFinite)
+- Any place where you convert to/from string or to/from integer before returning the value
+
+4) Fix options (pick one depending on intent)
+- If the value must be negative zero:
+  - Ensure you do not call Math.abs or an unconditional Number/parse that strips the sign.
+  - Preserve the sign in conversions. In JS you can force negative zero: result = -0; or if you have magnitude m: result = -Math.abs(m);
+  - Avoid string round-trip that loses sign.
+- If the sign should not matter and the test is wrong:
+  - Update the test to allow both zeros or use a sign-aware check only when you need it.
+  - In JavaScript tests, use Object.is(actual, expected) for sign-aware equality. Example: expect(Object.is(actual, -0)).toBe(true)
+  - Or compare 1/actual to confirm sign: expect(1/actual).toBe(-Infinity)
+- If your code intentionally normalizes sign but the test expects -0, either change the code to preserve sign or change the test to expect +0.
+
+5) Concrete debugging example (JavaScript)
+- Add before the failing assert (assume variableName):
+  console.log('At line X in file Y, variableName=', variableName, 'Object.is(-0)=', Object.is(variableName, -0), '1/value=', 1/variableName)
+- Search for lines that do conversions, e.g.
+  value = Number(value)         // removes -0 sign if value was '-0' text
+  value = Math.abs(value)       // removes sign
+  value = parseFloat(value.toString()) // string round-trip
+
+6) If you paste the failing function and the test (file name and line numbers), I will point to the exact line that flips the sign and provide the exact minimal code change to preserve or normalize the sign as you intend.
+
+Summary: The failure happened because the code returned +0 while the test expected -0. Find where the returned value is converted or normalized (Number/parse/abs/string conversion/rounding), use the quick checks above to confirm sign at the failure site, then either preserve the negative sign in that conversion or update the test to not require sign-aware equality. If you share the function and the test assertion lines, I’ll mark the exact line and give the precise one-line fix.

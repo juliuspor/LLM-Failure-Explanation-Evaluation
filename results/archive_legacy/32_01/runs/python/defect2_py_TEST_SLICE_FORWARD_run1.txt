@@ -1,0 +1,79 @@
+I can explain the root cause, but I need the GrayPaintScale source to point to exact line numbers. Right now I can show the single clear and likely cause and provide a precise, actionable checklist and code fixes you can apply in your codebase (with the exact method name get_paint referenced).
+
+What happened (observable failure)
+- Test: gps = GrayPaintScale(); color = gps.get_paint(-0.5); assert color == (0, 0, 0)
+- The assertion fails because get_paint(-0.5) returns something other than (0,0,0) (either a different tuple or an error), so negative inputs are not being mapped to black as your test expects.
+
+Where it occurred
+- The problem is inside GrayPaintScale.get_paint(value). That is the only method involved in producing the color from the numeric input.
+
+Why it happened (root cause)
+One of these precise issues is responsible:
+
+1) No clamping of inputs before color selection
+- get_paint does not clamp or bound the input value to the valid range (likely [0.0, 1.0]). If your code expects negative inputs to become 0 (black), absence of clamp means the math that converts value → index/color produces an out-of-range index or a wrong color.
+
+2) Clamp applied after converting to an index
+- get_paint may multiply the value by a palette length, convert to an int index, and then clamp the index. If value is negative, converting to int first can produce a negative index that is used before (or instead of) clamping, producing Python’s negative-list indexing behavior (last entries of the palette) or an IndexError in other languages.
+
+3) Wrong clamp bounds or comparison direction
+- The code may have a clamp implemented but with incorrect comparison signs, e.g.:
+  if value < 0.0: value = 1.0   # inverted
+or using min/max incorrectly: value = min(value, 0.0) instead of max(value, 0.0).
+
+4) Treating value as angle/offset instead of normalized fraction
+- get_paint might call an operation that wraps negatives (like modulo) or takes absolute value, causing -0.5 to map to 0.5 or some non-zero gray.
+
+How to confirm exactly which of the above applies (diagnostic steps)
+1) Re-run with tracing or print:
+   - Add a single line at the start of get_paint:
+     print("get_paint called with", value)
+   - And just before returning:
+     print("returning color", color)
+   This shows the path and intermediate values.
+
+2) Inspect the conversion code in get_paint:
+   - Look for lines that compute an index: index = int(value * (n-1)) or index = round(...)
+   - Check if clamping (value = max(0.0, min(1.0, value))) happens before or after that conversion.
+
+3) Run small checks:
+   - gps.get_paint(-0.5)
+   - gps.get_paint(0.0)
+   - gps.get_paint(1.0)
+   - If -0.5 returns same as 0.5 or an element from the end of the palette, negative indexing/modulo/wrap is the cause.
+
+Precise fixes to apply (pick the one matching your code style)
+- Ensure clamping to [0.0, 1.0] happens immediately at the top of get_paint before any multiplication/indexing/rounding:
+
+Python example (replace the body of get_paint with this logic):
+def get_paint(self, value):
+    # 1) Normalize / clamp input to [0.0, 1.0] immediately
+    if value is None:
+        raise ValueError("value must be a number")
+    value = float(value)
+    if value < 0.0:
+        value = 0.0
+    elif value > 1.0:
+        value = 1.0
+
+    # 2) Then convert to index or compute color
+    index = int(round(value * (len(self.palette) - 1)))
+    return self.palette[index]
+
+- Or using a compact safe clamp:
+value = max(0.0, min(1.0, float(value)))
+
+- If you were converting to an index with int(value * n) use int(math.floor(...)) or round after clamping so negatives cannot create negative indices.
+
+Extra checks to add to the test suite
+- assert gps.get_paint(-1.0) == (0,0,0)
+- assert gps.get_paint(-0.0001) == (0,0,0)
+- assert gps.get_paint(0.0) == (0,0,0)
+- assert gps.get_paint(1.0) == expected-white
+- assert gps.get_paint(2.0) == expected-white
+
+If you want I will:
+- Inspect your GrayPaintScale class and show the exact line and the minimal line-change needed to fix it, or
+- Apply the exact patch to a posted snippet and produce the corrected code plus unit tests.
+
+Provide the get_paint method (or the GrayPaintScale source) and I’ll point to the exact lines and give a one-line patch.

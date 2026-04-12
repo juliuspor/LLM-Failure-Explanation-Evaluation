@@ -1,0 +1,91 @@
+What happened
+- The assertion failed because the value returned by gps.get_paint(-0.5) is not exactly the tuple (0, 0, 0).
+- That failure happens at the second line of your snippet:
+  1. gps = GrayPaintScale()
+  2. color = gps.get_paint(-0.5)    <-- call that produces the unexpected value
+  3. assert color == (0, 0, 0)     <-- assertion fails here
+
+Why it failed (root causes you must check)
+1. Input range / clamping issue
+   - Many paint-scale implementations expect inputs in a fixed range (for example 0.0..1.0). Passing -0.5 may produce one of:
+     - A ValueError/exception inside get_paint (if it validates and rejects out-of-range values).
+     - A clamped value (e.g., internally clamped to 0.0) and then a valid color returned.
+     - An unexpected branch that returns a different type or different values for negative inputs.
+   - If get_paint does clamp negatives, it should still return black for -0.5 — so check whether get_paint clamps at all.
+
+2. Type or format mismatch
+   - get_paint may return a different type than an (R, G, B) tuple. Common alternatives:
+     - A Color object (e.g., Color(0, 0, 0)) rather than a plain tuple.
+     - An RGBA tuple (e.g., (0, 0, 0, 255) or (0, 0, 0, 1.0)).
+     - A float or a single-channel value (0.0) rather than an RGB triple.
+   - If the returned value is Color(0,0,0) or (0,0,0,255), the equality to (0,0,0) will be False, causing the assertion to fail.
+
+3. Off-by-one or normalization error
+   - get_paint might map inputs with a different normalization (e.g., expecting 0..255 or -1..1). If -0.5 maps to something like (127,127,127) or any non-zero gray, your assert will fail.
+
+How to determine exactly which of the above happened (concrete debugging steps)
+1. Print the returned value and its type immediately after the call:
+   - Add these lines (exact code to run):
+     - print("color repr:", repr(color))
+     - print("color type:", type(color))
+   - That will show whether you got a tuple, object, RGBA, etc., and the exact contents.
+
+2. Inspect GrayPaintScale.get_paint implementation at the call site
+   - Open the file that defines GrayPaintScale and find the get_paint method; note the line numbers. For example:
+     - file: gray_paint_scale.py, method: get_paint(self, value), lines 12–36
+   - Check for:
+     - Input validation: is there code that raises on value < 0?
+     - Clamping: is value = max(0.0, min(1.0, value)) used?
+     - Return format: what object or tuple is returned (RGB tuple, RGBA, Color instance)?
+
+3. Reproduce minimal examples
+   - Call get_paint with 0.0, 1.0, -0.5 and print results:
+     - print(gps.get_paint(0.0))
+     - print(gps.get_paint(1.0))
+     - print(gps.get_paint(-0.5))
+   - This will show whether negatives map to black or something else.
+
+Concrete fixes (choose the one that matches the real cause)
+
+A. If the problem is type/format mismatch (get_paint returns Color or RGBA)
+- Fix option 1: Change your test to compare equivalently:
+  - If get_paint returns a Color object with .r/.g/.b attributes:
+    - assert (color.r, color.g, color.b) == (0, 0, 0)
+  - If get_paint returns RGBA tuple (0,0,0,255):
+    - assert color[:3] == (0, 0, 0)
+- Fix option 2: Make get_paint return RGB tuples (only) if that’s the intended API:
+  - In get_paint (e.g., line where it returns), replace return Color(0,0,0) with return (0, 0, 0)
+  - Or normalize RGBA to RGB before returning: return (r, g, b)
+
+B. If the problem is out-of-range input handling (get_paint rejects negatives or behaves unexpectedly)
+- Make the input explicit and valid in the test:
+  - Call with a valid value if the API expects 0..1: color = gps.get_paint(0.0); assert color == (0,0,0)
+- Or update get_paint to clamp inputs (if API should accept any real number):
+  - At the start of get_paint, add:
+    - value = max(0.0, min(1.0, value))
+  - Then compute and return the color for the clamped value.
+- Or raise a clear exception for invalid inputs and update the test to expect that:
+  - In get_paint, validate and raise ValueError("value must be between 0.0 and 1.0") if out of range.
+  - In the test: with pytest.raises(ValueError): gps.get_paint(-0.5)
+
+C. If the problem is normalization mapping (value space mismatch)
+- Decide the intended input domain and make both implementation and tests agree:
+  - If get_paint expects [-1..1], document and adjust test accordingly.
+  - If get_paint expects [0..1], change the test input to a valid number and assert expected output.
+
+Examples of exact patch lines (pick appropriate file/method)
+- To clamp inside get_paint: (edit get_paint at its start)
+  - value = max(0.0, min(1.0, value))   # ensure value is 0..1
+- To normalize return to RGB tuple if it currently returns RGBA:
+  - r, g, b, a = ...compute...
+  - return (r, g, b)
+- To change test to inspect components:
+  - color = gps.get_paint(-0.5)
+  - assert getattr(color, "r", color[0]) == 0
+  - assert getattr(color, "g", color[1]) == 0
+  - assert getattr(color, "b", color[2]) == 0
+
+Summary
+- The assertion failed because gps.get_paint(-0.5) did not produce the exact object (0, 0, 0).
+- Most likely causes: get_paint returned a different type (Color or RGBA), it didn’t clamp negative inputs, or it uses a different input range.
+- Do the two concrete checks now: print(repr(color)) and inspect GrayPaintScale.get_paint implementation lines. Then apply one of the precise fixes above depending on what you find.

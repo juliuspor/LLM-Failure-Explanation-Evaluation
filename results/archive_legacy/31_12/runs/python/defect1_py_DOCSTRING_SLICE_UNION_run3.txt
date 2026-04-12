@@ -1,0 +1,42 @@
+What happened (where it fails)
+- At line 400 the code unconditionally rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  Because this check does not consider the sign of hours, it rejects valid inputs such as (0, -15) and (-2, -15) that your docstring explicitly allows. So calls that should succeed raise ValueError immediately at line 400.
+
+Why that is the root cause
+- The docstring says negative minutes are allowed when hours is zero or negative. The check at line 400 blocks all negative minute values, contradicting the documented behavior. That is the immediate cause of failures for the valid cases above.
+- There is a related sign-handling block later (lines 406 and 408) that tries to combine hours and minutes into a single minutes count:
+    406: minutes_offset = hours_in_minutes - minutes_offset
+    408: minutes_offset = hours_in_minutes + minutes_offset
+  Those lines assume minutes_offset has the appropriate sign/absolute value already. Because the early validation rejects negatives, the later sign logic never gets the correct inputs and may compute the wrong total offset or trigger the later "Offset is too large" error at line 411.
+
+Exactly where to change it (concrete steps)
+1. Replace the unconditional negative-minute check at line 400 with a conditional check that allows negative minutes when hours <= 0:
+   - Only reject minutes < -59 or > +59.
+   - Additionally, reject minutes that are negative while hours is positive (per docstring).
+   Concretely:
+     - if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+     - if hours_offset > 0 and minutes_offset < 0: raise ValueError(...)
+2. Normalize/minute-combination logic (lines 406/408):
+   - Compute total_minutes = hours_offset * 60 + sign * abs(minutes_offset), where sign = +1 if hours_offset >= 0 else -1, except treat the zero-hour case as sign determined by minutes (doc allows zero hour + negative minutes -> negative offset).
+   - Then convert total_minutes to millis and check bounds against +/- (23*60 + 59).
+   This avoids the confusing subtraction/addition at lines 406/408 and prevents producing an overlarge positive value that triggers line 411 incorrectly.
+3. Keep the final overflow check (line 411) but apply it to the computed total_minutes (or offset millis) after correct sign handling.
+
+Minimal example of the intended logic (pseudo-steps)
+- Validate hours in [-23, 23].
+- Validate minutes in [-59, 59].
+- If hours > 0 and minutes < 0: raise ValueError.
+- Compute:
+    if hours > 0: total_minutes = hours*60 + minutes  (minutes >= 0 here)
+    elif hours < 0: total_minutes = hours*60 - abs(minutes)  (minutes may be positive or negative; use sign)
+    else (hours == 0): total_minutes = minutes  (minutes can be +/-)
+- Check abs(total_minutes) <= 23*60 + 59
+- Convert to millis and return
+
+Why this fixes it
+- It implements the docstring rules: negative minutes allowed when hours is zero or negative; disallowed when hours positive.
+- It ensures the combination of hours and minutes is computed with correct sign before the overflow check, preventing spurious "Offset is too large" errors.
+
+If you want, I can produce a patched code snippet replacing the checks at lines 400 and 406–411 to implement the above logic.

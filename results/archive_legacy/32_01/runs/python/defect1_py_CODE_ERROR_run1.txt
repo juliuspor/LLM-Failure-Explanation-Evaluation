@@ -1,0 +1,63 @@
+What happened (where it failed)
+- The code failed in for_offset_hours_minutes at this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  The ValueError "Minutes out of range: -15" means the caller passed minutes_offset == -15 and that check rejected it.
+
+Why it failed (root cause)
+- The method is inconsistent about the sign/valid range of minutes_offset:
+  - It enforces minutes_offset to be between 0 and 59 (non-negative) at the top.
+  - Later it combines hours and minutes by reusing minutes_offset and applying sign logic:
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+  That combination code assumes minutes_offset is a non-negative magnitude to be subtracted when hours are negative. But the initial validation already rejects negative minute values, so either:
+    - callers must pass non-negative minutes (0..59), or
+    - callers pass negative minutes to indicate a negative offset, in which case the early validation is wrong.
+- In short: the method asserts minutes must be non-negative, yet later logic behaves as if minutes could be signed or uses subtraction to implement the sign. The immediate cause of the thrown exception is the early minutes check rejecting a negative minutes_offset (-15). The deeper bug is this mismatch between input validation and later arithmetic.
+
+Exactly where to change (concrete steps)
+1. Decide the intended API:
+   - Option A: minutes_offset must always be non-negative (0..59). Keep the validation, but require callers to supply hours_offset negative when the whole offset is negative (e.g., hours=-1, minutes=15). Then fix the combination logic so it does not assume minutes could be negative:
+       - Compute total_minutes = hours_offset * 60 + (hours_offset < 0 ? -minutes_offset : minutes_offset)
+   - Option B: allow minutes_offset to be negative and use sign of minutes. Validate abs(minutes_offset) <= 59 and ensure hours_offset and minutes_offset signs combine correctly (or forbid conflicting signs).
+
+2. Fix the combination lines. For Option A (recommended: minutes should be 0..59, sign given by hours):
+   Replace the current arithmetic with:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           total_minutes = hours_in_minutes - minutes_offset   # subtract the non-negative minutes
+       else:
+           total_minutes = hours_in_minutes + minutes_offset
+   (Note: do not reuse minutes_offset for the combined total; use a new variable total_minutes to avoid confusion.)
+
+3. Or implement a clearer single formula:
+       sign = -1 if hours_offset < 0 else 1
+       total_minutes = hours_offset * 60 + sign * minutes_offset
+
+4. Update the later variable name used for multiplying millis:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Corrected example (Option A: minutes must be 0..59)
+    def for_offset_hours_minutes(cls, hours_offset: int, minutes_offset: int) -> 'DateTimeZone':
+        if hours_offset == 0 and minutes_offset == 0:
+            return cls.UTC
+        if hours_offset < -23 or hours_offset > 23:
+            raise ValueError(f"Hours out of range: {hours_offset}")
+        if minutes_offset < 0 or minutes_offset > 59:
+            raise ValueError(f"Minutes out of range: {minutes_offset}")
+        try:
+            hours_in_minutes = hours_offset * 60
+            sign = -1 if hours_in_minutes < 0 else 1
+            total_minutes = hours_in_minutes + sign * minutes_offset
+            offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+        except ArithmeticError:
+            raise ValueError("Offset is too large")
+        return cls.for_offset_millis(offset)
+
+Summary
+- The immediate error came from the early validation rejecting a negative minutes_offset (-15).
+- The real bug is the mismatch between that validation and the later arithmetic which treats minutes as a magnitude to be added or subtracted based on hours' sign.
+- Fix by choosing a single, consistent convention (I recommend minutes always 0..59, sign from hours) and computing total_minutes with an explicit sign-aware formula, not by mutating minutes_offset.

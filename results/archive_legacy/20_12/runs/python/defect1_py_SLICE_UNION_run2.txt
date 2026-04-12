@@ -1,0 +1,29 @@
+What happened (where it fails)
+- The failure occurs in DateTimeZone.for_offset_hours_minutes at the input validation for minutes (lines 400–401 in your slice):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset})
+- Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15). Because you pass minutes_offset = -15, the method immediately raises ValueError("Minutes out of range: -15").
+
+Why this check is wrong for negative hours (root cause)
+- The Java/Joda logic you are porting allows negative hour values with a negative minutes component (e.g. (-2, -15) → -02:15). In the original algorithm the minutes argument is allowed to be negative when the hours argument is negative; the method interprets the pair as a signed combination.
+- In your Python code you unconditionally reject any negative minutes (minutes_offset < 0) before you perform the sign-combining logic (lines 400–401). That check prevents valid combinations like (-2, -15) from being accepted, so the pair that should produce an offset of -2h15m is rejected early.
+
+Exactly where to change it
+- The immediate fix is to move or modify the minutes-range validation so it runs after you compute the combined minutes (after you combine hours_in_minutes and minutes_offset at lines 406–408), or to allow negative minutes when hours is negative.
+- Concretely:
+  1. Remove or relax the early check at lines 400–401 that rejects all negative minutes.
+  2. After computing minutes_offset = hours_in_minutes ± minutes_offset (lines 406–408), validate that the final minutes_offset value is within the acceptable total range (e.g. -23*60-59 .. +23*60+59 or compare against _MAX_MILLIS / MILLIS_PER_MINUTE).
+  3. Keep the existing hours bounds check (hours between -23..23).
+
+Why this exact change works
+- The code currently expects minutes to be non-negative because it tries to combine sign after the check. If you allow negative minutes for negative hours (or validate after combining), the pair (-2, -15) will be turned into a single signed minute value (-135 minutes) and then multiplied to milliseconds, producing the expected -02:15 zone id.
+
+Minimal actionable steps
+- Edit DateTimeZone.for_offset_hours_minutes:
+  - Remove the line(s):
+      if minutes_offset < 0 or minutes_offset > 59:
+          raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - After computing minutes_offset = hours_in_minutes ± minutes_offset (current lines 406–408), assert the combined minutes are within the allowed combined range and raise if not.
+  - Keep hours bounds check unchanged.
+
+After this change, DateTimeZone.for_offset_hours_minutes(-2, -15) will be accepted and produce the zone id "-02:15" as the test expects.

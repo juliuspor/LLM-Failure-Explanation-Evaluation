@@ -1,0 +1,29 @@
+What happened (where): The failure occurs in LocaleUtils.to_locale (see method start at line 193). The call LocaleUtils.to_locale('fr__POSIX') raises ValueError: "Invalid locale format: fr__POSIX" from the validation logic around lines 236–245 and 250–252.
+
+Why it happened (root cause): The method assumes any non-2 / non-5 length string must be of the 7+-char form language + '_' + country (2 uppercase letters) + '_' + variant. In particular:
+
+- At line 236 it checks locale_str[2] == '_' — that's fine for 'fr__POSIX' (the third char is '_').
+- At lines 242–245 it reads ch3 = locale_str[3] and ch4 = locale_str[4] and requires both to be uppercase letters A–Z. For 'fr__POSIX', locale_str[3] is '_' (because the country part is empty), not an uppercase letter, so the check fails and a ValueError is raised.
+- The code never allows an empty country between the two underscores (the Java behaviour that permits "fr__POSIX" meaning language "fr", empty country, variant "POSIX" is not handled). The subsequent branch that would create Locale(language, "", variant) (lines 250–252) is only reached when positions 3–4 are two uppercase letters; the code never accepts the pattern language + "__" + variant.
+
+What should be allowed: The test expects LocaleUtils.to_locale('fr__POSIX') to produce Locale('fr', '', 'POSIX') — i.e. an empty country is valid when there are two consecutive underscores and a variant follows.
+
+Exact lines to change / how to fix (step-by-step):
+
+1. At lines 242–245 replace the strict check for two uppercase letters with logic that accepts either:
+   - two uppercase letters (country present), or
+   - an underscore at position 3 indicating an empty country (i.e. locale_str[3] == '_' and you'll treat country as "").
+
+2. Concretely, after verifying locale_str[2] == '_':
+   - If locale_str[3] == '_': // empty country
+       - Ensure there is a variant (length >= 7) and return Locale(locale_str[0:2], "", locale_str[4+?]) — adjust indices carefully (for "fr__POSIX", variant starts at index 4).
+   - Else:
+       - Keep existing behaviour: check locale_str[3] and locale_str[4] are 'A'..'Z'; then handle the length==5 and length>5 cases as now.
+
+3. Update the check that currently requires locale_str[5] == '_' for variant cases — when country is empty the variant separator is at index 3 (the second underscore is at 3), not 5, so you must branch index logic based on whether country was empty.
+
+A minimal conceptual patch:
+- Detect empty country when locale_str[3] == '_'; if so, return Locale(locale_str[0:2], "", locale_str[4:]) (with correct start index 4).
+- Otherwise validate locale_str[3:5] are uppercase letters and proceed as currently implemented.
+
+Why this solves it: It matches the expected Java-style parsing that allows a missing country between the underscores (language + "__" + variant). That prevents the incorrect uppercase-letter check from rejecting valid inputs like "fr__POSIX".

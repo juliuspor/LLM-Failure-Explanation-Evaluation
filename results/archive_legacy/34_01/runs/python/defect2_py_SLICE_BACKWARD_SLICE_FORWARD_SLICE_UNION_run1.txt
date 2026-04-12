@@ -1,0 +1,48 @@
+What happens
+- At line 71 you compute
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  If self._upper_bound == self._lower_bound the denominator is zero and Python raises ZeroDivisionError. That is the most likely immediate crash.
+
+Secondary failure mode
+- If the denominator is non-zero but value is outside the [self._lower_bound, self._upper_bound] range the computed g can be < 0 or > 255 and then the code at lines 74–75 raises a ValueError:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+  That error is triggered intentionally, but the message is unhelpful (it does not show which variable or what the bad values were).
+
+Where it occurs (precise)
+- Line 71: division by (self._upper_bound - self._lower_bound) → ZeroDivisionError if those two are equal.
+- Lines 74–75: ValueError is raised if g is out of the expected 0..255 range; the code currently raises a generic message instead of showing offending values.
+
+Why it happens (root causes)
+1. No check that the bounds form a valid non-zero range before doing the division (missing guard against upper == lower).
+2. No normalization/clamping before converting to an int, so out-of-range input causes g outside 0..255 and then a thrown ValueError with an uninformative message.
+
+Concrete fixes (step-by-step)
+1. Prevent division by zero:
+   - Before line 71, check whether self._upper_bound == self._lower_bound. Decide desired behavior:
+     a) If that should be treated as an error, raise ValueError with a clear message including the bound values:
+        raise ValueError(f"Invalid bounds: _lower_bound={self._lower_bound}, _upper_bound={self._upper_bound}")
+     b) If it should map all values to a single color, return a constant (e.g., 0 or 255) or handle specially:
+        if self._upper_bound == self._lower_bound:
+            return (0, 0, 0)  # or whatever is appropriate
+2. Normalize and clamp safely:
+   - Compute normalized ratio safely, then clamp to [0.0, 1.0] before scaling to 255:
+        span = self._upper_bound - self._lower_bound
+        if span == 0:
+            # handle per step 1
+        ratio = (value - self._lower_bound) / span
+        if ratio < 0.0: ratio = 0.0
+        elif ratio > 1.0: ratio = 1.0
+        g = int(round(ratio * 255.0))
+   - This prevents g from going out of bounds due to floating-point imprecision or out-of-range input.
+3. Improve the error message (if you still want to raise on out-of-range):
+   - Include the offending values and variable names:
+        raise ValueError(f"Computed color component out of range: g={g}, value={value}, lower={self._lower_bound}, upper={self._upper_bound}")
+   - Or better, avoid raising by clamping as above so callers don’t get an exception for slightly out-of-range inputs.
+4. Optional: use min/max to clamp in one line:
+        g = int(round(min(1.0, max(0.0, (value - self._lower_bound) / span)) * 255.0))
+
+Summary
+- Immediate cause of failure: division by zero at line 71 when self._upper_bound == self._lower_bound.
+- Also problematic: out-of-range g triggers a vague ValueError at lines 74–75.
+- Fix by checking span before dividing, clamp normalized ratio to [0,1], and provide clearer error messages if you choose to raise.

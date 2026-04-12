@@ -1,0 +1,75 @@
+What happened (root cause)
+- At line 337–340 the code only infers the element type from the inputs:
+  - If array is not None it sets inferred_type = type(array) (line ~334).
+  - Else if element is not None it sets inferred_type = type(element) (line 337).
+  - Otherwise it sets inferred_type = object (line 340).
+- In your failing run both array and element were None, so inferred_type was set to object (line 340).
+- Later (line 346–347) the code checks:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  Because inferred_type == object and expected_type was str, the function raises the TypeError you see.
+
+Why that's incorrect or surprising
+- The code never uses expected_type to pick the inferred_type when array and element are absent. If the caller asked for a str list (expected_type=str) but passed no array and element is None, the function treats the element type as unknown (object) and refuses to create a str list.
+- Also note a separate bug: when array is not None the code uses type(array) (the type of the list object itself, e.g. list), not the element type. That makes inferred_type wrong for non-empty lists.
+
+Where it occurs (specific variables / lines)
+- inferred_type set to object: line ~340 (else branch).
+- exception thrown: lines 346–347, because inferred_type == object and expected_type != object.
+
+How to fix (concrete options with exact changes)
+Choose one of these fixes depending on desired behavior:
+
+1) If expected_type should take precedence when array and element are missing:
+- Replace the else branch with using expected_type if provided:
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+- This makes the function create a list of expected_type when no element/array is present.
+
+2) If expected_type should always guide inference (recommended):
+- At the top prefer expected_type when present:
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None:
+        inferred_type = get_element_type_from_array(array)  # see note below
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+3) Fix the array branch so it gets the element type instead of type(list):
+- Replace inferred_type = type(array) with actual element type detection, for example:
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif array is not None:
+        inferred_type = expected_type or object
+  (or use typing hints / metadata if available instead of inspecting element 0)
+
+4) If you want to allow creating an empty list of expected_type even when element is None:
+- Remove the strict check that raises TypeError, or change it to only raise if both inferred_type == object and expected_type is None:
+    if inferred_type == object and expected_type is not None:
+        inferred_type = expected_type
+    elif inferred_type == object and expected_type is None:
+        raise TypeError(...)
+
+Minimal explicit patch (combining 2 and 3), applied to your code:
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None:
+        inferred_type = type(array[0]) if len(array) > 0 else object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Why this fix works
+- It uses expected_type when the caller provides it.
+- It correctly inspects an existing array's element type instead of the list object's type.
+- It avoids raising a TypeError when the caller supplied expected_type but no element/array.
+
+Summary
+The immediate failure came from inferred_type being set to object because both array and element were None, while expected_type was str; the function then rejects casting object→str. Fix by allowing expected_type to set inferred_type (and also fix the array branch to inspect array elements, not the list object).

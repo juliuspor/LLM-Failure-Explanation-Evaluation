@@ -1,0 +1,44 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The code immediately checks the minutes parameter at for_offset_hours_minutes (lines 400–401):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15 the method raises ValueError: "Minutes out of range: -15" (this is the ValueError you see).
+
+Why this check is wrong for this API (root cause)
+- The docstring above for_offset_hours_minutes explicitly allows negative minutes when hours are negative. The table in the docstring shows (-2, -15) should be interpreted as -02:15 (i.e. negative hours and negative minutes together).
+- But the code enforces minutes_offset must be between 0 and 59 unconditionally. That validation rejects valid inputs such as (-2, -15) and (0, -15) which the docstring says are legal.
+- The incorrect check lives in for_offset_hours_minutes and fails before the function can perform the correct sign-combining logic that follows (lines 406–409).
+
+Where to look in the code
+- for_offset_hours_minutes method:
+  - Parameter validation at lines 400–401: rejects negative minutes.
+  - Intended sign-adjustment logic at lines 406–409:
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+  That logic expects minutes_offset may be negative when hours < 0, but the earlier check prevents that.
+
+How to fix it (precise steps)
+1. Remove or relax the strict minutes check so negative minutes are allowed when hours are negative (and vice versa) according to the API rules.
+2. Replace the current check
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with a check that enforces absolute range but allows negative minutes when appropriate. For example:
+
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   This accepts -15 while still rejecting, e.g., -75.
+3. (Optional) Add an explicit rule enforcing that minutes and hours signs are consistent per the docstring if you want to disallow mixes like (2, -15). The docstring indicates (2, -15) should be invalid. To enforce that, add:
+
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes must be positive when hours is positive")
+     if hours_offset < 0 and minutes_offset > 0:
+         raise ValueError("Minutes must be negative when hours is negative")
+
+   Or combine with the range check appropriately.
+
+After these changes, DateTimeZone.for_offset_hours_minutes(-2, -15) will proceed to compute the combined minutes and return the expected zone id '-02:15' instead of raising "Minutes out of range: -15".

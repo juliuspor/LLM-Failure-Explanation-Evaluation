@@ -1,0 +1,40 @@
+What happened (where it failed)
+- The exception is raised at line 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  You attempted to access index == 2, and that check raised because len(code_units) is 2 (so valid indices are 0 and 1). In other words, index is out of range for the code_units list.
+
+Why it happened (root cause)
+- There is a mismatch between the index you passed in and the length/content of code_units produced by to_utf16_code_units.
+- Most likely explanation: to_utf16_code_units did not produce the expected array of 16-bit UTF-16 code units, so the caller’s index (2) does not correspond to an actual code unit in code_units. Common concrete ways that can produce this:
+  - code_units was built from the raw bytes of a UTF-16 encoding without grouping bytes into 16-bit units (so len(code_units) equals byte count /or/ equals two bytes per code unit mistakenly yielding half or double the expected length).
+  - code_units includes or excludes a BOM unexpectedly (UTF-16 encoding can start with a 2‑byte BOM), shifting unit positions so the expected index is off by 1.
+  - code_units was built from Python characters (code points) rather than UTF-16 code units, and the caller is using a UTF-16 code unit index (or vice versa).
+- The immediate, provable cause is that index == 2 and len(code_units) == 2, so the guard at lines 35–36 correctly raised IndexError.
+
+What you can do to fix it (specific steps)
+1. Inspect what to_utf16_code_units actually returns:
+   - Add a quick debug print right after code_units is built (line 12 area):
+     print("len(code_units) =", len(code_units), "code_units =", code_units)
+   - Call the function with the same input that triggered the test and observe the output and lengths.
+
+2. If you used bytes from s.encode('utf-16') or 'utf-16-le':
+   - Remove the BOM if present, then convert pairs of bytes into 16‑bit integers:
+     b = s.encode('utf-16-le')      # use -le to avoid BOM, or strip it if present
+     code_units = [b[i] | (b[i+1] << 8) for i in range(0, len(b), 2)]
+   - This guarantees code_units is a list of 16‑bit units and length reflects the number of UTF‑16 units.
+
+3. If you built code_units by iterating characters (for ch in s: code_units.append(ord(ch))):
+   - Note Python’s str is sequences of Unicode code points. On some builds surrogate pairs are not exposed as two UTF‑16 units. If the caller expects UTF‑16 code unit indices, you must explicitly encode to UTF‑16 and build code_units as 16‑bit units (see step 2).
+
+4. Make the index-check intent explicit:
+   - If index is supposed to be a code-point index (character index), check against len(s), not len(code_units).
+   - If index is supposed to be a UTF‑16 unit index, ensure you construct code_units as actual 16‑bit units and then keep the guard at lines 35–36.
+
+5. Add a unit test to assert invariants:
+   - After building code_units, assert that every entry fits in 0..0xFFFF:
+     assert all(0 <= cu <= 0xFFFF for cu in code_units)
+   - And test examples that contain surrogate pairs (characters beyond U+FFFF) to confirm code_units length matches expected number of UTF‑16 units.
+
+Summary in plain terms
+- The function raised IndexError because index 2 does not exist in code_units (len(code_units) == 2). The root cause is that code_units was built in a way that does not match the index semantics the caller expects (likely wrong grouping of bytes, a BOM shift, or mixing code-point vs. UTF‑16 unit indexing). Fix by constructing code_units as real 16-bit UTF‑16 units (group bytes into 16-bit values and strip BOM), or by aligning the caller’s index to the representation you actually return.

@@ -1,0 +1,57 @@
+What happened (root cause)
+- At __init__ you set self._min_start_index = -1 (line 253) so the first time you see a data item you must record its index.
+- In the code that updates the minimum-start tracking (lines 340–349) you have two assignments to self._min_start_index:
+  - One inside the conditional that compares starts (line 347): if start < min_start: self._min_start_index = index
+  - One unconditional assignment immediately after (line 349): self._min_start_index = index
+- Because of the unconditional assignment on line 349 the _min_start_index is always set to the most recently processed index, overriding the conditional result. That makes _min_start_index end up as the last index processed (3 in your failing run) instead of the true minimum-start index (1). The downstream code that computes max_middle_index expects the correct min start index, so the test fails with Expected max_middle_index=1, got 3.
+
+Where it happens (exact lines / names)
+- Initialization: line 253 self._min_start_index = -1
+- Update block: lines 340–349
+  - self._min_start_index >= 0 check: line 340
+  - min_start_period = self.get_data_item(self._min_start_index).get_period(): line 341
+  - if isinstance(min_start_period, SimpleTimePeriod): line 342
+  - compare start and min_start: lines 346–347 (if start < min_start: self._min_start_index = index)
+  - unconditional overwrite: line 349 self._min_start_index = index
+- Accessor used elsewhere: get_min_start_index (lines 437–439) returns the wrong value because of the overwrite.
+
+Why this produces the specific failure
+- For the dataset that produced the test failure the earliest-start item was at index 1. Your code overwrote that with index 3 (the last processed item), so later logic computed max_middle_index based on the wrong min-start index and the assertion failed.
+
+Concrete fix (exact change to make)
+Replace the update block so you only set _min_start_index when:
+- it was not set yet (initial case), or
+- the new item's start is strictly earlier than the recorded min_start.
+
+Option A — simplest replacement (modify lines 340–349):
+
+Replace that whole block with:
+
+if self._min_start_index < 0:
+    self._min_start_index = index
+else:
+    min_start_period = self.get_data_item(self._min_start_index).get_period()
+    if isinstance(min_start_period, SimpleTimePeriod):
+        min_start = int(min_start_period.get_start().timestamp() * 1000)
+    if start < min_start:
+        self._min_start_index = index
+
+Option B — minimal edit (remove the unconditional overwrite)
+- Remove line 349 (self._min_start_index = index).
+- Ensure the initial-case (when _min_start_index == -1) sets the index; you can add an else branch:
+
+if self._min_start_index >= 0:
+    ...
+    if start < min_start:
+        self._min_start_index = index
+else:
+    self._min_start_index = index
+
+Test after change
+1. Run the failing unit test that produced "Expected max_middle_index=1, got 3".
+2. Run full test suite to confirm no other logic depends on the old (wrong) behavior.
+
+Why this fix works
+- It prevents the unconditional overwrite so _min_start_index is either (a) set on the first item seen, or (b) updated only when a strictly earlier start is found. That restores the intended invariant that _min_start_index points to the item with the smallest start timestamp.
+
+If you want, paste the current exact lines 340–349 and I will return a ready-to-apply patch.

@@ -1,0 +1,44 @@
+What happened (where): At add(self, newcode) (line 126) you pass a value that is -0.0, then at line 138 you call self.append(newcode). The test fails with "AssertionError: Expected -0.0, got 0" because the value that actually ends up stored/returned is 0 (no sign), not -0.0.
+
+Why it happens (root cause):
+- The code path that begins at add(self, newcode) converts or stores newcode in a form that loses the negative-zero sign. That conversion happens at the call to self.append(newcode) on line 138 (or inside whatever append method that resolves to).
+- The loss of the negative sign usually occurs when a float is coerced to an integer, stored in a container type that normalizes zeros (for example array('i'), an integer field, or a custom append that does int(newcode) or round/normalize), or when you override append to re-create the value in a way that discards the sign bit.
+- In Python, -0.0 == 0 is True, so a plain equality check will not detect the sign. The test is explicitly expecting a negative zero string/representation or a float with a negative sign bit, which is lost by the conversion.
+
+How to confirm exactly where it is lost (step-by-step checks)
+1. Right before line 138, add:
+   - print(repr(newcode), type(newcode))
+   - print(math.copysign(1.0, newcode))  # requires import math
+   This shows if newcode is actually -0.0 and whether its sign bit is negative.
+2. Inspect the implementation of append (the method resolved by self.append). If it’s the built-in list.append, it preserves the float. If it’s a custom method or a typed container (array, numpy, dataclass field, etc.), open that code and find any int(...) or float-to-int conversion or normalization.
+3. If append delegates to a container (array('i'), struct.pack(..., 'i'), or NumPy int dtype), print the stored value and its type after append to see what changed.
+
+Concrete likely causes to look for in append or upstream:
+- append is calling int(newcode) or otherwise casting (explicitly or implicitly) to an integer type.
+- append writes newcode into an array.array with integer typecode (e.g., array('i')), or a NumPy array with integer dtype, which converts -0.0 -> 0.
+- append serializes the value to a text representation and loses the leading '-' for zero (e.g., formatting code that collapses "-0.0" to "0").
+
+Precise fixes (pick the one that matches your situation)
+- If you accidentally cast to int:
+  - Change the cast to keep a float: store float(newcode) instead of int(newcode).
+  - Example change at or inside your append implementation: replace int(newcode) with newcode if you need a float stored, or with float(newcode) to be explicit.
+- If you are using a typed container (array, NumPy):
+  - Use a float dtype/container (array('d') or numpy.float64) so the sign bit is preserved.
+  - Example: array('d', ...) instead of array('i', ...).
+- If you need to detect/keep the sign of zero for an assertion:
+  - Preserve the float value and change the test to check sign with math.copysign(1.0, value) or struct.pack:
+    - math.copysign(1.0, value) == -1.0 means negative zero.
+    - or use struct.pack('!d', value) to inspect the sign bit if you must.
+- If append is a custom method that strips leading '-' when formatting:
+  - Fix the formatting code to use repr(value) or format(value, '.1f') as needed and avoid manual string stripping that removes '-' for zeros.
+
+Minimal code-change suggestions (line numbers referenced)
+- At add (line 126) or before calling append, ensure newcode is a float:
+  - newcode = float(newcode)
+  - then call self.append(newcode)
+- Inspect/modify append implementation (where it converts/stores the value). If you find int(newcode) or container initialized as integer type, change to float/double storage.
+
+Why the test reported "Expected -0.0, got 0"
+- The test expected a negative-zero representation or a float whose sign bit is negative. Because the code path converted the value into a form that equates to integer 0 (or a positive-zero float without the negative sign), the test output shows 0 instead of -0.0.
+
+If you paste the append method implementation (the method that self.append resolves to) I will point to the exact line to change and give the exact replacement code.

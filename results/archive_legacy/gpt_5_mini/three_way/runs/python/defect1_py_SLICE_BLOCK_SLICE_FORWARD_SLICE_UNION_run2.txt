@@ -1,0 +1,37 @@
+What happened (where it fails)
+- At line 396 you check the input minutes_offset is in 0..59:
+  - 396–397: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later you reuse the same variable minutes_offset to mean “total minutes” by combining it with hours_in_minutes:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- That reuse makes minutes_offset no longer represent a minutes‑within‑the‑hour value. If hours_in_minutes is large, minutes_offset becomes large and then:
+  - 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - can overflow / produce an out‑of‑range value and the code reaches line 407 and raises "Offset is too large".
+
+Why it fails (root cause)
+- The check at line 396 only validated the original minutes-within-hour value. After you mutate minutes_offset into a total-minute count, you never revalidate or use a new variable name. The code therefore multiplies a potentially very large minutes_offset and triggers the overflow check at line 407. In short: variable reuse causes a semantic bug — minutes_offset means two different things at different points, and you only validated it in the first meaning.
+
+Concrete steps to fix (clear, specific)
+1. Stop reusing minutes_offset for a different quantity. Compute the combined minutes in a new variable, e.g. total_minutes:
+   - Replace line 402/404 with:
+     - total_minutes = hours_in_minutes - minutes_offset   (or +, keep existing branch logic)
+2. Multiply the new variable and use it to construct the offset:
+   - 405 -> offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Optionally, add a validation on total_minutes before multiplying if you need a specific bound:
+   - if abs(total_minutes) > SOME_BOUND: raise ValueError("Offset is too large")
+4. Keep the original check at 396 for the input minute component; it’s still correct.
+
+Example replacement (lines around 402–405):
+- before:
+  - minutes_offset = hours_in_minutes - minutes_offset
+  - ... (or +)
+  - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- after:
+  - total_minutes = hours_in_minutes - minutes_offset
+  - ... (or +)
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- Using a separate variable preserves the original meaning of minutes_offset (0..59) and makes it clear you are multiplying the combined minute count. It prevents accidental reuse that bypassed validation and caused the overflow/“Offset is too large” error.
+
+If you want, paste the preceding lines where hours_in_minutes is computed and I’ll show an exact patch with correct variable names and any needed additional bounds checks.

@@ -1,0 +1,34 @@
+What happened (where it failed)
+- The failing test compared an expected -0.0 with an actual 0. The difference is the sign bit of zero: the test expected a negative zero, but the code produced a positive zero.
+- The relevant code path is in add(self, newcode) (lines 126–138). The method decides whether to insert a separating space before appending newcode by checking the first character of newcode (c = newcode[0]) and the last character already in the buffer (self.get_last_char()) at line 133.
+
+Why it happened (root cause)
+- The condition on line 133 uses self.is_word_char(c) and self.is_word_char(self.get_last_char()) to decide whether a space is needed. That condition treats the minus sign '-' (the first character of "-0.0") as NOT a "word character".
+- When the previous character in the buffer is a word character (for example a digit or identifier character), the code wants to insert a space to keep tokens separate. But because c == '-' is not seen as a word char, the logic sometimes fails to insert that space when it should.
+- As a result, tokens can be concatenated incorrectly (for example the output becomes something like "…0-0.0" or merges operator/operand in an unexpected way). Downstream code that parses or formats that merged token ends up producing a positive 0 instead of the expected negative zero. In short: wrong token separation caused a change in how the numeric value was parsed/formatted, losing the negative sign on zero.
+
+Exactly where to look
+- Line 132: c = newcode[0] — newcode starts with '-' for "-0.0".
+- Line 133: if (self.is_word_char(c) or c == '\\') and self.is_word_char(self.get_last_char()): — this check is deciding whether to insert a space. The clause treats '-' as not a word character and only special-cases backslash; it therefore misses cases where '-' should be treated specially.
+- Line 136–138: when the condition fails, append(newcode) (line 138) concatenates without the needed separator, causing the downstream parse/format to lose the negative sign on zero.
+
+How to fix it (concrete steps)
+1. Decide the intended tokenization: does a leading '-' in newcode count as a separate operator token (requires a separator) or should it attach to a number token?
+2. Change the condition on line 133 so it treats '-' correctly. Two clear options:
+   - Treat '-' as a word-separating character: add c == '-' to the check, e.g.
+     if (self.is_word_char(c) or c == '\\' or c == '-') and self.is_word_char(self.get_last_char()):
+     This forces a separating space when newcode starts with '-'.
+   - Or, more robustly, base the separator decision on character classes for both sides (last char class vs first char class) rather than only is_word_char. For example:
+     last = self.get_last_char()
+     if last and (is_alnum_or_underscore(last) and is_alnum_or_underscore(c)):
+         self.append(" ")
+     (Implement helper functions if needed.)
+3. Add unit tests that cover these cases:
+   - buffer ending with a word character + newcode starting with '-' (e.g., "foo" + "-0.0")
+   - newcode "-0.0" at start of buffer
+   - ensure formatted/parsing path preserves negative zero when expected
+
+Why these fixes work
+- They ensure the code inserts the needed space when tokens would otherwise run together. That prevents the parser/formatter later from misinterpreting token boundaries and losing the negative sign on zero.
+
+If you want, paste the implementation of is_word_char, get_last_char, and append — I can give the exact patch to line 133 and show a minimal unit test that reproduces and verifies the fix.

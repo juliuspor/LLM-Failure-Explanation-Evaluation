@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The code raises ValueError at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That exception is thrown while trying to build an offset (eventually returned by cls.for_offset_millis(...)).
+
+Why it fails (root cause)
+- The minutes validation at line 396 is inconsistent with the later code that expects minutes_offset sometimes to be negative.
+- Specifically:
+  - At line 396 you reject any negative minutes_offset.
+  - Later, at lines 402 and 404 the code manipulates minutes_offset with expressions that assume minutes_offset can be negative (minutes_offset = hours_in_minutes - minutes_offset and minutes_offset = hours_in_minutes + minutes_offset).
+  - Because the earlier check forbids negative minutes, valid offsets that use a negative minutes component (common when the sign is applied to the hour and minute together) cause the code to raise at line 396 instead of being handled by the later logic.
+- In short: the validation happens before (and contradicts) the sign/normalization logic. The code both forbids negative minutes and then expects negative minutes to be possible later — that's the direct cause of the error.
+
+Concrete fixes (step-by-step)
+Choose one of two safe fixes depending on intended semantics:
+
+Option A — Validate after applying the sign/normalization (preferred when sign for whole offset is parsed earlier):
+1. Remove or move the check at line 396 so that minutes_offset is validated only after the sign (or hour-based normalization) has been applied.
+2. After the code that computes the final minutes_offset (the logic around lines 402–405), replace the early check with:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   (so validation runs on the final normalized minutes value).
+
+Option B — Validate the absolute magnitude (if minutes_offset is allowed to be negative as "signed minutes" but magnitude must be <=59):
+1. Change the check at line 396 to inspect the absolute value:
+   if abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Leave the rest of the sign/normalization code as-is, so negative values are kept until later adjustments.
+
+Which to pick
+- If minutes_offset should only ever be 0..59 after applying the sign that belongs to the whole offset, use Option A.
+- If minutes_offset is parsed as a signed number (e.g., -30 for "-01:-30") and later combined with hours, use Option B.
+
+Why these fixes work
+- Moving validation until after sign/normalization (Option A) ensures you check the canonical minutes value the later code expects.
+- Checking abs(minutes_offset) (Option B) allows negative signed minutes but prevents values with magnitude >59 (which is invalid), matching the later arithmetic that assumes signed minutes are allowed.
+
+What to change in code (exact places)
+- Either remove lines 396–397 and add the same range check immediately after the block that adjusts minutes_offset at or after line 405, or
+- Replace lines 396–397 with:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Summary
+The code fails because it rejects negative minutes early (line 396) even though the later code (lines 402–405) expects minutes_offset can be negative and will normalize it. Move or change the validation so you validate the correct, normalized minutes value (or validate the absolute value) to fix the bug.

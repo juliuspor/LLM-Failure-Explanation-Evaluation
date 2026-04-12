@@ -1,0 +1,61 @@
+What happened (root cause)
+- At line 335 you set inferred_type = type(array). That takes the Python type of the container (e.g. list), not the element type. So inferred_type becomes list (the class) whenever array is non-None, not the element class you actually care about.
+- When both array and element are None (the test case that fails), your code falls through to inferred_type = object at line 340. You then call _copy_list_grow1(..., inferred_type) and later check at line 346:
+  if inferred_type == object and expected_type != object:
+    raise TypeError(...)
+  Because inferred_type is object and expected_type is str, that condition is true and you raise TypeError. The test expects ArrayUtils.add(None, None, expected_type=str) to succeed (return [None]) — not to throw.
+
+Why that produces the observed failure
+- The logic never uses the caller-provided expected_type when both array and element are None. That means you treat a null/unknown element list as object and then refuse to "cast" it to the caller's expected type (line 346), causing an unnecessary TypeError.
+- Separately, using type(array) (line 335) is wrong for inferring element type. If array is non-empty, you should inspect the array's elements (e.g. array[0] or better: determine a common element type), not the container's type (list).
+
+Exactly where to change (concrete steps)
+1. Prefer expected_type first when it is provided and meaningful:
+   - If expected_type is not None, use it as the inferred element type when you have no better information (especially when array and element are both None).
+   - This fixes the failing test where expected_type=str and both array and element are None: inferred_type should be str (or at least accept str as the intended element type), not object.
+
+2. When array is not None, infer element type from the array contents, not from type(array):
+   - If array has at least one element: inferred_type = type(array[0])
+   - If array is empty, fall back to expected_type (if provided) or to element (if non-None) or to object only as last resort.
+
+3. When element is not None and no array info is available, use type(element).
+
+4. The TypeError check at lines 346–349 should only run when you truly inferred object because of absent information and the caller requested a concrete expected_type that is incompatible; but in practice if expected_type is provided you should allow building a list of that expected_type even if element is None. So change the condition to avoid raising here for the case inferred from nothing but expected_type is present.
+
+Concrete corrected inference algorithm (pseudo-steps you can implement)
+- if expected_type is not None:
+    inferred_type = expected_type
+  elif array is not None:
+    if len(array) > 0:
+      inferred_type = type(array[0])
+    else:
+      # empty list, no element info
+      inferred_type = object if element is None else type(element)
+  elif element is not None:
+    inferred_type = type(element)
+  else:
+    inferred_type = object
+
+- Remove or relax the raise TypeError block so that if expected_type is given you do not raise when inferred_type is object — instead prefer expected_type above so you never get here.
+
+Example minimal corrected logic to replace lines 335–347:
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None:
+        inferred_type = type(array[0]) if len(array) > 0 and array[0] is not None else (type(element) if element is not None else object)
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+    # no TypeError here for expected_type provided
+
+Why this fixes the failing test
+- For ArrayUtils.add(None, None, expected_type=str) the corrected code sets inferred_type = str and does not raise TypeError; it will create a list sized 1 and insert None, returning [None] as the test expects.
+- For other cases (non-empty array, element present, etc.) you infer element types properly because you look at array[0] or element, not at the list object itself.
+
+Summary of lines to change
+- Replace line 335 (inferred_type = type(array)) with element-based inference (array[0] or fallback).
+- Use expected_type (when provided) before falling back to object (to cover the null/null case).
+- Remove/adjust the TypeError check at lines 346–349 so it doesn't reject the expected_type use-case.
+
+If you want, I can produce a drop-in corrected version of the add(...) function implementing the steps above.

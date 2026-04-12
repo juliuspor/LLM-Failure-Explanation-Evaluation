@@ -1,0 +1,50 @@
+What happened (root cause)
+- The loop that advances pos after a translator consumes codepoints calls code_point_at(code_units, pos) without checking whether pos is already at or beyond the end of code_units. That call raises IndexError when pos == len(code_units).
+- Concretely, in translate:
+  - After a translator returns consumed > 0, this code runs:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  - code_point_at checks index against len(code_units) and raises "String index out of range: 2" when pos == 2 (see the check at slice lines 35–36). That is exactly what your test hit when the last codepoint was a surrogate pair followed by another char.
+
+Why this occurs with surrogate pairs
+- to_utf16_code_units converts the Python string into UTF-16 code units. A single supplementary character (emoji) becomes two code units (a surrogate pair).
+- When a translator indicates it consumed one codepoint that was a surrogate pair, the loop must advance pos by two code units. The code attempts to do that by repeatedly calling code_point_at at the current pos to figure out char_count and then adding it to pos.
+- If pos was exactly at the last code unit (or gets moved to len(code_units)) and the loop still tries another iteration (because consumed claims more codepoints than remain), code_point_at is called with index == len(code_units) and raises IndexError.
+
+Where it happens in your code (line/variable references)
+- The failing call path is in translate:
+  - variable pos (line where pos initialized)
+  - after consumed = self.translate_codepoint(...), when consumed > 0 the for-loop (the fragment shown)
+  - code_point_at checks index (slice lines 35–36) and raises when index >= len(code_units)
+- The exception message "String index out of range: 2" indicates code_point_at was called with index==2 while len(code_units)==2.
+
+How to fix it (specific steps)
+1. Guard before calling code_point_at:
+   - Inside the for pt in range(consumed): loop, check if pos >= length (len(code_units)). If so, stop advancing (break) instead of calling code_point_at.
+   - Example fix:
+     for pt in range(consumed):
+         if pos >= length:
+             break
+         cp = code_point_at(code_units, pos)
+         pos += char_count(cp)
+2. Alternatively compute and advance safely:
+   - Compute cp = code_point_at(code_units, pos) once per iteration only when pos < length; do not call code_point_at with pos == length.
+3. Also consider validating translator behavior:
+   - If a translator returns consumed larger than the number of remaining codepoints, either treat that as an error or clamp advancement to remaining code units. Adding the guard above prevents the IndexError and makes translate robust to translators that claim to consume codepoints at the very end.
+
+Why these fixes work
+- They prevent code_point_at from being invoked with an out-of-range index (the immediate cause of IndexError).
+- They correctly advance pos by the actual codepoint length (1 for BMP, 2 for surrogate pairs) only while there are code units left to read.
+
+Minimal patch (pseudocode)
+Replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+With:
+    for pt in range(consumed):
+        if pos >= length:
+            break
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+This addresses the failing test where a surrogate pair is followed by another character and prevents "String index out of range" from occurring.

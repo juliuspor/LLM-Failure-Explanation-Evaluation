@@ -1,0 +1,52 @@
+What happened (what failed, where)
+- The code raised ValueError: "Minutes out of range: -15" at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The check found minutes_offset == -15 and treated that as invalid, so it raised the error.
+
+Why it happened (root cause)
+- A negative minutes_offset (-15) was produced earlier (for example by applying a sign to the minutes part of a timezone or offset). The code at lines 396–397 was written as if minutes_offset must always be non‑negative (0..59), but earlier logic already applied a negative sign. In short:
+  - Earlier code: minutes_offset = sign * int(minutes_str)  (so minutes_offset can be negative)
+  - Later check: if minutes_offset < 0 or minutes_offset > 59: ...  (this flags negative minutes as invalid)
+- The check and the earlier sign application disagree about whether minutes_offset should carry the sign. That disagreement is the root cause.
+
+Exactly where to look
+- The variable name is minutes_offset (used at lines 396–397).
+- Find the code that computes minutes_offset just before this check — likely something like sign = -1 or +1 based on a leading '+'/'-' and minutes_offset = sign * int(minutes_part). That earlier assignment is why minutes_offset is negative.
+- The error arises because the validation expects an unsigned minutes value but the variable is signed.
+
+Concrete fixes (pick one, with exact changes)
+Option A — keep minutes_offset signed, but validate its absolute value
+- Replace the current validation at lines 396–397 with a check that uses abs():
+  Replace:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  With:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Why: This accepts -15 when the sign is handled elsewhere, but still rejects values like -60 or 75.
+
+Option B — make minutes_offset always non-negative, validate, then apply sign separately
+- Change the code that computes minutes_offset so it never includes the sign, then validate, then combine with sign. For example:
+  Before (problematic):
+    minutes_offset = sign * int(minutes_str)
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  After (explicit steps):
+    minutes_val = int(minutes_str)                 # always non-negative 0..59
+    if minutes_val < 0 or minutes_val > 59:
+        raise ValueError(f"Minutes out of range: {minutes_val}")
+    minutes_offset = sign * minutes_val            # apply sign after validation
+- Why: This makes intent clear: minutes are validated as a magnitude 0..59, sign is handled separately.
+
+Tests to add (explicit)
+- Test with a negative offset minutes (e.g. sign = -1, minutes_str = "15") to confirm it no longer raises:
+  - Input producing minutes_offset = -15 should now pass validation.
+- Test boundary values:
+  - minutes_str = "00" => allowed
+  - minutes_str = "59" => allowed
+  - minutes_str = "60" or "-60" => should still raise ValueError
+- Test positive offsets still behave the same.
+
+Summary
+- The code failed because minutes_offset already carried a negative sign but the validation assumed it was non‑negative. Fix either the validation (use abs()) or compute/validate the magnitude before applying the sign. Either change will stop the ValueError for valid inputs like -15 while still rejecting out‑of‑range minutes.

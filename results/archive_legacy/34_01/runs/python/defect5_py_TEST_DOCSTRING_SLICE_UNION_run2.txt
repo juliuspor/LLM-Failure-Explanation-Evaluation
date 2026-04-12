@@ -1,0 +1,58 @@
+What happened
+- Test call: ArrayUtils.add(None, None, expected_type=str)
+- The code reaches the branch where it must decide an element type to use for the returned list.
+- At line 340 the code sets inferred_type = object (because element is None).
+- At lines 346–347 the code checks:
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+  Because inferred_type == object and expected_type == str, it raises TypeError instead of returning [None].
+- That is why the test fails: the implementation treats "inferred_type == object" as a type conflict with any non-object expected_type and raises, even when the element is None and the docstring says the function should return List[object] in that case.
+
+Why this is wrong (root cause)
+- The logic assumes inferred_type == object always represents a real type mismatch. But when element is None (and array is None), inferred_type is correctly object because there is no concrete element to infer from.
+- The docstring says: if the element is None, return type should be List[object] (unless element itself supplies a type). The code instead refuses when an expected_type other than object is provided, so it enforces the expected_type even though there is no element to validate against.
+- In short, the code conflates "we couldn't infer a type because element is None" (acceptable) with "we inferred object and therefore must conflict with expected_type" (not acceptable).
+
+Where this happens (exact variables/lines)
+- variable: inferred_type
+- variable: element
+- variable: expected_type
+- lines from slice:
+  - 337: branch context (previous checks)
+  - 340: inferred_type = object  (set when element is None)
+  - 346–347: if inferred_type == object and expected_type != object: raise TypeError(...)
+
+Concrete fixes (step-by-step)
+Choose one of these fixes depending on intended API:
+
+Fix A — Prefer expected_type when element is None (recommended)
+1. When array is None and element is None, set inferred_type to expected_type (if provided) instead of object:
+   - Replace the assignment at line 340 with:
+       if element is None:
+           inferred_type = expected_type if expected_type is not None else object
+   - Keep the subsequent type checks, but they will no longer raise because inferred_type will match expected_type.
+
+Fix B — Allow object inference when element is None (minimal change)
+1. Change the raise condition so it does not treat inferred_type == object as a mismatch when there is no concrete element:
+   - Replace
+       if inferred_type == object and expected_type != object:
+           raise TypeError(...)
+     with
+       if inferred_type == object and expected_type != object and array_has_elements:
+           raise TypeError(...)
+   - You must ensure array_has_elements is true only if array is not None and contains at least one element. This prevents raising when both array and element are None.
+
+Fix C — Explicitly accept None-as-element cases
+1. Add a branch before the current check:
+       if element is None and (array is None or len(array) == 0):
+           # No concrete type information; follow docstring: produce List[object]
+           inferred_type = object
+           # do not raise even if expected_type != object
+2. Continue with rest of logic for other cases.
+
+Which to pick
+- If the API should honor expected_type as a hint for the returned list's element type even when element is None, use Fix A.
+- If the API should strictly follow the docstring and return List[object] when element is None regardless of expected_type, use Fix B or C.
+
+Summary
+The code raises TypeError because inferred_type is set to object when element is None, and that is treated as an incompatible type against a non-object expected_type. The correct behavior is to treat "element is None" specially: either use expected_type as the inferred type, or skip the mismatch check when there is no concrete element to validate. Apply one of the concrete code changes above at lines ~340–347 to fix it.

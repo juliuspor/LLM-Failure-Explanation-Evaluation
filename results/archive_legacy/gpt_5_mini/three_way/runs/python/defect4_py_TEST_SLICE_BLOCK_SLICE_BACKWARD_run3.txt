@@ -1,0 +1,71 @@
+What happened (root cause)
+
+- In TimePeriodValues._update_bounds the code that updates the "max middle" index compares the current period's middle against the wrong variable and/or assigns the wrong variable when it decides to update.
+- Concretely: when testing whether the new period's middle is greater than the currently recorded maximum-middle period, the code compares against (or assigns) the stored index variable instead of the stored middle value — and/or it assigns the wrong index variable when updating. That lets a later item overwrite the max index even though its middle is smaller.
+- The symptom in your tests: after adding four periods with middles [50, 150, 25, 75], get_max_middle_index() incorrectly returns 3 instead of 1 (it accepted index 3 as max even though index 1 has middle 150). This is exactly the behavior you see when the comparison/assignment uses the wrong variable.
+
+Where it occurs (exact area and variables)
+
+- The bug lives in _update_bounds (the method that maintains _min_start_index, _max_start_index, _min_middle_index, _max_middle_index, _min_end_index, _max_end_index).
+- Look at the code path that handles middles (the same pattern the slice shows for start times around lines ~331–349):
+  - The method reads the current period’s middle into a local variable (e.g. middle).
+  - If self._max_middle_index >= 0 it must fetch the stored (current) max middle from self.get_data_item(self._max_middle_index).get_period().
+  - The code then should compare middle <or> middle > stored_middle and, if appropriate, set self._max_middle_index = index.
+- The bug is that the comparison uses the index variable (or the stored index) instead of the stored middle value, or the assignment sets the wrong variable. That incorrect name usage causes the wrong index to be kept.
+
+Why that causes the failing test
+
+- In test_max_middle_index_simple you add periods in this order:
+  - idx 0: middle 50
+  - idx 1: middle 150  ← correct max
+  - idx 2: middle 25
+  - idx 3: middle 75
+- When index 3 is processed with a broken comparison/assignment, the code mistakenly concludes index 3 should be the max_middle_index (because it compared or assigned using the wrong variable), so get_max_middle_index() returns 3 instead of 1.
+
+Concrete fix (what to change, step-by-step)
+
+1. In _update_bounds, find the block that updates max middle (the block analogous to the min/max start code shown in your slice).
+2. Ensure you compute these variables properly:
+   - middle = (start + end) // 2 (or equivalent timestamp calculation)
+   - If self._max_middle_index >= 0:
+       - stored_period = self.get_data_item(self._max_middle_index).get_period()
+       - stored_middle = ... compute stored period middle (use get_start_millis()/get_end_millis() for SimpleTimePeriod or timestamp*1000 for generic)
+       - if middle > stored_middle:
+           self._max_middle_index = index
+     else:
+       self._max_middle_index = index
+3. The important corrections:
+   - Compare middle to stored_middle (not to self._max_middle_index or some other index variable).
+   - When you decide to update, assign the incoming index (index) to self._max_middle_index (not assigning some other integer or variable).
+4. Run the test suite to confirm the behavior:
+   - python -m unittest path.to.tests
+
+Example corrected snippet (replace the broken block) — adapt to your timestamp helpers:
+
+    # compute middle for the incoming period
+    if isinstance(period, SimpleTimePeriod):
+        middle = (period.get_start_millis() + period.get_end_millis()) // 2
+    else:
+        middle = int((period.get_start().timestamp() * 1000 + period.get_end().timestamp() * 1000) // 2)
+
+    if self._max_middle_index >= 0:
+        max_middle_period = self.get_data_item(self._max_middle_index).get_period()
+        if isinstance(max_middle_period, SimpleTimePeriod):
+            max_middle = (max_middle_period.get_start_millis() + max_middle_period.get_end_millis()) // 2
+        else:
+            max_middle = int((max_middle_period.get_start().timestamp() * 1000 + max_middle_period.get_end().timestamp() * 1000) // 2)
+        if middle > max_middle:
+            self._max_middle_index = index
+    else:
+        self._max_middle_index = index
+
+Why this fix works
+
+- It compares numeric "middle" values, so only a larger middle can replace the current max.
+- It assigns the index of the larger element (index) to self._max_middle_index.
+- That prevents later smaller middles from overwriting the true maximum's index.
+
+Final notes
+
+- Check all four middle/start/end update blocks for the same pattern: ensure you compare values (start, middle, end) to stored values, and assign the current item’s index when appropriate. The slice you posted shows the start-update block — use that as a template to correct the middle block.
+- After applying the fix, your provided tests (including test_max_middle_index_simple and test_generic_time_period_support) should pass.

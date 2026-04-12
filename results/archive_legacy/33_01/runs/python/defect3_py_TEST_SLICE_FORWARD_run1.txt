@@ -1,0 +1,43 @@
+What happened (where it fails)
+- The failure shows up when translate_string is given the character '\U0001F630' (code point U+1F630). The code fragment runs at these lines:
+  - line 38: high = code_units[index]
+  - line 39: if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+  - line 41: if 0xDC00 <= low <= 0xDFFF:
+  - line 43: return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  - line 44: return high
+- The code assumes code_units contains UTF‑16 16‑bit code units (so a character above U+FFFF would be represented as a high surrogate followed by a low surrogate). It checks for a high surrogate (line 39) and, if present, reads the next code unit and composes the code point (line 43). Otherwise it returns high (line 44).
+
+Why that assumption is wrong here (root cause)
+- In Python 3 a str stores Unicode code points, not UTF‑16 code units. When you iterate or index a Python str you get complete characters (code points). For the input '\U0001F630' a single index yields the integer ord(character) == 0x1F630, not a 16‑bit high surrogate in the 0xD800..0xDBFF range.
+- Because high becomes 0x1F630, the surrogate check at line 39 fails, so the code takes the "no surrogate" path (line 44). The function is written for a different internal representation (UTF‑16 code units), so the logic that expects surrogate pairs never runs for a Python str and later processing (outside the slice you showed) ends up producing the wrong output.
+
+Consequence seen in your test
+- The code never sees the expected surrogate pair and therefore mishandles characters outside the BMP. That causes translate_string('\U0001F630') to produce a wrong result (not equal to '\U0001F630').
+
+How to fix it (concrete steps)
+Pick one of these fixes depending on what the rest of the code expects:
+
+1) If you want to work with Python code points (recommended)
+- Ensure code_units is derived from the string as code points: code_units = [ord(ch) for ch in s]
+- Replace the surrogate-pair logic with code that handles code points directly:
+  - If high <= 0xFFFF: treat as BMP code point.
+  - If high > 0xFFFF: treat as an already-combined code point (no surrogate composing needed).
+- Example change around the shown lines:
+  - high = code_units[index]
+  - if high <= 0xFFFF:
+      (existing BMP handling)
+    else:
+      return high
+
+2) If you must operate on UTF‑16 code units (rare in Python)
+- Convert the string into UTF‑16 code units explicitly, then run the existing surrogate-pair logic:
+  - code_units = list(code_units_from_utf16(s)), e.g.:
+    - utf16_bytes = s.encode('utf-16-le')  # little-endian without BOM
+    - code_units = [utf16_bytes[i] | (utf16_bytes[i+1] << 8) for i in range(0, len(utf16_bytes), 2)]
+  - Then your existing surrogate detection/composition logic will see real 16‑bit surrogates and work correctly.
+
+Which to choose
+- Prefer option (1). Python strings already give you full Unicode code points; handling them that way avoids unnecessary encoding/decoding and prevents this surrogate-mismatch bug.
+
+Summary in one sentence
+- The code is written for UTF‑16 16‑bit code units (expecting surrogate pairs) but is being fed Python str code points; index yields a full code point like 0x1F630, so the surrogate checks at lines 39–43 never run and the character is mishandled—fix by using ord(ch) per character or by explicitly working with UTF‑16 code units as shown.

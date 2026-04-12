@@ -1,0 +1,58 @@
+What happened (where it failed)
+- The failing assertion checks get_max_middle_index() and expected 1 but the getter returned 3.
+- The getter is implemented at slice_union.py lines 449–451:
+  - get_max_middle_index(self) -> int:
+  -     return self._max_middle_index
+- That means _max_middle_index was set to 3 earlier during the “Update the index values for the maximum and minimum bounds” code (the code described by your docstring), but the test expected it to be 1.
+
+Why it happened (root cause)
+- The code that updates self._max_middle_index is using the wrong comparison or wrong inputs so it stores 3 instead of 1. Typical, concrete mistakes that produce exactly this symptom:
+  1. Off-by-one: the updater uses an inclusive boundary where the test expects an exclusive boundary (e.g. using index instead of index - 1, or failing to clamp to period-1).
+  2. Wrong comparison direction: the updater uses "if new_index < self._max_middle_index: self._max_middle_index = new_index" when it should pick the maximum (or vice versa). If initial value or previous updates are reversed, that yields a larger-than-expected value like 3.
+  3. Wrong variable used: the updater uses the loop variable period instead of the provided index (or uses an uninitialized or stale attribute), so it assigns a value (3) that doesn’t reflect the intended index (1).
+  4. Missing reset: when recalculating bounds you didn’t reset self._max_middle_index before combining steps, so an old value (3) remained and was not reduced to 1.
+
+Where to look (exact places to inspect)
+- The method that performs “Update the index values for the maximum and minimum bounds” (the function that assigns to self._max_middle_index). Search for assignments to _max_middle_index in that function and in any helper it calls.
+- Any loop that iterates over period or index values inside that function. Pay special attention to comparisons (>, <, >=, <=) and any use of period vs index.
+- Initialization of self._max_middle_index before the update (is it set to +inf, -inf, None, 0, or a stale value?).
+- The test that asserts expected=1 — confirm whether it expects an inclusive/exclusive convention or clamped value (period length).
+
+Concrete steps to fix (actionable list)
+1. Locate the updater:
+   - Open the function mentioned in the docstring (the code that “Update the index values for the maximum and minimum bounds”) and find every line that assigns to self._max_middle_index.
+2. Add quick runtime checks to observe what’s happening:
+   - Temporarily insert logging or asserts right before the assignment, e.g.
+     - log current self._max_middle_index, new_index, period.
+     - assert 0 <= new_index < period if the index must be in [0, period-1].
+3. Verify comparison direction:
+   - If you intend _max_middle_index to be the maximum seen index, ensure you use:
+     - if new_index > self._max_middle_index: self._max_middle_index = new_index
+   - If you intend it to be the minimum, use < accordingly.
+   - If you intended the maximum middle to be the smallest middle index (test expects 1), confirm naming — maybe you are computing the wrong metric.
+4. Fix off-by-one / clamping:
+   - If index is an end-exclusive value, clamp with min(period - 1, index - 1) as appropriate.
+   - Explicitly enforce the valid range:
+     - new_index = max(0, min(period - 1, new_index))
+5. Reset before recalculation:
+   - If you recalculate over a fresh set, initialize self._max_middle_index to a sensible start (e.g. -inf or 0 depending on semantics) before the loop so old values don’t leak into the result.
+6. Re-run tests:
+   - Run the test that asserted expected=1 and check the logged values to confirm the updater now produces 1.
+7. Remove temporary logs and add unit tests:
+   - Add a unit test that covers the boundary case that failed (index=1 expected) and a test for index at the other end (e.g. 0 and period-1).
+
+Example of a likely concrete bug and fix (apply if it matches your code)
+- Bug: updater used inclusive end index without clamping:
+  - self._max_middle_index = index
+  - But index was calculated as an exclusive end, so index=3 corresponds to last valid middle index 1.
+- Fix: convert exclusive end to inclusive index:
+  - self._max_middle_index = index - 2  (example; compute the correct transform for your algorithm)
+  - Or better: compute new_index explicitly from inputs and clamp:
+    - new_index = compute_middle_index(period, index)
+    - new_index = max(0, min(period - 1, new_index))
+    - self._max_middle_index = max(self._max_middle_index, new_index)  # if max is desired
+
+Why this will stop the assertion
+- Once the updater uses the correct input (index vs period), correct comparison direction, and proper clamping/reset, self._max_middle_index will be set to the intended value (1) and get_max_middle_index() will return 1, satisfying the test.
+
+If you paste the updater function (the code that assigns _max_middle_index), I will point exactly which line to change and give the minimal patch.

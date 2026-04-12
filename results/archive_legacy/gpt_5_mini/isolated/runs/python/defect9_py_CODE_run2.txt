@@ -1,0 +1,62 @@
+What happens
+- The failure occurs in the "get a good guess on the size of the result buffer" loop that starts right after the comment:
+  # get a good guess on the size of the result buffer so it doesnt have to double if it goes over a bit
+- Specifically this line raises when either array element is None:
+  greater = len(replacement_list[i]) - len(search_list[i])
+- If search_list[i] or replacement_list[i] is None, len(None) raises TypeError: "'NoneType' object has no len()". That makes replace_each crash before it ever does any replacing.
+
+Why it happens (root cause)
+- Earlier in the function you already treat None and empty entries as "skip" in the match-finding loops:
+  for i in range(search_length):
+      if ( no_more_matches_for_repl_index[i]
+           or search_list[i] is None
+           or len(search_list[i]) == 0
+           or replacement_list[i] is None):
+          continue
+- But the size-estimate loop does not include that same guard. It assumes every search_list[i] and replacement_list[i] is a str and calls len(...) unconditionally. If either element is None (or another non-string without len), the function throws a TypeError at that exact loop.
+
+Where in code (precise)
+- The problematic code block begins at:
+    increase = 0
+  and the bug line is:
+    greater = len(replacement_list[i]) - len(search_list[i])
+- This is earlier than the main replacement loop and therefore the function fails before doing replacements.
+
+How to fix it (concrete steps)
+1. Add the same null/empty checks inside the increase loop as used in the match-finding loops. Example replacement for that loop:
+    for i in range(search_length):
+        if search_list[i] is None or len(search_list[i]) == 0 or replacement_list[i] is None:
+            continue
+        greater = len(replacement_list[i]) - len(search_list[i])
+        if greater > 0:
+            increase += 3 * greater
+    increase = min(increase, len(text) // 5)
+
+2. Alternative: normalize/filter the inputs before any loops:
+   - Build filtered lists that exclude entries where search is None/empty or replacement is None, then use those filtered lists everywhere.
+   - That avoids repeating the guard checks and is slightly cleaner.
+
+3. Do not use try/except to swallow TypeError here — explicitly checking makes the behavior predictable and matches the other loops.
+
+Suggested minimal patch (apply at the existing increase loop)
+Replace:
+    for i in range(search_length):
+        greater = len(replacement_list[i]) - len(search_list[i])
+        if greater > 0:
+            increase += 3 * greater  # assume 3 matches
+with:
+    for i in range(search_length):
+        if search_list[i] is None or len(search_list[i]) == 0 or replacement_list[i] is None:
+            continue
+        greater = len(replacement_list[i]) - len(search_list[i])
+        if greater > 0:
+            increase += 3 * greater  # assume 3 matches
+
+How to verify
+- Write tests that pass search_list or replacement_list containing None values and confirm no exception is raised and replacements behave as expected.
+- Examples to test:
+  - text="a", search_list=["a", None], replacement_list=["b", "x"]
+  - text="a", search_list=[None], replacement_list=["x"]
+
+Summary
+The loop computing "increase" assumes every element is a string and calls len(...) unconditionally. When any search_list[i] or replacement_list[i] is None, len(None) raises a TypeError. Add the same null/empty guards used elsewhere (or filter the lists first) to fix the failure.

@@ -1,0 +1,48 @@
+What happened (root cause)
+- In TimePeriodValues._update_bounds the code compares the new period's numeric bound (start/middle/end in milliseconds) to the stored bound value, but uses the stored *index* variable by mistake in the comparison instead of the stored numeric bound. Concretely, the comparison uses a variable like self._max_middle_index (an index, default -1) rather than the numeric value of the current maximum middle (e.g. max_middle). Because an index (often -1 or a small integer) is compared to a millisecond timestamp, the first comparison almost always succeeds and the wrong index ends up being treated as the bound value. That leads get_max_middle_index() returning the wrong index (3 in your failing run instead of 1).
+
+Where it occurs (specific names / lines)
+- The pattern occurs in _update_bounds where the code:
+  - computes start, middle, end for the incoming period,
+  - then checks e.g. if self._min_start_index >= 0: min_start_period = self.get_data_item(self._min_start_index).get_period() ...
+  - but for the "max middle" case the code compares the incoming middle to self._max_middle_index (the index) rather than to the stored "max middle" value extracted from the period at self._max_middle_index.
+- From your slice: lines around 340–347 show the start-case: the code obtains min_start_period from self._min_start_index, extracts min_start and then does if start < min_start: self._min_start_index = index. The middle-case was implemented analogously, but the comparison used the wrong variable (the index) instead of the numeric stored bound.
+
+Why that causes the failing test
+- Example from your test_max_middle_index_simple:
+  - The periods have middles [50, 150, 25, 75] at indices [0,1,2,3].
+  - If the code compares 150 (new middle) to self._max_middle_index (initially -1) rather than the stored max-middle value, 150 > -1 is true and it sets self._max_middle_index = 1 (correct on first set). Later when a larger index is appended, if the comparison is again against the index value instead of the numeric middle, the logic may treat an index (e.g. 1 or 2) as the bound and a subsequent middle like 75 > 1 is true and will set the stored index to that later index, corrupting the result. That explains why get_max_middle_index() returned 3 (the last comparison overwritten with the wrong test) instead of 1.
+
+Exactly what to change (step-by-step)
+1. For each bound (min_start, max_start, min_middle, max_middle, min_end, max_end), keep two things straight:
+   - the stored index variable (e.g. self._max_middle_index), and
+   - the numeric bound extracted from the period at that index (e.g. max_middle = period_at_index.get_middle_millis() or equivalent).
+2. When comparing the incoming numeric value (current_middle) do NOT compare it to the stored index variable. Instead:
+   - if the corresponding index is >= 0, read the stored period via get_data_item(self._max_middle_index).get_period(), extract the numeric stored bound (max_middle), then compare current_middle to max_middle.
+   - only update self._max_middle_index = index when the numeric comparison indicates the new period is larger/smaller as appropriate.
+
+Minimal code example (fix pattern you should apply)
+- Replace the wrong pattern (pseudo, wrong):
+    if self._max_middle_index >= 0:
+        if middle > self._max_middle_index:       # WRONG: comparing to index
+            self._max_middle_index = index
+    else:
+        self._max_middle_index = index
+- With the correct pattern:
+    if self._max_middle_index >= 0:
+        stored = self.get_data_item(self._max_middle_index).get_period()
+        if isinstance(stored, SimpleTimePeriod):
+            stored_middle = stored.get_middle_millis()
+        else:
+            stored_middle = int(stored.get_start().timestamp() * 1000 + (stored.get_end().timestamp() * 1000 - stored.get_start().timestamp() * 1000) // 2)
+        if middle > stored_middle:
+            self._max_middle_index = index
+    else:
+        self._max_middle_index = index
+
+Notes and verification
+- Apply this pattern to the min/max start/middle/end sections.
+- Run your tests after the change. The failing test test_max_middle_index_simple should then pass: get_max_middle_index() will correctly return 1.
+- The bug is purely the wrong variable used in the comparison (index vs numeric bound). Once you compare numbers to numbers and indices to indices only where appropriate, behavior is correct.
+
+If you want, I can produce a full patched _update_bounds implementation (with the exact lines replaced) given the source file contents.

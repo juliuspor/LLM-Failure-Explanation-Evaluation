@@ -1,0 +1,52 @@
+What happens (root cause)
+- Line with inferred_type = type(array) is wrong for getting the element/component type. type(array) returns the list class (e.g. <class 'list'>), not the type of elements inside the list. Because of that the function never reliably learns the element type from a non-empty list.
+- There is a second problem when element is None: the code sets inferred_type = object (line else: inferred_type = object). That makes the later check (if inferred_type == object and expected_type != object: raise TypeError(...)) raise a TypeError any time the caller passed expected_type but element was None (or both array and element were None).
+- The exception you see ("Cannot cast object list to str list ...") is raised exactly at that check (the if expected_type is not None: ... raise TypeError block). In your failing call inferred_type is object (set because element was None or because the component type was never determined) and expected_type is str, so the code raises the error even though the real problem is that the code used type(array) instead of the element type and treated None as “object” and then rejected it.
+
+Where it occurs (exact lines / variables)
+- inferred_type = type(array) — this gives <class 'list'>, not e.g. <class 'str'> (wrong source of element type).
+- inferred_type = object — this is used when element is None (so no element type was discovered).
+- new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — uses the wrong component type to create the new list.
+- The TypeError is raised in:
+  if expected_type is not None:
+      if inferred_type == object and expected_type != object:
+          raise TypeError(...)
+
+Why that logic is incorrect
+- You want the component/element type (like str), not the container type (list). type(array) will never give the element type.
+- Treating a None element as "object" and then forbidding expected_type != object is too strict: None is a valid element for any typed list and does not imply you should fail.
+- The check conflates "we don't know the element type" (object) with "this is an actual object-list that cannot be cast", and immediately aborts when an expected_type was supplied.
+
+Concrete fixes (step-by-step)
+1. Determine a real element/component type:
+   - If expected_type is provided, prefer it as the element/component type.
+   - Else if element is not None, use type(element).
+   - Else if array is not None and non-empty, inspect a representative element from array (e.g. array[0] or scan until you find a non-None element) and use its type.
+   - Else, fall back to object (only when you truly cannot infer a type).
+
+   Example order:
+   inferred_type = expected_type or (type(element) if element is not None else None)
+   if inferred_type is None and array:
+       for e in array:
+           if e is not None:
+               inferred_type = type(e); break
+   if inferred_type is None:
+       inferred_type = object
+
+2. Don’t raise just because inferred_type == object and expected_type != object when element is None. Instead:
+   - If expected_type is provided and you can prove a runtime element conflicts with expected_type, raise.
+   - If all you have is None/unknown, allow creation and insertion of None (no TypeError). Only raise when you actually try to insert a non-None element whose type is incompatible with expected_type.
+
+3. Fix use of type(array): remove inferred_type = type(array). That line is the direct bug — it does not do what you need.
+
+Minimal corrected sketch (phrases, not full code):
+- Use expected_type first if present.
+- If expected_type is None, use type(element) if element is not None.
+- If both are None, try to find a non-None element inside array and use its type.
+- Only when you have a concrete type and the element is non-None check isinstance(element, inferred_type) and raise on mismatch.
+
+Why this will stop the TypeError you saw
+- You will no longer treat unknown element-type as object and then immediately raise when expected_type is provided.
+- You will derive the true element type (or use expected_type) and only raise when a concrete mismatch exists, not when element is None.
+
+If you want, paste the actual call site (values of array, element, expected_type) and I’ll give the exact corrected lines to drop into your function.

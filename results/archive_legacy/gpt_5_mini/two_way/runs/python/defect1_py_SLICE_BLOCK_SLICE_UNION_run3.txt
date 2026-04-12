@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The failure occurs at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- You see a ValueError being raised with messages like "Minutes out of range: -30" when parsing negative time zone offsets (for example "-00:30" or "-2:30").
+
+Why it fails (root cause)
+- minutes_offset at the point of that check can be negative when the overall offset sign is negative. The code is treating minutes_offset as if it were always an unsigned 0–59 value, but earlier code applied the sign (or parsed a signed value) so minutes_offset may already be negative.
+- The check rejects negative minutes (minutes_offset < 0) even though negative minute values are valid when the hour sign is negative. Later code (lines 402 and 404) expects to combine hours and minutes taking sign into account:
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+  404 |                 minutes_offset = hours_in_minutes + minutes_offset
+  That manipulation assumes minutes_offset has the parsed magnitude (or that sign is handled separately). Because the sign handling and the range check are inconsistent, legitimate inputs like "-00:30" trigger the ValueError at 396–397.
+
+Exactly where to change it and how (step-by-step)
+1. Stop validating the signed minutes range. Validate the magnitude (0–59) before applying the sign, or validate abs(minutes_offset) instead of minutes_offset directly.
+   - Replace the check at lines 396–397 with one of these options:
+     a) If you keep a separate sign variable:
+        - Parse minutes into an unsigned variable minutes (0..59).
+        - Check: if minutes < 0 or minutes > 59: raise ValueError(...)
+        - Then apply the sign to form minutes_offset (e.g., if sign == '-' then minutes_offset = -minutes).
+     b) If minutes_offset may already be signed at that point, change the check to:
+        if abs(minutes_offset) > 59:
+            raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Make the subsequent arithmetic explicit and consistent:
+   - Compute total minutes using clear names:
+     hours_in_minutes = hours * 60
+     if sign == '-':
+         total_minutes = -(abs(hours_in_minutes) + abs(minutes))
+     else:
+         total_minutes = abs(hours_in_minutes) + abs(minutes)
+   - Then convert to milliseconds:
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Ensure lines 402 and 404 are updated (or removed) so they operate on the clearly-named total_minutes or on signed minutes consistently. The current two different assignments to minutes_offset suggest confusion between magnitude and signed value — consolidate into one well-named variable.
+
+Why this fix works
+- Validates minutes as a magnitude (0–59) regardless of sign, preventing false negatives like -30.
+- Keeps sign handling explicit and consistent, preventing the check from rejecting valid negative offsets and preventing inconsistent arithmetic later.
+
+Minimal example change (conceptual)
+- Current failing check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+- Change to:
+  if abs(minutes_offset) > 59:
+      raise ValueError(...)
+
+Or better, parse minutes as unsigned, validate, then apply sign before computing total minutes.
+
+This removes the false failure for inputs like "-00:30" and makes the sign handling unambiguous.

@@ -1,0 +1,52 @@
+What happened (where)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) fails because of the validation at lines 396–397:
+  - Line 396 checks: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397 raises ValueError("Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes_offset, regardless of hours_offset, so passing minutes_offset = -15 always triggers the ValueError.
+
+Why it fails (root cause)
+- The docstring explicitly allows negative minutes when the hours value is negative (example: (-2, -15) → -02:15).
+- The implementation does not implement that sign rule; it enforces minutes to be non‑negative unconditionally.
+- In other words, the validation only looks at minutes_offset in isolation and ignores the required relationship between hours_offset and minutes_offset.
+
+How to fix it (concrete steps and exact condition changes)
+Option A — Minimal change to preserve current ranges and docstring behavior:
+- Replace the current check at lines 396–397 with a conditional that allows negative minutes only when hours_offset is negative or zero:
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  if minutes_offset < 0 and hours_offset > 0:
+      raise ValueError("Minutes must be non-negative when hours_offset is positive")
+
+Option B — Normalize and validate combined offset (recommended, more robust):
+1. Compute the total offset in minutes using the sign rules you want:
+     total_minutes = hours_offset * 60 + (minutes_offset if hours_offset >= 0 else -abs(minutes_offset))
+   or, clearer:
+     sign = 1 if hours_offset > 0 else (-1 if hours_offset < 0 else (1 if minutes_offset >= 0 else -1))
+     total_minutes = abs(hours_offset) * 60 * sign + abs(minutes_offset) * sign
+2. Validate absolute ranges:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     if abs(total_minutes) > (23 * 60 + 59):
+         raise ValueError("Resulting offset exceeds +/- 23:59")
+3. Build the zone from total_minutes.
+
+Exact short patch you can apply immediately:
+- Replace the two lines
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  with
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if minutes_offset < 0 and hours_offset > 0:
+        raise ValueError("Minutes must be non-negative when hours_offset is positive")
+
+This change makes (-2, -15) valid while still rejecting combinations the docstring forbids (like (2, -15)).
+
+What to test after fixing
+- for_offset_hours_minutes(-2, -15) → id == "-02:15" (should succeed)
+- for_offset_hours_minutes(2, -15) → raises ValueError (docstring says invalid)
+- boundary cases: (23, 59), (-23, -59), (0, -15), (0, 15)
+- invalid minutes outside ±59 and offsets exceeding ±23:59
+
+Summary
+The method currently rejects negative minutes unconditionally (lines 396–397). The docstring allows negative minutes when hours is negative. Change the validation to consider hours_offset when accepting negative minutes, or compute and validate the combined offset in minutes.

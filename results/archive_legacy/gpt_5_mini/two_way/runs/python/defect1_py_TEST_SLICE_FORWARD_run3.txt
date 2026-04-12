@@ -1,0 +1,55 @@
+What happened (where)
+- The bug is in hit01_timezone.py inside DateTimeZone.for_offset_hours_minutes, around the lines you showed (about line numbers 402–405).
+- The problematic lines are these reassignments of minutes_offset:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because minutes_offset and hours_in_minutes are reused and overwritten incorrectly, the method computes the wrong total minutes (and thus wrong milliseconds offset and ID) for inputs where hours are negative or where signs must be combined carefully.
+
+Why it fails (root cause)
+- The code appears intended to combine hours_in_minutes (hours * 60) with an absolute minutes component, but instead it overwrites minutes_offset twice and uses hours_in_minutes on the right-hand side incorrectly.
+- Concretely, suppose:
+  - hours = -2 -> hours_in_minutes = -120
+  - minutes (absolute) = 15 -> minutes_offset initially = 15
+- Intended total minutes = -120 - 15 = -135 (-> -02:15)
+- What the code actually does (given both lines present) ends up computing something else because the second assignment uses a minutes_offset value that has been overwritten by the first assignment. The meaning of the two lines is inconsistent and they do not implement a single correct branch for sign handling.
+- Result: for (-2, -15) or (-2, 15) the function may produce the wrong minutes_offset (wrong sign or wrong magnitude), so get_offset(0) and get_id() do not match expectations. That explains failing tests like test_negative_hours_negative_minutes and test_mixed_signs_invalid.
+
+Exactly where to look
+- open hit01_timezone.py and locate for_offset_hours_minutes around the lines you pasted (≈ lines 400–406).
+- Inspect the variables hours_in_minutes and minutes_offset immediately before and after those lines.
+
+How to fix it (concrete steps)
+1. Decide the correct sign rule: typically total_minutes = hours * 60 + sign_for_minutes * abs(minutes).
+   - If hours < 0 then minutes should extend the negative magnitude: total_minutes = hours*60 - abs(minutes)
+   - If hours >= 0 then total_minutes = hours*60 + abs(minutes)
+   - If minutes has its own sign in API, normalize/validate it and reject mixed invalid combinations as intended.
+2. Replace the two buggy reassignments with a single correct computation. For example (use the actual variable names you have):
+   - Let minutes_abs be the absolute minute value (what the code currently stores in minutes_offset before combining).
+   - Compute:
+       if hours_in_minutes >= 0:
+           total_minutes = hours_in_minutes + minutes_abs
+       else:
+           total_minutes = hours_in_minutes - minutes_abs
+   - Then compute offset in millis:
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - Return cls.for_offset_millis(offset)
+3. Ensure you keep or add the same validation checks for out-of-range hours/minutes and mixed-sign invalid cases (raise ValueError where appropriate).
+
+Concrete minimal patch (pseudo-Python using your variable names)
+- Replace these two lines:
+    minutes_offset = hours_in_minutes - minutes_offset
+    minutes_offset = hours_in_minutes + minutes_offset
+- With:
+    # minutes_offset currently holds the absolute minutes value (0..59)
+    if hours_in_minutes >= 0:
+        minutes_offset = hours_in_minutes + minutes_offset
+    else:
+        minutes_offset = hours_in_minutes - minutes_offset
+
+Why this patch works
+- It performs a single, unambiguous combination of hours and minutes into total minutes, preserving the sign semantics: negative hours make the minutes subtract, positive hours make the minutes add. It avoids overwriting minutes_offset twice and uses the correct operands.
+
+Which tests will be fixed
+- test_negative_hours_negative_minutes, test_mixed_signs_invalid (the (-2, 15) and (-2, -15) cases), and any tests that check get_offset/get_id for negative-hour offsets should pass after this fix.
+
+If you want, I can draft an exact diff for the file using the real surrounding lines.

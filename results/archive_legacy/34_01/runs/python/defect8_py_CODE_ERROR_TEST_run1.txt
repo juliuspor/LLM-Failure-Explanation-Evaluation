@@ -1,0 +1,50 @@
+What happened (where and why)
+- The method fails while parsing the string "fr__POSIX" inside the block that handles the case length != 2 (the else after if length == 2).
+- After confirming locale_str[2] == '_' the code does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- For "fr__POSIX" locale_str[3] is '_' (because the country part is empty), so ch3 < 'A' is true and the code raises ValueError("Invalid locale format: fr__POSIX").
+- Root cause: the parser assumes that if there are more than 2 characters after the first '_' then indices 3 and 4 must always be an uppercase two-letter country code. It does not allow the valid variant-only form where the country is empty and you have two underscores in a row (language + '_' + '_' + variant), e.g. "fr__POSIX".
+- Where it went wrong: the validation of ch3/ch4 is too strict and unconditionally applied, and later indexing for the variant assumes a non-empty country (variant start at index 6). For an empty country the variant starts earlier (index 4), so the logic and indexes are inconsistent for that case.
+
+Concrete fixes (steps and a patch)
+1. Allow an empty country when locale_str[3] == '_' (two underscores in a row).
+2. Branch on whether country is empty or present, validate country only when present, and compute the variant start index accordingly.
+
+Suggested replacement for the block that starts after verifying locale_str[2] == '_':
+
+    # after verifying locale_str[2] == '_'
+    # handle possible empty country (two underscores in a row) or a two-letter country code
+    if locale_str[3] == '_':
+        # empty country, variant starts at index 4
+        country = ""
+        variant_start = 4
+    else:
+        # expect two uppercase letters for country at indices 3 and 4
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        country = locale_str[3:5]
+        variant_start = 6  # because indices: 0-1 lang, 2 '_', 3-4 country, 5 '_', variant starts at 6
+
+    # now decide how to return based on length and presence/position of variant
+    if variant_start == 4:
+        # country empty: form is "ll__variant" or maybe just "ll_" (but that's invalid if no variant)
+        if len(locale_str) == 4:
+            # "ll__" with nothing after second underscore is invalid
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], country, locale_str[variant_start:])
+    else:
+        # country present
+        if len(locale_str) == 5:
+            return Locale(locale_str[0:2], country)
+        if len(locale_str) >= 7 and locale_str[5] == '_':
+            return Locale(locale_str[0:2], country, locale_str[variant_start:])
+        raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why this fixes it
+- It explicitly recognizes the empty-country case (locale_str[3] == '_') and sets variant_start to 4 instead of forcing a two-letter country at 3-4 and variant at 6.
+- It validates the country only when present and uses correct indexes to extract the variant.
+- With this change, LocaleUtils.to_locale('fr__POSIX') yields Locale('fr', '', 'POSIX') as expected.

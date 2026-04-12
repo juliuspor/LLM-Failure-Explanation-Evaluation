@@ -1,0 +1,36 @@
+What happened (where it failed)
+- The method DateTimeZone.for_offset_hours_minutes(...) raised a ValueError at these lines:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means the caller passed a minutes_offset that is out of the allowed 0..59 range and the method rejected it before it ever computes the combined offset.
+
+Why it failed (root cause)
+- The method requires minutes_offset to be in the range 0..59 always. It treats the sign of the overall offset using hours_offset only, and expects minutes_offset to be a non‑negative magnitude to add to or subtract from hours_offset.
+- Many callers (reasonably) pass a negative minutes_offset when they intend a negative total offset (for example hours_offset = -1 and minutes_offset = -30 to mean -1 hour 30 minutes). Passing a negative minutes_offset violates the explicit check at lines 396–397, so the method throws the ValueError instead of producing a correct offset.
+- In short: the method enforces minutes_offset >= 0, but callers often pass signed minutes. The code never documents or converts a signed minutes argument, so a negative minutes value is rejected.
+
+How to fix it (concrete steps)
+Choose one of these fixes and apply it consistently across callers:
+
+1) Make the method accept signed minutes (recommended if callers already pass negative minutes)
+   - Change the validation at lines 396–397 to allow minutes_offset to be negative when hours_offset is negative, and to be positive when hours_offset is positive. For example:
+     - If hours_offset < 0 then require minutes_offset <= 0 and abs(minutes_offset) <= 59.
+     - If hours_offset > 0 then require minutes_offset >= 0 and minutes_offset <= 59.
+     - If hours_offset == 0 then you may accept either sign but limit abs(minutes_offset) <= 59 and handle sign consistently.
+   - Then compute total minutes as total_minutes = hours_offset * 60 + minutes_offset (no sign inversion hack). Use FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE) as you already do.
+   - Add unit tests for inputs like (-1, -30), (1, 30), (0, -15), and (0, 15).
+
+2) Require callers to pass minutes as a non‑negative magnitude (simpler but requires caller changes)
+   - Keep the current check but document it clearly: minutes_offset must be in 0..59 and the sign of the whole offset comes from hours_offset.
+   - Fix calling code so that callers never pass negative minutes. For example, change callers that currently do (-1, -30) to (-1, 30).
+   - Add a guarded assertion or clearer exception message explaining that minutes must be magnitude only (not signed).
+
+Why the suggested fixes fix the root cause
+- Fix (1) matches how callers commonly express signed offsets and prevents the ValueError by validating the sign and magnitude together, then computing the total correctly.
+- Fix (2) preserves the existing method contract but removes the mismatch between caller expectations and parameter rules by making callers conform.
+
+What to change in specific lines
+- Replace the current single-line check at 396–397 with sign-aware validation (if using fix 1) or add documentation/comments and update all callers (if using fix 2).
+- Replace the existing manipulation of minutes_offset with a straightforward total_minutes = hours_offset * 60 + minutes_offset and pass total_minutes to safe_multiply.
+
+If you want, paste a few example caller calls you have (e.g. for_offset_hours_minutes(-1, -30)) and I’ll show exactly which of the two fixes fits your codebase and give the code patch.

@@ -1,0 +1,58 @@
+What happened (root cause)
+- The IndexError is raised inside the for loop at the line that calls code_point_at(code_units, pos).
+- That happens when pos is equal to length (or greater) and code_point_at checks the index and raises "String index out of range" (see the SLICE_BLOCK showing the check at lines 35–36).
+- Why pos reached that value: the loop does
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  The code calls code_point_at(code_units, pos) every iteration, but after a previous iteration pos may become length (because char_count can add 1 or 2). On the next iteration the code still tries to read code_point_at at that out‑of‑bounds pos, causing the exception.
+
+Why this is a bug (short)
+- consumed is the number of codepoints the translator claimed to have consumed, so the loop must advance pos that many code units. The loop currently attempts to re-read codepoints at pos on every iteration, and on the last iteration that read can be out of range.
+- In other words: the loop reads beyond the end of code_units because it calls code_point_at at a pos value equal to length.
+
+Exact places and names
+- Method: translate
+- Variables: pos, length, consumed, code_units
+- Faulty call: code_point_at(code_units, pos) inside the for pt in range(consumed) loop
+- Exception originates from the index check in code_point_at (the SLICE_BLOCK lines 35–36 that raise IndexError when index >= len(code_units))
+
+Concrete fixes (pick one)
+
+1) Safest fix: read the codepoint before incrementing pos in each iteration and stop if pos is out of range
+Replace the loop with:
+    for _ in range(consumed):
+        if pos >= length:
+            break
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+This prevents calling code_point_at when pos >= length.
+
+2) Better, explicit surrogate-aware advance (recommended)
+Advance pos by inspecting code_units to avoid calling code_point_at repeatedly:
+    for _ in range(consumed):
+        if pos >= length:
+            break
+        # if current unit is a high surrogate and next unit exists and is a low surrogate
+        if is_high_surrogate(code_units[pos]) and pos + 1 < length and is_low_surrogate(code_units[pos + 1]):
+            pos += 2
+        else:
+            pos += 1
+This directly advances by code units and never attempts to read a codepoint at pos == length.
+
+3) If consumed represents "code units consumed" (not codepoints), simply advance pos by consumed:
+    pos += consumed
+Only use this if the contract of translate_codepoint is that its return value counts code units rather than codepoints. Verify the contract first; if consumed is codepoints, this is incorrect.
+
+Which to pick
+- If translate_codepoint returns the number of codepoints consumed, use option 2.
+- If translate_codepoint returns the number of UTF-16 code units consumed, option 3 is fine.
+- If you don’t want any silent truncation, combine option 1 or 2 with an assertion or explicit error if pos goes past length after advancing (so you catch incorrect translator implementations early).
+
+Minimal reproducible example of the failure
+- Suppose length == 3, pos == 1, consumed == 2.
+- First loop iteration: code_point_at(pos=1) returns cp, char_count(cp) == 2, so pos becomes 3.
+- Second iteration: loop still tries code_point_at(pos=3) -> IndexError because pos == length.
+
+Summary
+- The loop assumes it can call code_point_at at every iteration, but advancing pos inside the loop makes a later call go out of range.
+- Fix by not calling code_point_at when pos >= length and/or advancing pos using code unit checks (surrogate detection) instead of repeatedly calling code_point_at.

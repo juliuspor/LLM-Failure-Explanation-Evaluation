@@ -1,0 +1,43 @@
+What happened (where)
+- The failure occurs inside LocaleUtils.to_locale, around the code shown in the slice (lines ~231–240).
+- At line 237 the code does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  and then validates ch3 and ch4 as uppercase country letters (lines 239–240).
+
+Why it fails (root cause)
+- The method assumes that if the input isn't the 2-char language form, positions 3 and 4 always contain the two-letter country code.
+- The input "fr__POSIX" is the language__variant form: language (positions 0–1) + '_' (pos 2) + '_' (pos 3) + variant starting at pos 4.
+- For "fr__POSIX", locale_str[3] is '_' (not an uppercase letter). The code checks ch3/ch4 unconditionally and therefore raises ValueError ("Invalid locale format") because ch3 ('_') is not between 'A' and 'Z'.
+- In short: the code does not recognize or handle the empty-country (double underscore) case and performs country-letter validation unguarded, causing a false-positive error.
+
+Which variables/lines are involved
+- locale_str: the input string ("fr__POSIX").
+- Lines ~231–240 in to_locale:
+  - at 237: ch3 = locale_str[3]
+  - at 238: ch4 = locale_str[4]
+  - at 239–240: validation "if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)"
+- The failing condition is triggered because locale_str[3] == '_' so the uppercase checks fail.
+
+Precise fixes (step-by-step)
+1. Detect the empty-country pattern before trying to read/validate country letters:
+   - Add a branch that tests whether locale_str[2] == '_' and locale_str[3] == '_' (i.e. double underscore at positions 2–3).
+   - If so, treat this as language__variant: language = locale_str[0:2], country = "", variant = locale_str[4:].
+   - Validate variant length/characters if needed.
+2. Only read/validate ch3 and ch4 as country letters when you know a country is present:
+   - Check length and that locale_str[2] == '_' and locale_str[3] != '_' (or more clearly: check that the substring for country exists and has length 2) before accessing locale_str[3] and locale_str[4].
+   - This also avoids out-of-bounds reads for short inputs.
+3. Example minimal change outline (conceptual):
+   - if length == 2: ... (language only)
+   - elif length > 2 and locale_str[2] == '_' and locale_str[3] == '_':
+       parse language__variant (country = "")
+   - elif length >= 5 and locale_str[2] == '_':
+       then safely read ch3/ch4 and validate country letters, then parse variant if present
+   - else: raise ValueError
+
+Why this fix works
+- It prevents the code from treating the second underscore as the first letter of a country code.
+- It stops unguarded indexing at positions 3/4 when the input actually has an empty country field.
+- It reproduces the Java behavior intended by the tests: "fr__POSIX" → Locale("fr", "", "POSIX").
+
+If you want, I can produce a concrete patch for the to_locale method showing the exact lines to add/change.

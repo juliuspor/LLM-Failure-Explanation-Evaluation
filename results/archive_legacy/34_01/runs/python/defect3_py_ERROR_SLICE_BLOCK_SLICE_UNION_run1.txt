@@ -1,0 +1,33 @@
+What happened
+- The exception is raised at lines 35–36 because the code checked index against len(code_units) and found index == 2 but len(code_units) ≤ 2, so it deliberately raised IndexError: "String index out of range: 2".
+
+Why that happened (root cause)
+- The code that produces code_units (inside to_utf16_code_units(s)) did not produce as many UTF-16 code units as the caller expects. In other words, index is a code-unit index (2) but code_units contains fewer than 3 elements.
+- Concretely: your later logic at lines 38–44 assumes you can read code_units[index] and possibly code_units[index + 1] to form a surrogate pair. That assumption is only valid if to_utf16_code_units appended both halves of any surrogate pair. If to_utf16_code_units appended only one unit for a non-BMP character (or otherwise produced too few entries), then index can be in range for the caller’s notion of the string but out of range for code_units.
+
+Where exactly to look
+- to_utf16_code_units(s): verify the code that fills the list code_units (you only showed the declaration at line 12). If a code point above U+FFFF is handled, the function must append two code units: the high surrogate and the low surrogate.
+- The check at line 35 is correct for guarding access to code_units[index], but the IndexError indicates code_units is shorter than the caller expects.
+
+Concrete fixes (step-by-step)
+1. Verify and fix to_utf16_code_units(s) so it produces correct UTF-16 code units:
+   - For code points <= 0xFFFF: append that value once.
+   - For code points > 0xFFFF: compute and append both surrogates:
+     - high = 0xD800 + ((codepoint - 0x10000) >> 10)
+     - low  = 0xDC00 + ((codepoint - 0x10000) & 0x3FF)
+   - After this change, len(code_units) will reflect the number of UTF-16 code units and index 2 will be valid when appropriate.
+
+2. If the caller is using a Unicode-code-point index (Python str index) rather than a UTF-16 code-unit index, convert indices consistently:
+   - Either change the caller to use code-unit indices (build code_units first and compute an index into that list), or
+   - Change the caller to use code point indexing and perform surrogate-pair logic on code points rather than UTF-16 units.
+
+3. Add defensive diagnostics to make future failures clearer:
+   - When raising the IndexError at lines 35–36, include len(code_units) in the message:
+     raise IndexError(f"String index out of range: {index} (len={len(code_units)})")
+   - Optionally assert or log the input string s and its length so you can see whether the mismatch is from the converter or from a wrong index being passed.
+
+Why these steps resolve the problem
+- If to_utf16_code_units actually creates both halves of surrogate pairs, code_units will be the correct length and the index check at line 35 will only fail when a genuine out-of-range index is passed.
+- If the caller instead was mixing code-point indices with UTF-16 indices, converting to one consistent index base removes that mismatch which is the immediate cause of index == 2 being out of range.
+
+If you want, paste the body of to_utf16_code_units(s) and the code that calls it (the part that passes index) and I will point to the exact line to change and give the fixed code.

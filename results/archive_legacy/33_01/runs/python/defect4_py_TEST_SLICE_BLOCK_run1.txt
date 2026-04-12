@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The failing assertion checks s.get_max_middle_index() (line 449–451 in your slice block). That method just returns the integer stored in self._max_middle_index.
+- The test builds s by calling s.add(...) four times. The second added period (SimpleTimePeriod(100, 200)) has the largest middle value (150) and, at that time, the code sets self._max_middle_index = 1 (index of that item).
+- Later adds insert two periods that belong before the last items in the internal list. Those insertions change item positions, but the code that handles insertion does not update self._max_middle_index to account for the index shifts.
+- As a result self._max_middle_index no longer points to the period with the true maximum middle — it points to the original index value, which now refers to a different item. get_max_middle_index therefore returns a stale index and the assert fails.
+
+Why this is the root cause (clear and explicit)
+- get_max_middle_index (lines 449–451) returns whatever integer is stored in self._max_middle_index.
+- That integer is maintained by add(...) when you insert or append periods. But add(...) fails to adjust self._max_middle_index when elements are inserted at indices less than (or equal to) the current _max_middle_index.
+- Example from your test: after the second add, _max_middle_index == 1. The third add inserts at index 0 (SimpleTimePeriod(0,50)), shifting all existing items right; the code does not increment _max_middle_index to 2. Now _max_middle_index still equals 1, but the period with middle 150 is at index 2. The stored index is therefore incorrect.
+
+Exact locations to change
+- The bug is not in get_max_middle_index itself (lines 449–451); it is in the code that updates self._max_middle_index when the collection is modified (the add(...) implementation). You need to find where add inserts into the internal list and adjust self._max_middle_index there.
+
+Concrete fixes (choose one)
+1) Maintain index consistency on insertion
+   - When inserting at index i, if i <= self._max_middle_index: increment self._max_middle_index by 1 (because every element at or after i moved one position right).
+   - If you replace or remove items, apply corresponding adjustments (decrement if you remove before the saved index, recompute if you remove the max item).
+
+   Pseudocode change inside add:
+   - determine insert_index = ... (where you insert)
+   - if self._max_middle_index is not None and insert_index <= self._max_middle_index:
+         self._max_middle_index += 1
+   - perform insertion
+   - then compare the newly inserted period middle to current max and set _max_middle_index to the new index if needed
+
+2) Simpler and safer: recompute the max index after any modification
+   - After every add/remove, scan the list to find the period with the maximum middle and set self._max_middle_index to that index. This avoids bookkeeping bugs about shifting indices.
+   - This is slightly less efficient but simple and correct.
+
+3) Store a reference instead of an index
+   - Instead of storing _max_middle_index, store a weak reference (or unique id) to the period object that currently has the maximum middle. When you need the index, find the object's current index. This makes insertions harmless but requires an index lookup when get_max_middle_index() is called.
+
+Recommended step-by-step change
+1. Locate add(...) where you insert a SimpleTimePeriod into the internal list (the same code that sets self._max_middle_index when discovering a new max).
+2. Option A (recommended for correctness): After performing the insertion or deletion, run a small loop to recompute self._max_middle_index:
+     - max_mid = -inf; max_idx = -1
+     - for idx, period in enumerate(self._data): mid = period.get_middle_millis(); if mid > max_mid: max_mid = mid; max_idx = idx
+     - self._max_middle_index = max_idx
+3. Run the test again. The assert s.get_max_middle_index() == 1 should now pass.
+
+This explains exactly what failed (stale index in self._max_middle_index), where it occurred (the add/modify code that updates indices), and gives concrete, actionable fixes you can implement.

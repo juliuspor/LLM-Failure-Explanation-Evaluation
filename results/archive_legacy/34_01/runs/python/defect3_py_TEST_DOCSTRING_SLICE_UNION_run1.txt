@@ -1,0 +1,29 @@
+What happened
+- The test calls translate_string('\U0001F630') (a non‑BMP character, code point U+1F630).
+- The helper to_utf16_code_units(s: str) is supposed to produce a list of UTF‑16 code units (16‑bit values, using a surrogate pair for non‑BMP characters) but it does not. Instead it appends the full code point (0x1F630) as a single list element.
+- Later code that uses that list (see lines 35–44) expects UTF‑16 code units and tries to detect a high surrogate at variable high (line 38) by checking 0xD800 <= high <= 0xDBFF. That check never succeeds because high holds 0x1F630, so the code does not form the surrogate pair it expects. The mismatch between "list of UTF‑16 code units" and "list of code points" is the root cause of the failing assertion.
+
+Where it happens in your snippet
+- The caller/test provides '\U0001F630' (non‑BMP).
+- to_utf16_code_units builds code_units (line 12) but does not split non‑BMP code points into two 16‑bit units.
+- The consumer at line 38 reads high = code_units[index] and checks surrogate ranges (lines 39–41) but never finds a high surrogate, so it misinterprets the value and downstream encoding/escaping produces the wrong output.
+
+Why that makes the test fail
+- translate_string expects the input translated into UTF‑16 code units so it can identify surrogate pairs and operate on 16‑bit units. Because you gave it a single 0x1F630 value instead of two 16‑bit units, the escaping/translation logic handles it incorrectly and the result is not the original string, so the assertion fails.
+
+Concrete steps to fix
+1. In to_utf16_code_units(s: str), convert each Python character into one or two UTF‑16 code units:
+   - For each character ch in s, do cp = ord(ch).
+   - If cp <= 0xFFFF: append cp to code_units.
+   - Else (cp > 0xFFFF): compute the surrogate pair:
+     - cp_minus = cp - 0x10000
+     - high = 0xD800 + (cp_minus >> 10)
+     - low  = 0xDC00 + (cp_minus & 0x3FF)
+     - append high, then append low
+2. Ensure code_units is a list of integers each in the 0..0xFFFF range.
+3. Keep the later code that checks for a high surrogate (lines 38–44) unchanged — it will then find the high surrogate and combine pair correctly.
+
+Example change (conceptual):
+- Replace whatever you currently append for non‑BMP ch with the two lines that append high and low surrogate values as shown above.
+
+That will make to_utf16_code_units return true UTF‑16 code units, let the logic at lines 38–44 detect and combine surrogate pairs correctly, and make translate_string('\U0001F630') preserve the character so the test passes.

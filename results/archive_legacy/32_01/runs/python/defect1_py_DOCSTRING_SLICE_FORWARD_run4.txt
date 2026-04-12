@@ -1,0 +1,54 @@
+What went wrong (root cause)
+- The code that computes the total offset in minutes misapplies signs when combining hours and minutes. That happens around these lines:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Because those assignments reuse the minutes_offset variable and subtract/add in the wrong places, some valid input combinations produce the wrong total minutes (wrong sign or magnitude). That wrong total then gets multiplied by milliseconds and can exceed the allowed range, so the method raises ValueError("Offset is too large") at line 411 even though the requested offset should be valid.
+
+Where it happens
+- The problem is in the branch that combines hours_in_minutes (hours * 60) and the minutes_offset argument. The code uses subtraction or addition in the wrong places and does not consistently enforce the sign rules described in the docstring. The bad assignments are at lines 406 and 408; the resulting offset check at line 411 then fails.
+
+Why that causes the failure (concrete example)
+- For example, for hours = -2 and minutes = 15 (expected -02:15 = -135 minutes), the correct computation is:
+    total_minutes = hours * 60 - minutes = -120 - 15 = -135
+  But the buggy code may compute minutes_offset = hours_in_minutes + minutes_offset or the wrong sign, producing a value like +105 or some other wrong magnitude. After converting to milliseconds, the value looks enormous or opposite-signed and fails the range check at line 411, so you get ValueError even though (-2,15) is valid per the docstring.
+
+Exactly what to change (step-by-step fix)
+1. Do the explicit sign validation the docstring requires:
+   - If hours is +ve and minutes is negative => raise ValueError (doc disallows (2, -15)).
+   - Otherwise minutes must be between -59 and +59 and hours between -23 and +23 (keep existing range checks).
+2. Compute total_minutes explicitly and clearly, do not reuse minutes_offset for intermediate arithmetic in a confusing way. Use a new variable total_minutes and compute it by cases:
+   - if hours > 0:
+       - require minutes >= 0 (otherwise raise ValueError)
+       - total_minutes = hours * 60 + minutes
+   - elif hours < 0:
+       - if minutes > 0: total_minutes = hours * 60 - minutes
+         (this yields e.g. -2*60 - 15 = -135 for (-2, 15))
+       - else: total_minutes = hours * 60 + minutes
+         (e.g. (-2, -15) -> -120 + (-15) = -135)
+   - else (hours == 0):
+       - total_minutes = minutes
+         (so (0, -15) -> -15, (0, 15) -> 15)
+3. Replace the lines around 406–408 with that explicit logic, then compute:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Leave the offset-size check in place (line 411) but it will now be reached only for genuinely out-of-range offsets.
+
+Precise code sketch to paste in place of lines 406–408
+- (pseudocode; adapt to your style)
+  if hours > 0:
+      if minutes < 0:
+          raise ValueError("Positive hours with negative minutes is not allowed")
+      total_minutes = hours * 60 + minutes
+  elif hours < 0:
+      if minutes > 0:
+          total_minutes = hours * 60 - minutes
+      else:
+          total_minutes = hours * 60 + minutes
+  else:  # hours == 0
+      total_minutes = minutes
+
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The fix computes the signed total offset in one clear place, matches the docstring combinations, avoids accidental sign inversion, and prevents mistaken large offsets that trigger the ValueError at line 411.
+
+If you want, I can produce the exact replacement code for the method using your existing variable names so you can drop it in directly.

@@ -1,0 +1,47 @@
+What happens
+- At lines 396–397 the code rejects any minutes_offset outside 0..59:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later the code combines hours and minutes into a single minutes value by writing into minutes_offset:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- The failure you see is raised at lines 396–397 when a caller passes a negative minutes_offset (for example for -1 hour 30 minutes they passed hours_offset=-1 and minutes_offset=-30). The validator rejects negative minutes before the code gets a chance to combine signs with hours.
+
+Why this is the root cause
+- The code assumes minutes_offset must be 0..59, but callers often express negative offsets by giving a negative minutes_offset. Because the range check happens before combination, valid logical inputs like (-1, -30) are rejected prematurely.
+- The later combination also mutates minutes_offset to hold total minutes, which makes the pre-checking order important — but the check is currently too strict for signed-minute inputs.
+
+Where it occurs
+- The ValueError is raised at the minutes range check shown in your slice (lines 396–397). The problematic logic is the order of that check relative to the combination code starting at hours_in_minutes = hours_offset * 60.
+
+How to fix (concrete steps)
+Choose one of these consistent behaviors and implement it:
+
+1) Enforce minutes_offset is always non-negative (0..59) and use the sign of hours_offset:
+   - Keep the current range check (lines 396–397).
+   - Require callers to pass minutes as an unsigned magnitude and hours as signed. Document this.
+   - Combine exactly as you already do, using hours_offset sign to determine whether to add or subtract minutes.
+
+2) Allow minutes_offset to be signed and validate combined total:
+   - Change the range check so it does not reject negative minutes. For example, remove the minutes check or broaden it (e.g., -59..59).
+   - After combining, validate that the combined minutes value is in the allowed total range (e.g., between -23*60-59 and +23*60+59).
+   - Example change:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+       # then combine using hours_in_minutes and minutes_offset sign
+       total_minutes = hours_in_minutes + minutes_offset
+       # validate total_minutes range
+
+3) Normalize input before validating:
+   - Convert a signed pair into an unsigned magnitude plus sign, or compute total_minutes first from hours_offset and minutes_offset without rejecting negative minutes, then validate total_minutes range.
+
+Concrete minimal code fix (option 2 example):
+- Replace the existing minutes check with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- After computing minutes_offset = hours_in_minutes + minutes_offset (use +, not the branch that subtracts), validate the combined total fits allowed offset bounds before multiplying by MILLIS_PER_MINUTE.
+
+That will stop the premature rejection at lines 396–397 and ensure correct handling of negative offsets.

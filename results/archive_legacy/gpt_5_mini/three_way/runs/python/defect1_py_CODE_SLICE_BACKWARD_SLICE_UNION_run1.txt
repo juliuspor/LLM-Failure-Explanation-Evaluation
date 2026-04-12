@@ -1,0 +1,48 @@
+What happens
+- The code computes the total offset in minutes by reusing the parameter minutes_offset as a working variable (lines 402–405).
+- For negative hour offsets it does: minutes_offset = hours_in_minutes - minutes_offset (line 402).
+- That looks correct at a glance, but the bug is that the code applies the wrong sign to the minutes when the hour offset is negative: it treats the minutes as always positive and subtracts them from hours_in_minutes unconditionally, which produces the wrong total in the case the intended sign of the minutes should be the same as the hours’ sign.
+- Because of that sign mistake the computed total minutes can be wrong, so the final millis offset passed to for_offset_millis(offset) is incorrect and the method can return the wrong zone or fail validation later.
+
+Where it occurs (exact lines)
+- The minutes parameter is range-checked at lines 396–397.
+- The incorrect arithmetic is performed at lines 402 and 404:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- The result is multiplied at line 405:
+  - 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this is wrong (concrete example)
+- Suppose you call for_offset_hours_minutes(-1, 30) to mean “minus one hour and thirty minutes”:
+  - hours_in_minutes = -1 * 60 = -60
+  - code computes minutes_offset = hours_in_minutes - 30 = -90 — OK for that example.
+- But suppose the intended meaning in your API is that minutes_offset should carry the same sign as the hours (i.e. a negative hours value means the minutes should also be subtracted). The current code only subtracts minutes when hours_in_minutes < 0; this is ambiguous and fragile because it assumes the minutes parameter is always positive and that sign is derived only from hours. If callers ever pass minutes already signed, or if you want a consistent signed representation, this produces wrong results.
+- The confusion comes from reusing the parameter minutes_offset for two different things (the original minutes argument and the computed total minutes). That leads to sign errors and makes the code fragile and hard to reason about.
+
+How to fix it (step-by-step)
+1. Stop reusing the parameter variable. Introduce a new local variable totalMinutes.
+2. Compute the total using an explicit signed rule so there’s no ambiguity. For example:
+   - totalMinutes = hours_offset * 60 + (hours_offset < 0 ? -minutes_offset : minutes_offset)
+   - This makes the sign rule explicit: if the hour part is negative, the minute part is subtracted.
+3. Multiply totalMinutes by MILLIS_PER_MINUTE and handle overflow:
+   - offset = FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Pass offset to for_offset_millis(offset).
+
+Concrete corrected snippet (conceptual)
+- Replace the block
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  with
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix answers the problem
+- It removes the parameter reuse and makes the sign rule explicit and local. That stops the incorrect sign propagation and makes the arithmetic predictable and correct for all allowed inputs.

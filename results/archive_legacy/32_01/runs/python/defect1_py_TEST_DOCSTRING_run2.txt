@@ -1,0 +1,38 @@
+What happened
+- The test calls DateTimeZone.forOffsetHoursMinutes(-2, -15), expecting an ID of "-02:15".
+- The code returned the wrong offset (for example "-01:45"), so the assertion failed.
+
+Why it failed (root cause)
+- The method forOffsetHoursMinutes(int hours, int minutes) combines the hour and minute parts incorrectly when the hour is negative and the minute is also negative.
+- Instead of computing the total offset as (hours * 60 + minutes) minutes, the implementation applies the sign of hours to the minutes again (or uses Math.abs(minutes) and then re-applies the sign). Concretely, for hours = -2 and minutes = -15 the buggy logic does:
+  - total = hours * 60 + sign(hours) * minutes
+  - sign(hours) for -2 is -1, so it adds (-1 * -15) = +15
+  - total = -120 + 15 = -105 minutes → -01:45 (wrong)
+- The correct calculation is simply totalMinutes = hours * 60 + minutes, which yields -135 minutes → -02:15.
+
+Where it occurs
+- In DateTimeZone.forOffsetHoursMinutes (the method you called). The bug is in the code block that converts the hour and minute arguments to a single offset (minutes or milliseconds) before validating the range and constructing the fixed offset zone.
+
+How to reproduce quickly
+- Call DateTimeZone.forOffsetHoursMinutes(-2, -15) and inspect the zone id or offset. If it shows "-01:45" you have the described bug.
+
+Concrete fix (step-by-step)
+1. Replace the faulty combination logic with a single, sign-preserving sum:
+   - int totalMinutes = hours * 60 + minutes;
+2. Convert to milliseconds after computing totalMinutes:
+   - int offsetMillis = totalMinutes * 60 * 1000;
+   (or use constants like MILLIS_PER_MINUTE)
+3. Validate using totalMinutes (not hours and minutes separately) against the allowed range:
+   - if (totalMinutes < -(23 * 60 + 59) || totalMinutes > (23 * 60 + 59)) throw new IllegalArgumentException(...);
+4. Construct/return the zone using the offsetMillis (e.g. DateTimeZone.forOffsetMillis(offsetMillis) or equivalent constructor).
+5. Add unit tests for boundary and sign combinations, including:
+   - (2, 15) -> "+02:15"
+   - (2, -15) -> invalid (ValueError/IllegalArgumentException)
+   - (0, -15) -> "-00:15"
+   - (-2, 15) -> "-02:15"
+   - (-2, -15) -> "-02:15"  <-- the failing case
+
+Why this fix works
+- totalMinutes = hours*60 + minutes preserves the intended sign semantics described in the docstring: a negative hours combined with negative minutes yields a larger negative total; a negative hours with positive minutes reduces the negative magnitude (e.g. -2h + 15m = -1h45m), etc. Validating the combined total prevents incorrect acceptance of an out-of-range offset.
+
+If you want, paste the actual forOffsetHoursMinutes implementation (or the few lines that combine hours and minutes) and I will point exactly which lines to change and show a small patch.

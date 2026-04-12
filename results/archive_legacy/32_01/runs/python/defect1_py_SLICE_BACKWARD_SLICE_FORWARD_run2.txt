@@ -1,0 +1,43 @@
+What happened (where it failed)
+- The code validates minutes_offset at lines 400–401:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later, at lines 406–409, the code expects minutes_offset can be negative when computing a negative hour/minute offset:
+  406 |                 minutes_offset = hours_in_minutes - minutes_offset
+  408 |                 minutes_offset = hours_in_minutes + minutes_offset
+  409 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because the early check rejects negative minute values, the code never gets a negative minutes_offset to use in the negative-offset branch. That makes the math on lines 406/408 wrong or unreachable and causes correct negative offsets (for example, -1:30) to be rejected at line 401.
+
+Why it failed (root cause)
+- The range check at 400–401 forbids negative minute components, but the later logic assumes minutes_offset may be negative to represent negative zone offsets. The two parts contradict each other. In short: the input validation forbids values that the subsequent offset-calculation code expects to handle.
+
+Exact place to change
+- Either:
+  1) allow negative minute values in the validation, or
+  2) make the later code use an absolute minutes value and apply sign separately.
+
+Concrete fixes (pick one)
+
+Option A — allow negative minute values
+- Replace the validation at lines 400–401 with a range that permits -59..59:
+  400 |         if minutes_offset < -59 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Keep the later negative/positive math at 406–409 as written.
+
+Option B — keep minutes non-negative and use sign separately
+- Keep the existing check (minutes must be 0..59) and change the negative-branch math to use the sign from hours, not a negative minutes value. Concretely, if you have sign = -1 when hours is negative, compute:
+  406 |                 minutes_offset = hours_in_minutes + minutes_offset  # if sign is -1, add minutes
+  408 |                 minutes_offset = hours_in_minutes + minutes_offset  # unify both branches to use sign
+- Or more explicitly compute:
+  - Determine sign = 1 or -1 from hours.
+  - Compute total_minutes = sign * (abs(hours) * 60 + minutes_offset).
+  - Then:
+    409 |             offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+How to test the fix (steps)
+1. Build and run unit tests covering offsets: +01:30, +01:00, +01:59, -01:30, -00:30, -00:00.
+2. Specifically test a negative minute example that failed before (e.g., "-1:30"). Before the fix this should have raised at line 401; after the fix it should produce the correct offset in milliseconds at line 409 and reach cls.for_offset_millis(offset).
+3. Add a test for invalid minutes like 60 and -60 to assert ValueError remains thrown.
+
+Summary
+- The validation at lines 400–401 forbids negative minute components, but the calculation at lines 406–409 expects minutes_offset may be negative for negative time offsets. Allow negative minutes (range -59..59) or change the calculation to apply sign from hours and keep minutes non-negative. Either change resolves the contradiction and fixes the failing case.

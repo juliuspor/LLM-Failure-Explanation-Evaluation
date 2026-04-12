@@ -1,0 +1,22 @@
+The code fails because the final fallback on line 203 calls self.add(str(x)) using the original float x rather than the normalized integer value or formatted string; when x is -0.0 this produces "0.0" (dropping the negative sign) because str(-0.0) in Python yields "-0.0" but earlier processing (conversion to int at line 186: value = int(x)) and subsequent branches can change x or use value; specifically: 
+
+What happened (where):
+- At line 186 the code sets value = int(x). For x == -0.0, int(-0.0) yields 0, losing the sign bit. The code later reaches the fallback at line 203 and executes self.add(str(x)). But because the code has compared and used value instead of preserving the negative-zero check, the negative sign is not preserved in the path that emits plain str(value) at line 201 or str(x) at 203.
+- The negative-zero case is not detected before choosing the output branch. The helper is_negative_zero exists (tests reference CodeConsumer.is_negative_zero) but is never used in this slice to special-case -0.0, so the emission ends up as "0" or "0.0" rather than the required "-0.0".
+
+Why it fails (root cause):
+- Loss of negative-zero sign by converting x to int (value = int(x)) at line 186, then emitting value or the unchanged x without checking for negative zero. The int conversion removes the sign of negative zero. The code’s branching (lines 189–201) treats large-magnitude numbers differently and falls back to self.add(str(x)) at line 203, which can emit a representation that does not preserve the negative-zero sign because upstream logic already relied on value or didn’t call the negative-zero check.
+
+Concrete steps to fix (explicit):
+1. At the start of add_number, check for negative zero using CodeConsumer.is_negative_zero(x). If true, directly emit "-0.0" via self.add("-0.0") and return. This should be inserted before line 186 where value = int(x).
+2. Alternatively, avoid using int(x) for deciding representation for zero: after computing value = int(x), if value == 0 and math.copysign(1.0, x) < 0 (or use is_negative_zero), treat as negative zero and emit "-0.0".
+3. Ensure all branches that emit numeric text (lines 199, 201, 203) consider and preserve negative zero: e.g., compute a formatted string out and then, before self.add(formatted), if is_negative_zero(x) prefix '-' or force the string to "-0.0".
+
+Where to change (line numbers):
+- Insert the negative-zero guard immediately before line 186 (value = int(x)).
+- Or add a check right before each emit at lines 199, 201, and 203 to override output when is_negative_zero(x) is True.
+
+Why these steps work:
+- int(-0.0) == 0 loses the sign. Detecting negative zero on the original float x preserves the sign bit and allows emitting the correct literal "-0.0". Ensuring the emitters consult is_negative_zero avoids regressing to the incorrect "0" or "0.0" outputs.
+
+This explains the failure and provides exact locations and fixes.

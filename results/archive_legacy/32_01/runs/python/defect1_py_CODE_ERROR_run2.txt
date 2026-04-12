@@ -1,0 +1,62 @@
+What happened (where it fails)
+- The ValueError was raised on this line in for_offset_hours_minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The exception message "Minutes out of range: -15" shows that the caller passed minutes_offset = -15 and the method rejected it before any further processing.
+
+Why it failed (root cause)
+- The method currently requires minutes_offset to be between 0 and 59 (inclusive). It does not accept negative minute values.
+- The code later (after those checks) treats minutes as part of a signed total minutes value by combining hours_offset and minutes_offset with the sign of hours:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic implies the author expected to support negative offsets like -5 hours 15 minutes (i.e. -5:15), but the earlier validation forbids a negative minutes_offset. So the method rejects valid negative-minute inputs that the later logic was prepared to use.
+
+What that means for callers
+- If a caller passes hours_offset = -5 and minutes_offset = 15 (positive minutes), the code accepts it and computes a -5:15 offset correctly.
+- If a caller passes hours_offset = -5 and minutes_offset = -15 (expressing -5 hours 15 minutes as a negative minutes value), the method throws the ValueError at the minutes check even though the later math would have handled it.
+
+Concrete fixes (step-by-step)
+Pick one of these fixes depending on the intended API:
+
+1) Require minutes_offset to be non-negative and normalize callers
+- Document that minutes_offset must be 0..59 and callers must not pass negative minutes.
+- No code change required inside this method, but update caller code to pass minutes as non-negative (e.g., represent -5:15 as hours_offset = -5, minutes_offset = 15).
+
+2) Allow negative minutes and normalize inside for_offset_hours_minutes (recommended if you want to accept minutes with sign)
+- Change the validation to allow minutes in -59..59 and then compute total minutes consistently. Example change:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Compute total_minutes as:
+    total_minutes = hours_offset * 60 + (minutes_offset if hours_offset >= 0 else -abs(minutes_offset))
+  or more simply:
+    total_minutes = hours_offset * 60 + minutes_offset
+  (but only if you decide that minutes_offset carries its own sign)
+- Then convert total_minutes to millis and continue.
+
+3) Enforce sign consistency between hours and minutes
+- If you want to make mixed-sign inputs invalid, check that minutes_offset is 0..59 and either hours_offset >= 0 or minutes_offset == 0, or require minutes_offset >= 0 always and reject inputs where signs conflict. Example:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(...)
+    if hours_offset < 0 and minutes_offset != 0:
+        # require caller to encode minutes positively when hours negative
+        raise ValueError("If hours_offset is negative, minutes_offset must be positive and represent the absolute minutes")
+
+Example patch (allow negative minutes, normalize using total minutes)
+- Replace the minutes check and the following combination with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    try:
+        total_minutes = hours_offset * 60 + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+    return cls.for_offset_millis(offset)
+
+Why this fix fixes the error
+- The current code throws because it rejects negative minute inputs up front. Allowing minutes in -59..59 and computing total_minutes directly matches the later usage and prevents rejecting legitimate negative offsets like -5:-15. If you prefer the API where minutes are always non-negative, make callers conform instead.
+
+Summary
+- Root cause: mismatch between validation (minutes must be >= 0) and later combining logic (which suggests negative minutes should be allowed). The exception is thrown at the minutes validation line inside for_offset_hours_minutes. Fix by either enforcing the non-negative-minute convention across callers or by changing the method to accept and normalize negative minute values (recommended: accept -59..59 and compute total_minutes).

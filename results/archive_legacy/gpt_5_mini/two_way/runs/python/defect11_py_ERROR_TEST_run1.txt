@@ -1,0 +1,32 @@
+What happened
+- The test expected RandomStringUtils.random to raise ValueError whose message mentions the parameter names "start" and "end" when the caller passes an invalid start/end range.
+- Instead the code raised a ValueError coming from Python's random implementation with the text "bound must be positive". That message does not contain "start" or "end", so the assertion failed.
+
+Why it happened (root cause)
+- Inside RandomStringUtils.random you compute or pass a length/bound using the difference end - start (or something equivalent) and then call a stdlib random function such as random.randrange(), random.randint() or secrets.randbelow() with that derived value.
+- If the caller passed start >= end (in the failing test they call RandomStringUtils.random(3, 5, 5, False, False)), the computed bound becomes zero or negative. The stdlib random function then raises its own ValueError ("bound must be positive"), long before your function performs any validation or raises a user-facing error that mentions the parameter names.
+- Because the exception originates from the stdlib call, its message does not include "start" or "end", so the test's message-content assertions fail.
+
+Where in the code it occurs
+- In the RandomStringUtils.random method, at the line that does the random selection using a computed bound (the call to random.randrange / random.randint / secrets.randbelow). The problematic variable is the computed bound (something like limit = end - start); the problematic parameters are start and end. The exception is raised right at that random.* call, before your own argument-checking code runs or produces a descriptive ValueError.
+
+Concrete fix (step-by-step)
+1. At the start of RandomStringUtils.random, add explicit validation of the start/end relationship before any calls into the random module:
+   - If end <= start (or however you define invalid), raise a ValueError that mentions the parameter names. Example:
+     raise ValueError(f"end ({end}) must be greater than start ({start})")
+   - Keep the existing negative-count check (raise for count < 0) and the count==0 -> return "" behavior.
+
+2. Ensure this check is placed before any computation that uses end - start as a bound for stdlib random calls. That guarantees your own ValueError is raised with a message containing "start" and "end".
+
+3. Optionally, make the message match the expected wording closely (the test only checks for substrings "start" and "end", so including those words is sufficient).
+
+Why this fix works
+- It prevents the stdlib random function from seeing a non-positive bound and raising its generic error. Instead your function raises a clear, parameter-specific ValueError whose message includes "start" and "end", satisfying the test and making the failure mode explicit to the caller.
+
+Example check to insert near the top of RandomStringUtils.random (pseudo-code showing variable names you already use):
+    if count < 0:
+        raise ValueError("count must not be negative")
+    if end <= start:
+        raise ValueError(f"end ({end}) must be greater than start ({start})")
+
+After this change, calling RandomStringUtils.random(3, 5, 5, False, False) will raise the intended ValueError and the test assertions for "start" and "end" in the message will pass.

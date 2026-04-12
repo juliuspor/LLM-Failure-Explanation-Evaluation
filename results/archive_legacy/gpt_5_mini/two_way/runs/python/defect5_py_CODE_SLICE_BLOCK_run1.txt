@@ -1,0 +1,59 @@
+What happened (root cause)
+- On line 338 you set inferred_type = type(array). That returns the Python type of the list object itself (e.g. builtins.list), not the element/component type inside the list.
+- ArrayUtils._copy_list_grow1 (called on line 342) expects an element/component type (so it can make a new list/array of that component type). Because you passed the list class instead of the element class, ArrayUtils receives the wrong type and creates an incorrectly typed/structured result. That leads to the later logic failing and the TypeError check on line 346 being meaningless for the actual problem.
+- This also breaks the empty-list case: if array is an empty list you have no element to query, but you still set inferred_type = type(array) (list) instead of falling back to object or element type. The expected_type comparison on line 346 (inferred_type == object) will be false, so the code will not raise the intended error even though the copy/resize step was given a wrong component type.
+
+Where it occurs (exact lines)
+- Line 338: inferred_type = type(array) — wrong value (list class instead of element type).
+- Line 342: new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — receives wrong type and produces a malformed result.
+- Line 346: if inferred_type == object and expected_type != object: — this check is ineffective because inferred_type will be list, not an element type or object.
+
+Why that causes a crash/incorrect behaviour
+- ArrayUtils._copy_list_grow1 acts on the component type you supply. Passing the list class causes it to create an array/list with the wrong component metadata or allocation, which later causes either an immediate failure when assigning element into new_list[-1] (line 343) or an incorrect runtime type that makes the cast-check logic meaningless.
+- The code intended to detect when only an object-typed array exists and an explicit expected_type prevents casting; but because inferred_type is wrong, that guard never triggers correctly.
+
+How to fix (concrete steps and exact code edits)
+1. Infer the element/component type from the array contents, not from the list object:
+   - Replace
+     inferred_type = type(array)
+     with
+     if len(array) > 0:
+         inferred_type = type(array[0])
+     else:
+         inferred_type = object
+   - This ensures for non-empty lists you use the actual element type.
+
+2. Keep the fallback to element if array is None:
+   - You already have elif element is not None: inferred_type = type(element) — keep that.
+
+3. Ensure you handle empty array + element is None:
+   - Current code falls back to object; keep inferred_type = object for that case.
+
+4. Update the guarded cast check if you need to detect broader cases:
+   - The check on line 346 compares inferred_type == object; after fixing inference that comparison will behave as intended. If you need to detect supertype/subtype relations instead of exact equality, use issubclass checks when appropriate (but only if inferred_type and expected_type are classes).
+
+5. Add tests:
+   - Test adding to a non-empty list of ints: array=[1,2], element=3 should infer int and succeed.
+   - Test adding to an empty list with expected_type=int and element=None should raise or behave as you want.
+   - Test array=None with element given infers element type.
+
+Example replacement for the inference block (exact lines to change)
+- Replace the first branch (currently lines ~336–340) with:
+
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Why this fix works
+- _copy_list_grow1 will receive the actual element type (or object for empty/unknown), so it can create a correctly typed new list/array and the element assignment new_list[-1] = element will behave as expected.
+- The cast check on line 346 will now correctly detect when you've got an object-typed list that cannot be cast to an expected_type.
+
+If you want, I can:
+- Suggest a robust approach for mixed-type lists (e.g., scan some elements to find a common supertype),
+- Or show a full patched function with unit tests.

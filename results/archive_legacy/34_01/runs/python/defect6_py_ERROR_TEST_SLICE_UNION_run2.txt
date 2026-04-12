@@ -1,0 +1,49 @@
+What happened
+- The test calls cc.add_number(-0.0) and expects the string '-0.0'.
+- The code instead produced '0' (or numeric 0 that printed as '0'), so the assertion failed with "Expected -0.0, got 0".
+
+Why it happened (root cause)
+- Somewhere between add_number and the final output the negative sign on the floating-point zero was dropped.
+- From your slice, the relevant methods are add_number (the caller), add (defined at line 126) and append (called at line 138). That tells us the value is being transformed or coerced inside one of those steps.
+- A very common and specific cause is normalization code that treats any number equal to  numeric zero as plain zero. For example:
+  - if value == 0: value = 0
+  - or using a truthiness check like if not value: ...
+  Both of those discard the sign bit of -0.0 because in IEEE floats -0.0 == 0.0 is true. That makes -0.0 indistinguishable from +0.0 via equality or truthiness tests, so the code replaces it with a plain 0 or string "0".
+- Another possible spot is formatting code that uses an integer conversion (int(value)) or a formatter that collapses the sign for zero. Any code that normalizes or coerces zero values will remove the negative-zero sign.
+
+Where exactly it occurred
+- The test shows add_number(-0.0) -> get_code() returns '0'. The relevant code path goes through:
+  - add_number (your test call)
+  - add(self, newcode) at line 126
+  - self.append(newcode) at line 138
+- So check add_number and add for any equality/normalization or formatting applied to numeric values before append is called. That is where the sign was lost.
+
+How to fix it (concrete steps)
+1. Inspect add_number and add (around lines 126 and the code that calls append at 138).
+   - Look for any code like "if value == 0", "if not value", "value = 0", "int(value)" or other normalizing branches and remove or change them.
+2. Preserve the sign of zero when you need to keep it:
+   - To detect negative zero without losing sign use math.copysign or inspect the sign bit:
+     - import math
+     - is_negative_zero = (value == 0.0) and (math.copysign(1.0, value) < 0.0)
+   - Or detect sign with struct if you prefer bit-level check:
+     - import struct
+     - bits = struct.unpack('<Q', struct.pack('<d', value))[0]; sign = bool(bits >> 63)
+3. When converting to a string for output, use a conversion that preserves sign for -0.0:
+   - Use repr(value) or format(value, '.17g') and verify it keeps '-0.0' (repr(-0.0) -> '-0.0').
+   - Do NOT replace all zeros with '0' unconditionally.
+4. Add a unit test that fails before the fix and passes after:
+   - assert math.copysign(1.0, cc._last_number) < 0 when you expect a negative zero
+   - keep your existing test asserting result == '-0.0'
+
+Minimal code change example
+- Replace a problematic normalization like:
+    if value == 0:
+        value = 0
+  with:
+    if value == 0 and math.copysign(1.0, value) > 0:
+        value = 0  # only normalize positive zero; leave negative zero alone
+
+Why this will work
+- Equality tests treat -0.0 and +0.0 as equal; the sign bit is separate. Using math.copysign or preserving the original float value avoids accidentally losing the negative sign. Converting to a string with repr or a careful formatter will then produce the expected '-0.0'.
+
+If you want, paste the body of add_number and add (around lines 120–140) and I will point to the exact line to change.

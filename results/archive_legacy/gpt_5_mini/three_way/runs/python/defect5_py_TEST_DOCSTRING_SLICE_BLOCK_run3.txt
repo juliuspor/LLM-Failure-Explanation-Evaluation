@@ -1,0 +1,65 @@
+What happened (what fails)
+- In add(...) the code decides the element type for the new list and then rejects certain cases with a TypeError at lines 346–351 in your slice. That check runs when inferred_type == object and expected_type != object and raises a TypeError claiming an Object[] → ExpectedType[] cast error.
+- The failing test is test_add_null_to_null_with_expected_type: you call ArrayUtils.add(None, None, expected_type=str). Both the input array and the element are None, so the code computes inferred_type == object. Because expected_type is str (not object) the code enters the if at lines 346–351 and raises the TypeError, so the function fails. The test expects a list [None] (a Python list can hold None and caller expects string elements), but you prevent that by throwing.
+
+Why it fails (root cause)
+- inferred_type is object whenever the implementation cannot infer a more specific element type (for example when both array and element are None).
+- The code treats "inferred_type == object and expected_type != object" as a hard mismatch and raises immediately (lines 346–351). That is wrong for the case where the caller supplied an expected_type: if everything else is None we should respect expected_type (i.e., allow creating a list whose items the caller intends to be that type). In short, the code rejects the exact situation it should accept: null array + null element + expected_type != object.
+- The logic conflates two different situations:
+  1) real mismatch where an existing element's type cannot be cast to expected_type (should raise),
+  2) unknown/inferable type (object) where expected_type should be accepted or used as the inferred type (should not raise).
+
+Where in the code it occurs
+- The failing check is these lines (numbers from your slice):
+  346 | if inferred_type == object and expected_type != object:
+  347 |     raise TypeError(
+  348 |         f"Cannot cast object list to {expected_type.__name__} list "
+  349 |         f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  350 |         f"[Ljava.lang.{expected_type.__name__};)"
+  351 |     )
+- This is done inside ArrayUtils.add (the code that computes inferred_type and compares to expected_type).
+
+Concrete fixes (step-by-step, exact changes)
+Option A — Prefer minimal change: accept expected_type when inferred_type is object and array/element provide no contrary evidence
+1. Replace the check at lines 346–351 with logic that only raises when there is an actual incompatible concrete type present. Example replacement (pseudo-Python patch):
+
+  # old:
+  # if inferred_type == object and expected_type != object:
+  #     raise TypeError(...)
+
+  # new:
+  if inferred_type == object:
+      # If everything is unknown (no concrete element type), allow expected_type to drive result.
+      if expected_type is None or expected_type == object:
+          # nothing to do, result list element type remains object
+          pass
+      else:
+          # use expected_type as the inferred element type (no exception)
+          inferred_type = expected_type
+
+2. Ensure later code uses inferred_type when creating the new list so the result is typed/treated as expected_type.
+3. Add/adjust tests: keep test_add_null_to_null_with_expected_type (should pass) and add a test where array contains a concrete incompatible element and expected_type doesn't match — that should still raise.
+
+Option B — Explicit special-case null/null with expected_type
+1. Before type-checking block, add:
+
+  if array is None and element is None and expected_type is not None and expected_type != object:
+      inferred_type = expected_type
+      # proceed; do not raise
+
+2. Keep the rest of logic intact.
+
+Why these fixes are correct
+- If nothing concrete is present to contradict expected_type (both array and element are None or only object-type info exists), using expected_type to build the result is the caller's intent and avoids false errors.
+- If there is a concrete element whose type is incompatible with expected_type, you still want to raise. The replacement/branch preserves that: only treat the unknown/object case as overrideable.
+
+Other improvements to consider
+- The error message claims a Java ClassCastException and mentions "[Ljava.lang.Object;" which is confusing/misleading in Python; either remove the Java-specific phrasing or make it accurate for the runtime.
+- Make expected_type optional (None) rather than treating object as a sentinel; be explicit about None meaning "no expectation".
+- Add unit tests that cover:
+  - array with a concrete element whose type conflicts with expected_type → should raise
+  - array None + element None + expected_type provided → should succeed and return [None]
+  - array None + element non-None + expected_type provided that matches/doesn't match → should behave accordingly
+
+Summary in one sentence
+The code raises at lines 346–351 whenever inferred_type == object and expected_type != object, which incorrectly rejects the valid case where both array and element are None but the caller supplied an expected_type (e.g., str); fix by letting expected_type override ambiguous/object inference (or special-case the null/null case) instead of raising.

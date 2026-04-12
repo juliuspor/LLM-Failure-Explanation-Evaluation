@@ -1,0 +1,43 @@
+What happened
+- The input string is "fr__POSIX".
+- In to_locale, after handling the 2-letter language, the code assumes the next two characters (indexes 3 and 4) are an uppercase country code and checks them at lines 237–240:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- For "fr__POSIX" the characters are:
+  - index 0 = 'f', 1 = 'r', 2 = '_', 3 = '_' , 4 = 'P' ...
+- So ch3 is '_' (not an uppercase A–Z), the check fails and the code raises ValueError("Invalid locale format: fr__POSIX").
+
+Why this is the root cause
+- The code only supports patterns like:
+  - "fr" (language only)
+  - "fr_CA" (language + country)
+  - "fr_CA_POSIX" (language + country + variant)
+- It does not support the valid pattern where the country is omitted but the variant is present, which is represented with two underscores: "language__variant" (i.e. country == empty). The code never checks for the double-underscore case and therefore misinterprets the second underscore as a required country-letter and rejects it.
+
+Where it occurs (exact lines)
+- Lines 237–240: reading and validating ch3 and ch4 as a country code causes the ValueError.
+- Lines 245–247: the later logic assumes a country exists and expects the underscore before the variant; that path doesn't handle the empty-country case either.
+
+How to fix it (concrete steps)
+1. Detect the empty-country pattern before the country-letter check:
+   - At or before line 237, add a branch that checks whether locale_str[2] == '_' and locale_str[3] == '_'. That indicates language + empty country + variant.
+2. If you detect the double-underscore case, return a Locale with:
+   - language = locale_str[0:2]
+   - country = '' (empty string)
+   - variant = locale_str[4:] (variant starts at index 4 for "fr__POSIX")
+   - Example: return Locale(locale_str[0:2], '', locale_str[4:])
+3. Otherwise, keep the existing behavior for the normal country-present and country+variant forms.
+
+Suggested patch sketch (where to insert)
+- Before the current ch3/ch4 checks (around line 237), add:
+  if locale_str[2] == '_' and locale_str[3] == '_':
+      # language__variant -> empty country, variant starts at index 4
+      return Locale(locale_str[0:2], '', locale_str[4:])
+- Leave the current checks intact for the other patterns.
+
+What this achieves
+- "fr__POSIX" will be parsed as Locale('fr', '', 'POSIX') instead of raising ValueError.
+- Existing valid inputs like "fr_CA" and "fr_CA_POSIX" will continue to be parsed the same way.
+
+No other behavior changes are needed unless you want additional validation on variant characters; the core bug is the missing double-underscore branch that causes the failure at lines 237–240.

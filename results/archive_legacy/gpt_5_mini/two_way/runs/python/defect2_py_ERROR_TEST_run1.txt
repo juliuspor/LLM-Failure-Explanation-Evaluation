@@ -1,0 +1,57 @@
+What happened (where and when)
+- The test fails when calling GrayPaintScale.get_paint(-0.5). The exception comes from whatever code constructs the RGB color after computing the gray level and is raised as:
+  ValueError: Color parameter outside of expected range: Red Green Blue
+- The root cause is in GrayPaintScale.get_paint: the method computes a gray level from the input value but does not clamp that computed level into the valid 0–255 integer range before building/returning the RGB color. When the input is outside the defined bounds (the tests pass -0.5 and 1.5), the computed gray value becomes < 0 or > 255 (or possibly a non-integer float), and the color constructor you use rejects those values and raises the shown ValueError.
+
+Why this happens (step-by-step, referencing method/variables)
+1. The test calls GrayPaintScale.get_paint(value). The class and method are named exactly: GrayPaintScale.get_paint.
+2. Inside get_paint the code likely computes a normalized fraction:
+     fraction = (value - lower_bound) / (upper_bound - lower_bound)
+   using the instance variables lower_bound and upper_bound.
+3. That fraction is then scaled to bytes:
+     gray = fraction * 255.0
+   or converted with int(gray) somewhere later.
+4. For inputs outside [lower_bound, upper_bound] — e.g. value = -0.5 with lower_bound == 0.0 — fraction is negative, so gray < 0. For value = 1.5, gray > 255. The code then tries to construct the RGB color (for example (gray, gray, gray) or by passing gray to some color API).
+5. The color API (or your own checks) expects integer components in 0..255. Getting values < 0 or > 255 (or possibly floats where ints are required) triggers the ValueError you see: "Color parameter outside of expected range: Red Green Blue".
+
+Concrete places to inspect in your code
+- The get_paint method in hit02_grayscale.py — find the lines that:
+  - compute the normalized fraction from value, lower_bound, upper_bound,
+  - compute gray = fraction * 255.0 (or similar),
+  - and the line that builds/returns the RGB triple or calls the color constructor (e.g. return (gray, gray, gray) or return Color(gray, gray, gray)).
+- Specifically verify any lines that handle out-of-range values for value, and the line that casts/scales gray before returning.
+
+Exact fixes (step-by-step)
+1. Clamp the input fraction or the computed gray level into the valid range BEFORE making the color:
+   - Ensure fraction is in [0.0, 1.0] if you use fraction:
+       fraction = max(0.0, min(1.0, (value - lower_bound) / (upper_bound - lower_bound)))
+     then compute gray = int(fraction * 255.0)
+   - Or clamp the computed gray:
+       gray = int(round(fraction * 255.0))
+       gray = max(0, min(255, gray))
+2. Use integer RGB components (0..255) when building/returning the tuple:
+       return (gray, gray, gray)
+3. If you expect exact mapping for 0.5 -> 127 (test expects 127), use int(fraction * 255.0) or math.floor; be consistent with the tests. The test expects 0.5 -> 127, so use int(fraction * 255.0) (truncation) or int(math.floor(...)).
+4. Add explicit handling for degenerate range (upper == lower): avoid division by zero by returning black or white, or a fixed gray.
+
+Minimal example corrected implementation for get_paint
+- Replace the core of get_paint with something like:
+     def get_paint(self, value):
+         # compute normalized fraction
+         if self.upper == self.lower:
+             fraction = 0.0
+         else:
+             fraction = (value - self.lower) / (self.upper - self.lower)
+         # clamp fraction to [0.0, 1.0]
+         fraction = max(0.0, min(1.0, fraction))
+         # scale to 0..255 and convert to integer (tests expect truncation)
+         gray = int(fraction * 255.0)
+         return (gray, gray, gray)
+
+Why this will fix the test failures
+- For value = -0.5 with default bounds 0.0..1.0, fraction becomes -0.5 but is clamped to 0.0, so gray = 0 -> (0,0,0).
+- For value = 1.5, fraction becomes 1.5 but is clamped to 1.0, so gray = 255 -> (255,255,255).
+- For 0.5, fraction is 0.5 -> gray = int(127.5) = 127 -> (127,127,127) as the test expects.
+- All returned components are integers in 0..255, preventing the ValueError.
+
+If you want, paste your current hit02_grayscale.py (the get_paint method or whole file) and I will point to the exact lines to change and give a precise patch.

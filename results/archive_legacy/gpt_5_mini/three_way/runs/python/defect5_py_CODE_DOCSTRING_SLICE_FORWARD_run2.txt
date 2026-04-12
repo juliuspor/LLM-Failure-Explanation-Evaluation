@@ -1,0 +1,65 @@
+What went wrong (root cause)
+- On line 3 you do:
+  inferred_type = type(array)
+  but type(array) returns the type of the container (normally <class 'list'>), not the component/element type you intend to carry forward. The rest of the function treats inferred_type as the element/component type, so you end up passing the wrong type information into ArrayUtils._copy_list_grow1 and into later checks.
+- Consequence: ArrayUtils._copy_list_grow1 is given the list class instead of the element class. That produces a list with the wrong "component" type (or triggers whatever type logic ArrayUtils uses), so when you later assign element into the new list you get a type mismatch / ClassCast-like error at runtime.
+- A secondary issue is the check:
+  if inferred_type == object and expected_type != object:
+  This assumes inferred_type will be the element class or the literal object class. But because inferred_type can be <class 'list'>, this comparison won't express the intended semantics (and using equality on types here is brittle).
+
+Where this happens in your code
+- Line: inferred_type = type(array) (the branch when array is not None) — this is the incorrect capture of the container's type instead of the element type.
+- Line: new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — _copy_list_grow1 receives wrong type information.
+- Line: if inferred_type == object and expected_type != object: — the test is both brittle and will not detect the real mismatch that originated above.
+
+Why that causes the failure (concrete example)
+- Suppose array is a List[int] (a normal Python list of ints). type(array) returns list (i.e. <class 'list'>). You pass <class 'list'> as the component type to _copy_list_grow1. If ArrayUtils expects a component class (like int) it will create a copy/list structure that is not compatible with placing an int into it the way the code expects, and you get a runtime type error when assigning element into new_list[-1].
+
+How to fix it (step-by-step, specific)
+1. Decide what inferred_type should mean: the element type (class of list elements), not the container's type.
+2. When array is not None, derive the element type from the array contents — for example by finding the first non-None element and using its type. If the array is empty or all-None, fall back to expected_type if provided, otherwise object.
+3. Use isinstance/issubclass checks for compatibility instead of equality to object.
+4. Validate element against the chosen inferred_type before assignment and raise a clear TypeError if incompatible.
+
+Corrected code (drop-in replacement)
+- Replace your inferred_type logic with something like:
+
+    if array is not None:
+        # pick first non-None element's type as element/component type
+        inferred_type = None
+        for it in array:
+            if it is not None:
+                inferred_type = type(it)
+                break
+        if inferred_type is None:
+            # no non-None elements to infer from; use expected_type if available
+            inferred_type = expected_type if expected_type is not None else object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+    # validate element compatibility
+    if element is not None and inferred_type is not object and not isinstance(element, inferred_type):
+        raise TypeError(f"Element of type {type(element).__name__} is not compatible with inferred type {inferred_type.__name__}")
+
+    new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+    new_list[len(new_list) - 1] = element
+
+    # if expected_type was supplied, ensure we can produce that type
+    if expected_type is not None and inferred_type is object and expected_type is not object:
+        raise TypeError(
+            f"Cannot cast object list to {expected_type.__name__} list "
+            f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+            f"[Ljava.lang.{expected_type.__name__};)"
+        )
+
+Notes and rationale
+- Use the first non-None element because a list may contain None placeholders; those don't tell you the element type.
+- If there are no elements to inspect, fall back to expected_type (if the caller provided it) or object.
+- Using isinstance for compatibility checks is safer than comparing types for equality.
+- These changes keep the rest of your function semantics the same while ensuring _copy_list_grow1 receives the actual element type rather than the list type.
+
+If you want, I can:
+- show a minimal unit test that reproduces the failure with the original code,
+- or adapt the corrected code to your exact ArrayUtils._copy_list_grow1 contract if you paste that method.

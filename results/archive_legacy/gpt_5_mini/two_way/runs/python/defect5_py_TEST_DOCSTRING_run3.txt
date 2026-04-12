@@ -1,0 +1,73 @@
+What failed
+- The failing test is test_add_null_to_null_with_expected_type(). It calls:
+  ArrayUtils.add(None, None, expected_type=str)
+  and expects the method to return [None] (a one-element list) without raising a TypeError.
+- Instead the implementation raises a TypeError (or otherwise refuses to produce a list of the requested element type). In short: when both array and element are None the method ignores the expected_type argument and picks object (or refuses the operation), causing the caller's expectation to be violated.
+
+Where it happens (likely)
+- Inside ArrayUtils.add, in the branch that handles array is None (often code like if array is None: ...).
+- Specifically in the code that determines the "component type" or "element type" for the new list:
+  - The code sets component_type based on the element when element is not None.
+  - If element is None it picks object (or not use expected_type), and then enforces type checks that reject using expected_type when element is None.
+- Also the TypeError is raised in the type-checking block (something like if element is not None and not isinstance(element, component_type): raise TypeError), but the logic treats component_type incorrectly when element is None and expected_type is supplied.
+
+Why it happens (root cause)
+- The implementation infers the element type only from the element value, not from the supplied expected_type argument when array is None and element is None.
+- When both array and element are None the implementation either:
+  - (A) chooses component_type = object unconditionally and then later enforces that the returned list should be of object type (or tries to coerce), or
+  - (B) rejects the operation because it can't infer a concrete element type, raising TypeError.
+- The expected_type parameter exists precisely to disambiguate this case (caller expects a list of that element type even though element is None). The code fails to consult expected_type in this branch.
+- As a result, callers that explicitly pass expected_type=str get an error or a list of the wrong inferred type (object rather than str), which is exactly what your tests are designed to catch.
+
+What to change (concrete steps)
+1. In ArrayUtils.add, find the branch that handles array is None (look for "if array is None:" or similar).
+2. When array is None:
+   - Decide component_type using:
+     - component_type = expected_type if expected_type is not None
+     - elif element is not None: component_type = type(element)
+     - else: component_type = object
+   - This ensures that expected_type overrides ambiguity when both array and element are None.
+   - Example (pseudo-code):
+     if array is None:
+         if expected_type is not None:
+             component_type = expected_type
+         elif element is not None:
+             component_type = type(element)
+         else:
+             component_type = object
+         new_array = [None] if element is None else [element]
+         return new_array  # No TypeError
+3. Type checking: only raise TypeError when you actually have a concrete element value that violates the component_type:
+   - Do not raise TypeError when element is None. None should be allowed in lists of any element type (it’s a valid placeholder).
+   - Only do: if element is not None and not isinstance(element, component_type): raise TypeError(...)
+4. For add_at_index: ensure the same component_type logic is applied when array is None and index == 0. Also enforce IndexError when index != 0 for a None array.
+5. Ensure the original array is not modified: allocate a new list (e.g., new = list(array) if array is not None else ...) and return the new list.
+
+Minimal patch illustration (conceptual)
+- Replace the current inference with:
+    if array is None:
+        if expected_type is not None:
+            component_type = expected_type
+        elif element is not None:
+            component_type = type(element)
+        else:
+            component_type = object
+        # create new list
+        if element is None:
+            return [None]
+        else:
+            if not isinstance(element, component_type):
+                raise TypeError("element type mismatch")
+            return [element]
+
+- And modify later type-checking to guard with "if element is not None".
+
+Why this fixes the test
+- When caller calls ArrayUtils.add(None, None, expected_type=str):
+  - component_type becomes str (because expected_type was provided).
+  - element is None so no type-checking rejection occurs.
+  - The method returns [None], honoring the expected_type and not raising TypeError.
+
+Summary
+- Root cause: when both array and element are None, expected_type is ignored and the code either chooses object or raises a TypeError.
+- Fix: use expected_type to determine component_type when array is None and element is None, and do not reject None values when enforcing type checks. Also apply the same logic in add_at_index.

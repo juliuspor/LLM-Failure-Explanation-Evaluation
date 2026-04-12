@@ -1,0 +1,43 @@
+What happened (where it fails)
+- The failure occurs in the factory method that builds a time-zone from hours and minutes offsets. The relevant checks are at lines shown in the slice: the code at line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- That unconditional rejection of any negative minutes causes valid inputs to be rejected. According to the docstring, negative minutes are allowed in some cases:
+  - (0, -15) should produce +00: -00:15 (i.e. negative minutes when hours == 0),
+  - (-2, -15) should produce -02:15 (negative hours with negative minutes),
+  - but (2, -15) must be rejected.
+
+Why it fails (root cause)
+- The code currently forbids any negative minutes (line 400). Because of that, the later logic at lines 406–409 that tries to combine hours and minutes by adjusting sign is never reached for negative minutes.
+- Concretely: when you call the method with minutes_offset < 0 (for example (0, -15) or (-2, -15)), the method raises ValueError("Minutes out of range") at line 400 even though the docstring allows those combinations. The check is too strict and does not implement the documented rules about when negative minutes are acceptable.
+
+Where exactly in the code to change
+- Change the validation at line 400 so minutes_offset is allowed in the range -59..+59 instead of only 0..59.
+- After allowing negative minutes, enforce the documented sign rules:
+  - If hours_offset > 0 and minutes_offset < 0 then raise ValueError (example (2, -15) must be invalid).
+  - Otherwise compute the total offset in minutes as hours_offset * 60 + minutes_offset (taking the minutes sign as given when hours are zero or negative).
+- Keep the existing overflow check (line 411) that ensures the resultant offset magnitude does not exceed the allowed maximum (±23:59:59.000).
+
+Suggested concrete fix (step-by-step)
+1. Replace the test at line 400 with:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Immediately after that, add the sign compatibility check:
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError(f"Minutes must not be negative when hours is positive: {minutes_offset}")
+
+   # (No need to reject hours < 0 with minutes > 0; docstring allows (-2, +15) -> -02:15)
+
+3. Compute total minutes and offset:
+   total_minutes = hours_offset * 60 + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Leave the existing check that raises ValueError("Offset is too large") if the computed offset exceeds allowed range (line 411). Then return cls.for_offset_millis(offset) as at line 412.
+
+Why this fixes it
+- This accepts valid negative minutes when hours is zero or negative, rejects invalid combinations like (2, -15), and produces the correct signed total offset by simple addition. It also preserves the overflow protection already present.
+
+Notes
+- Make sure to test boundary cases: (-23, -59), (+23, 59), (0, -59), (0, 59), and invalid (24, 0) or (2, -15) to confirm behavior matches the docstring.

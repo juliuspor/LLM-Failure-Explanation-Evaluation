@@ -1,0 +1,39 @@
+What happened (what failed)
+- The code throws ValueError: "Minutes out of range: -15". That means a minutes value of -15 reached a validator that expects 0..59.
+- The bad value comes from the variable minutes_offset, which is being reused and combined with hours_in_minutes at lines 402 and 404 shown in your slice.
+
+Where it occurred (exact lines & variables)
+- At line 402: minutes_offset = hours_in_minutes - minutes_offset
+- At line 404: minutes_offset = hours_in_minutes + minutes_offset
+- After those lines you compute offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) and then call cls.for_offset_millis(offset). The ValueError is raised earlier by the minutes validation when an invalid minutes value (–15) was created.
+
+Why it happened (root cause)
+- minutes_offset already contains a signed minutes component (for example -15) when you start combining it with hours_in_minutes.
+- The code at lines 402 / 404 combines the two values directly while reusing the same variable name minutes_offset, but it does not normalize the minutes component to a positive 0..59 value or keep the sign separate.
+- As a result you can end up passing a negative minute count into the validator or into later arithmetic. Concretely: if minutes_offset is -15 and you later use that value where a minutes component is expected, the validator sees -15 and throws ValueError: "Minutes out of range: -15".
+
+Concrete example
+- Suppose the parsed components are: hours = 1 → hours_in_minutes = 60; minutes component parsed into minutes_offset = -15 (negative because of a leading sign).
+- If the code then does minutes_offset = hours_in_minutes - minutes_offset (line 402) or minutes_offset = hours_in_minutes + minutes_offset (line 404) without first normalizing minutes to 0..59 or applying the sign consistently, you can produce incorrect intermediate values or pass the negative -15 into validation.
+
+How to fix it (clear, step-by-step)
+1. Keep the sign separate from the absolute minute value.
+   - Introduce a variable sign = +1 or -1 depending on the parsed sign.
+   - Let minutes_abs = abs(parsed_minutes) and validate minutes_abs is between 0 and 59.
+2. Compute total minutes explicitly and clearly:
+   - total_minutes = sign * (hours_in_minutes + minutes_abs)  OR
+   - total_minutes = sign * hours_in_minutes + sign * minutes_abs
+   Choose the interpretation your format requires (most time offsets are sign*(hours + minutes/60)).
+3. Use total_minutes for downstream operations:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+4. Remove reuse of minutes_offset for multiple meanings:
+   - Don’t overwrite the parsed minutes component with combined values. Use distinct variables: parsed_minutes, minutes_abs, total_minutes.
+5. Add an explicit minutes-range check before combining:
+   - if not (0 <= minutes_abs < 60): raise ValueError(f"Minutes out of range: {parsed_minutes}")
+
+Why these steps fix it
+- They prevent a negative minute component from reaching the validator by treating sign and magnitude separately.
+- They make the arithmetic explicit so you cannot accidentally subtract when you intended to add, or reuse a variable in a way that hides its meaning.
+
+If you want, paste the parsing function around the lines you showed and I’ll rewrite the four lines to a safe, explicit version using separate variables and the checks above.

@@ -1,0 +1,69 @@
+What goes wrong (short answer)
+- The loop that advances pos after a translator consumes codepoints is advancing the wrong indices and can cause code_point_at(...) to be called with an out-of-range index. That leads to the IndexError you see when an input contains a surrogate pair followed by another character (e.g. "\U0001F630A").
+
+Exactly where and why (line/variable names)
+- Problem area (in your snippet):
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- Variables:
+  - pos: index into code_units (UTF-16 code units).
+  - consumed: value returned by translate_codepoint(...).
+  - code_point_at(code_units, pos): reads one codepoint starting at pos and will read the following code unit for a surrogate pair.
+  - char_count(...): returns 1 for BMP codepoints, 2 for supplementary codepoints (surrogate pair).
+- Why it fails:
+  - code_point_at reads from code_units at the index pos and may look at pos+1 for a low surrogate. If pos is equal to length-1 (last unit) and you call code_point_at(pos) expecting a high surrogate there, code_point_at will try to read pos+1 and go out of bounds.
+  - That can happen because pos is being updated inside the for-loop in a way that makes subsequent iterations call code_point_at at an index that is not a valid codepoint start (for example, at the low-surrogate unit or at length-1), depending on what consumed means.
+  - The root of the confusion: the code assumes a particular meaning for consumed (codepoints vs code units) and mixes that with calls to code_point_at/char_count in a way that can double-advance or leave pos pointing to an invalid index before the next call.
+
+Concrete example that reproduces the problem (using your test case)
+- input_str = "\U0001F630A"
+  - to_utf16_code_units yields code_units like [high_surrogate, low_surrogate, 'A'] (length = 3)
+- Suppose translate_codepoint returns consumed = 1 (it consumed the emoji as one codepoint).
+- Enter the for pt in range(consumed) loop once:
+  - pos starts at 0
+  - call code_point_at(code_units, 0) -> sees a surrogate pair and returns the codepoint; char_count(...) == 2
+  - pos += 2 -> pos becomes 2
+- That iteration is fine. But in other translator behaviors (or with different consumed values), the loop will call code_point_at at an index equal to length-1 or at the low-surrogate index and code_point_at will attempt to read pos+1 and raise IndexError. The code as written does not make the intended contract explicit and thus causes an out-of-range access.
+
+What actually happened in your failing test (where you saw IndexError)
+- The loop advanced pos incorrectly relative to how consumed is defined, so code_point_at was called with a pos that points to the low surrogate or beyond the last unit. code_point_at then attempted to read the partner code unit (pos+1) and hit an IndexError.
+
+Two precise, non-vague fixes (pick the one that matches your translator contract)
+
+1) If translate_codepoint(...) returns the number of code units consumed (i.e. 1 for a BMP char, 2 for a surrogate pair)
+- Replace the for loop with a single jump by consumed code units:
+  for pt in range(consumed):
+      pos += 1
+  # or simply
+  pos += consumed
+- Rationale: consumed already counts code units, so advance pos by that many UTF-16 code units. This avoids calling code_point_at again and eliminates out-of-range reads.
+
+2) If translate_codepoint(...) returns the number of codepoints consumed (i.e. how many Unicode codepoints were consumed), keep the per-codepoint advance but compute each codepoint only when it is safe:
+- Use a loop that obtains the codepoint at the current pos and advances exactly by that codepoint's char_count, making sure you never call code_point_at at an index beyond length-1:
+  for _ in range(consumed):
+      # code_point_at must be called with a start index that is known to be the start of a codepoint
+      cp = code_point_at(code_units, pos)
+      pos += char_count(cp)
+- Rationale: this reads the codepoint at the current valid pos and advances by 1 or 2 as needed; you never call code_point_at at an index that is already past the last valid start. (This is what your code tries to do, but you must ensure consumed actually counts codepoints and not units.)
+
+Which one to choose
+- Inspect your translate_codepoint(...) contract:
+  - If it returns units (1 or 2), use fix #1.
+  - If it returns codepoints (1, 2, ... meaning how many Unicode codepoints were consumed), use fix #2 but implement it exactly as shown (call code_point_at once per iteration before advancing).
+- From your comment "Contract with translators is that they have to understand codepoints and they just took care of a surrogate pair", it sounds like consumed is meant to be a count of codepoints. In that case apply fix #2 and ensure translate_codepoint never leaves pos pointing inside a surrogate pair before the loop runs.
+
+Exact minimal code change (if codepoints are intended)
+Replace:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+with:
+    for _ in range(consumed):
+        cp = code_point_at(code_units, pos)
+        pos += char_count(cp)
+
+Exact minimal code change (if units are intended)
+Replace the whole for-loop with:
+    pos += consumed
+
+Summary
+- The bug is an out-of-range read caused by advancing pos the wrong way after consumed > 0. The root cause is ambiguity about whether consumed counts code units or codepoints and subsequently calling code_point_at at invalid indices. Fix by choosing the correct advance strategy (pos += consumed for units, or compute a codepoint at pos and pos += char_count(cp) per codepoint) and make the contract of translate_codepoint explicit in code and/or comments.

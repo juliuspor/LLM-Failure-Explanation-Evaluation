@@ -1,0 +1,48 @@
+What failed
+- Root cause: line 336 uses type(array) to set inferred_type. type(array) is the list class (e.g. list), not the element/component type. That wrong value is used later in the type-check/raise at lines 346–351, so the function makes wrong decisions about whether the new list can be cast to expected_type.
+
+What happens, where (line references)
+- Line 336: inferred_type = type(array) — this yields the list's class (list), not the element type.
+- Line 337–340: only if array is None or element is None do you set inferred_type from element or to object. In particular, when both array and element are None the code does inferred_type = object at line 340.
+- Line 346: if inferred_type == object and expected_type != object: raise TypeError(...) — this raises when the code thinks the list's component type is object but expected_type is a concrete type.
+
+Concrete failure example
+- Call with array=None, element=None, expected_type=int:
+  - Line 337–340 sets inferred_type = object (line 340).
+  - Line 346 sees inferred_type == object and expected_type != object, and raises TypeError.
+  - According to the docstring, when both array and element are None you should return a single-element List[object], not raise. The function wrongly treats list-vs-element type because inferred_type was computed incorrectly elsewhere and the object-case check is overly strict.
+
+Why this is the root cause (no jargon)
+- The code should reason about the type of elements inside the list (component type), not the Python type of the list object itself. Using type(array) returns the container type (list), so downstream checks (is this an object/unknown element type?) become incorrect and produce an incorrect TypeError at line 346 when expected_type is provided.
+
+How to fix it (explicit steps and exact places)
+1. Infer element/component type from the array contents, not from the list object:
+   - Replace line 336:
+     - From: inferred_type = type(array)
+     - To something like:
+       - if array: inferred_type = type(array[0])  # assume homogeneous list, or scan to find a non-None element
+       - else: (fall through to element/None handling)
+   - If the list might contain only None values, scan for the first non-None element to infer type; if none found, treat inferred_type = object.
+
+2. Adjust the object-case check at line 346 so you don't raise just because the component type is unknown:
+   - If both array and element are None, you should produce List[object] instead of raising. So change the condition to only raise when you actually know an object component came from mixing incompatible known types. For example:
+     - Only raise if inferred_type == object and (array is not None or element is not None) and expected_type != object
+     - Or better: if expected_type is provided, check compatibility with inferred_type (if known) and allow None element to be compatible with any reference type.
+
+3. Example replacement logic (conceptual, insert around lines 335–346):
+   - if array is not None:
+       - if array: inferred_type = type(first non-None element in array)
+       - else: inferred_type = None  # unknown until we see element
+   - elif element is not None:
+       - inferred_type = type(element)
+   - else:
+       - inferred_type = object
+   - Then when checking against expected_type:
+       - if inferred_type is not None and inferred_type != object and not issubclass(inferred_type, expected_type): raise TypeError(...)
+       - do not raise just because inferred_type == object and expected_type != object when both array and element were None.
+
+Why these fixes solve it
+- Inferring from array[0] (or first non-None element) gives you the actual component type, so you no longer confuse the container type (list) with the element type.
+- Not raising simply because the component is unknown (object) prevents false-positive TypeError when both inputs are None and the correct return is List[object], matching the docstring.
+
+If you want, I can produce a small patched code snippet that implements these changes and unit tests that show the previous failing case and the corrected behavior.

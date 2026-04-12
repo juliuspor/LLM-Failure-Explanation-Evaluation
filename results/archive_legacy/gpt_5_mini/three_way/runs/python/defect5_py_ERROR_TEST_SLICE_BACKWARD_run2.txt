@@ -1,0 +1,51 @@
+What happened (root cause)
+- In ArrayUtils.add, the code tries to infer the component type it should produce using the variable inferred_type (see lines 335–340).
+  - Line 335: if array is not None: inferred_type = type(array)
+  - Line 337: elif element is not None: inferred_type = type(element)
+  - Line 340: else: inferred_type = object
+- Later (lines 346–347) it refuses to proceed when inferred_type == object but expected_type != object:
+  - if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+
+In the failing test you call ArrayUtils.add(None, None, expected_type=str). Both array and element are None, so code falls through to inferred_type = object (line 340). Because expected_type is str (not object), the code hits the check at lines 346–347 and raises the TypeError you see. In other words, when both array and element are None the implementation doesn't use the supplied expected_type; instead it assumes object and then rejects the requested expected_type — this is precisely why you get the cast/TypeError.
+
+Why this is wrong / why it fails here
+- The code never uses expected_type to set inferred_type when both array and element are None. That makes the function inconsistent with its caller's expectation:
+  - Caller asked for a String[] (expected_type=str) but the function decided inferred_type = object and then refused to create an array for the requested expected_type.
+- The immediate result is a raised TypeError (the code explicitly raises) rather than returning a one-element list typed as the requested expected_type. That matches the test description and the Java-style ClassCastException message.
+
+Where to change it (concrete steps)
+1. Change the inference order so expected_type is considered when array and element are both None. Replace the block around lines 335–340 with:
+   - if array is not None:
+       inferred_type = type(array)
+     elif element is not None:
+       inferred_type = type(element)
+     elif expected_type is not None:
+       inferred_type = expected_type
+     else:
+       inferred_type = object
+
+2. Remove the raise at lines 346–347 (or change its condition) so you do not reject valid calls when expected_type was provided. For example:
+   - If you keep the consistency check, only raise when inferred_type is object and expected_type is not provided (or is None):
+       if inferred_type is object and expected_type is None:
+           raise TypeError(...)
+   - Or simply do not raise at all and use expected_type (or inferred_type) to create/return the new array.
+
+3. When creating the new array/list, use expected_type (if provided) as the element type for the returned container, or set inferred_type according to step 1 and use that. In Python lists are untyped, but if your code simulates Java typing you must make sure the returned structure is created as the requested expected_type (or at least avoid raising when expected_type is given).
+
+Minimal code edit example (pseudo-edit around the lines in question):
+- Replace lines 335–340 with:
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+- Replace the check at 346–347 with either no check, or:
+    if inferred_type is object and expected_type is None:
+        raise TypeError("Cannot infer element type; expected_type missing")
+
+Summary
+- The failure is caused by inferred_type defaulting to object when both array and element are None, while the function then rejects the presence of expected_type instead of using it. Fix by using expected_type to set inferred_type when array and element are None and by removing or narrowing the TypeError raise. This will allow ArrayUtils.add(None, None, expected_type=str) to return [None] without error.

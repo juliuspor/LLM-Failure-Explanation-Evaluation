@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The input 'fr__POSIX' reaches the check at lines 237–240:
+  - ch3 = locale_str[3] (this is '_' for 'fr__POSIX')
+  - ch4 = locale_str[4] (this is 'P')
+  - The code then does: if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+  - Because ch3 is '_' (not 'A'..'Z'), that condition is true and you get ValueError: Invalid locale format: fr__POSIX
+
+Why it fails (root cause)
+- The code assumes that if the string has a variant (length > 5) then there must always be a two-letter country at indices 3–4 (uppercase). That assumption is wrong for strings like 'fr__POSIX' where the country is empty and represented by two consecutive underscores.
+- In 'fr__POSIX' the layout is:
+  - indices 0–1 = language ('fr')
+  - index 2 = '_' separator
+  - index 3 = '_' (empty country begins here)
+  - index 4.. = variant ('POSIX')
+- The method currently treats index 3 as the first country letter and index 4 as the second country letter, so it rejects an underscore at index 3. It also later slices variant with locale_str[6:] (line 247), which assumes country exists and that the variant starts at index 6 — wrong when country is empty (variant actually starts at index 4).
+
+What to change (concrete steps)
+1. After confirming locale_str[2] == '_' (around line 233), check whether the country is empty by testing locale_str[3] == '_'.
+2. If locale_str[3] == '_' then:
+   - set country = "" and
+   - set variant = locale_str[4:] (variant starts at index 4)
+   - return Locale(locale_str[0:2], "", locale_str[4:]) (validate that variant is non-empty if you want)
+3. Otherwise (country not empty), validate ch3 and ch4 are uppercase A–Z as you already do, and continue using the existing logic:
+   - if length == 5 return Locale(locale_str[0:2], locale_str[3:5])
+   - else check locale_str[5] == '_' and return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Example replacement sketch for the relevant block (replace lines 233–247):
+- if locale_str[2] != '_': raise ...
+- if locale_str[3] == '_':
+    - # empty country
+    - return Locale(locale_str[0:2], "", locale_str[4:])
+- else:
+    - ch3 = locale_str[3]; ch4 = locale_str[4]
+    - validate A..Z
+    - if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+    - if locale_str[5] != '_': raise ...
+    - return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fixes it
+- It explicitly handles the empty-country form ('fr__POSIX') by recognizing the second underscore at index 3 and using the correct variant start index (4), avoiding the incorrect uppercase-letter check on an underscore and the wrong slice locale_str[6:].
+
+Lines referenced
+- Failure occurs at lines 237–240 (the ch3/ch4 uppercase check).
+- The later incorrect variant slice assumption is at line 247 (locale_str[6:]).
+
+This change keeps the method's strict validation for non-empty country codes while accepting the valid empty-country-with-variant form that your test expects.

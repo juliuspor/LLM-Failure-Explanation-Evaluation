@@ -1,0 +1,46 @@
+What happened
+- The failing test calls DateTimeZone.for_offset_hours_minutes(-2, -15) and expects zone.id == "-02:15".
+- The implementation instead produced the wrong offset (for example "-01:45") or raised a ValueError. Root cause: the method applies the sign of the hours to the minutes incorrectly when hours is negative.
+
+Where it occurs
+- In DateTimeZone.for_offset_hours_minutes(...) where the code computes the total offset from the two parameters (hours and minutes). The bug is in the line(s) that combine hours and minutes into a single offset value (minutes or seconds).
+
+Why it fails (exact cause)
+- The code treats the minutes argument as always positive and flips its sign based on hours, instead of treating the minutes argument as already signed. Concretely, the buggy pattern is typically:
+  totalMinutes = hours * 60 + (hours < 0 ? -minutes : minutes);
+  This is wrong when minutes is already negative (as in your test). For (-2, -15) that computes -120 + -(-15) = -105 minutes → -01:45, not -135 minutes → -02:15.
+- In short: the code re-applies a sign to minutes instead of respecting the minutes argument’s sign. That produces an incorrect combined offset or triggers a validation failure.
+
+How to fix it (step-by-step)
+1. In DateTimeZone.for_offset_hours_minutes(...), find the lines that form the combined offset from hours and minutes (the lines that compute totalMinutes or totalSeconds).
+2. Replace the incorrect signed-minutes handling with a direct arithmetic combination that uses hours and minutes as passed:
+   - totalMinutes = hours * 60 + minutes
+   - totalSeconds = totalMinutes * 60
+   This respects the sign of minutes when it is negative.
+3. Keep or add validation after that combination:
+   - Validate hours in [-23, 23] and minutes in [-59, 59].
+   - Validate that total offset in absolute terms does not exceed 23:59:59 (or the intended bound).
+   - If you need to forbid negative minutes when hours > 0 (per your API rules), validate that explicitly before combining, but do not flip signs — just raise ValueError when invalid inputs are provided.
+4. Add unit tests for boundary and signed combinations:
+   - (2, 15) -> +02:15
+   - (2, -15) -> ValueError if your API disallows it (docstring says ValueError)
+   - (0, -15) -> -00:15
+   - (-2, -15) -> -02:15 (your failing case)
+   - (-2, 15) -> -02:15
+
+Minimal example fix (pseudocode)
+- buggy:
+  totalMinutes = hours*60 + (hours < 0 ? -minutes : minutes);
+- correct:
+  if hours < -23 or hours > 23 or minutes < -59 or minutes > 59: raise ValueError
+  if hours > 0 and minutes < 0: raise ValueError   // if API forbids this combo
+  totalMinutes = hours * 60 + minutes
+  // validate |totalMinutes| <= 23*60 + 59
+  zone = for_total_offset_minutes(totalMinutes)
+
+Why this change is safe
+- It uses the exact numeric sign supplied by callers for minutes.
+- It keeps validation rules explicit and separated from arithmetic.
+- It prevents double-negation or sign-flip bugs like the one that produced -01:45 instead of -02:15.
+
+If you give me the actual source snippet around the combination/validation lines I can show the exact line numbers and a patched diff.

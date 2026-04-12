@@ -1,0 +1,37 @@
+What happened (where)
+- The IndexError is raised at lines 35–36 in get_utf32_at (the check that does: if index < 0 or index >= len(code_units): raise IndexError(...)).
+- The code is calling get_utf32_at(index) with index == 2 while len(code_units) == 2, so the check correctly treats index 2 as out of range and raises "String index out of range: 2".
+
+Why it happened (root cause)
+- The function to_utf16_code_units(s) (line 10, code_units on line 12) produces a list of UTF‑16 code units. That list length is the number of UTF‑16 units, not necessarily the number of Python string characters.
+- The caller is supplying an index measured in Python string code points (character indices) rather than a UTF‑16 code‑unit index. When the string contains a surrogate pair (one Unicode character represented by two UTF‑16 code units) the code unit list is longer than, or shorter than, the caller’s index expectation. In this run the supplied index equals the number of code units (2), so it is out of range and the explicit bounds check at lines 35–36 raises the error.
+- The later lines (38–44) show correct handling of surrogate pairs when looking ahead (index+1), but that logic is only reached if the initial index is inside the code_units bounds. The exception occurs before that because the index itself was invalid for the code_units list.
+
+How to fix it (concrete steps)
+Choose one of these fixes depending on the intended API:
+
+1) If callers should pass a Python character index:
+   - Convert the Python character index to a UTF‑16 code‑unit index before calling get_utf32_at.
+   - Example step: count the number of UTF‑16 code units up to the character index:
+     - Encode s[:char_index] to UTF‑16 (little-endian without BOM) and divide byte length by 2 to get the code‑unit count.
+   - Then call get_utf32_at(code_unit_index).
+
+2) If callers should pass a UTF‑16 code‑unit index:
+   - Fix the caller so it computes and passes a UTF‑16 code‑unit index, not a Python character index.
+   - Document the function clearly (in the docstring) that the index is a UTF‑16 code‑unit index.
+
+3) If you want the function to accept Python character indices (recommended for most Python code):
+   - Change get_utf32_at to accept a character index and internally map it to a code‑unit index (as in (1)).
+   - Or provide a new wrapper like get_utf32_at_char_index(s, char_index) that calls to_utf16_code_units and does the mapping.
+
+Concrete mapping example (steps you can implement)
+- To map Python char_index -> utf16_index:
+  1. Take prefix = s[:char_index]
+  2. utf16_bytes = prefix.encode('utf-16-le')  # use '-le' to avoid BOM
+  3. utf16_index = len(utf16_bytes) // 2
+  4. pass utf16_index into get_utf32_at
+
+Why this exact change fixes the error
+- The IndexError was raised because the code expected an index into code_units but got a different kind of index. Converting the index to the same space as code_units (UTF‑16 units) makes the bounds check on lines 35–36 pass for valid positions, and the surrogate-pair handling at 38–44 will then work correctly.
+
+If you share the caller code that invokes get_utf32_at (the index source), I can show the exact minimal code change to convert the index and eliminate this error.

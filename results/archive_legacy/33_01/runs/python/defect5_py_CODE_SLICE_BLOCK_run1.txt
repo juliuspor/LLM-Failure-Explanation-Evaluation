@@ -1,0 +1,52 @@
+What happened (where it fails)
+- At line 343 you set inferred_type = type(array). That gets the type of the list object itself (e.g. <class 'list'>), not the element type held inside the list.
+- ArrayUtils._copy_list_grow1(array, inferred_type) (call site shown on the next line) expects a component/element type (the type to make a new array/list of). Because you pass the list class instead of the element class, the new list is created with the wrong component type.
+- Later you assign the element into that new list and/or return it. That leads to a ClassCastException-like failure when the runtime tries to treat the created list as if it contained elements of expected_type. The check at lines 346–351 (inferred_type == object and expected_type != object) never behaves as intended because inferred_type was never set to an element type — so the code both creates the wrong kind of list and misapplies the safety check.
+
+Why this is the root cause (concrete)
+- type(array) returns the type of the container object (a list), not the type of elements inside. The variable names show intent: inferred_type is supposed to be the element/component type, but you computed the container type instead.
+- Because inferred_type is wrong, ArrayUtils._copy_list_grow1 receives an incorrect type parameter and produces a list/array whose runtime component type does not match element or expected_type. That mismatch is exactly the ClassCastException you try to describe in the error message, but it happens earlier because inferred_type was computed incorrectly.
+
+Exact locations
+- Line 343: inferred_type = type(array)  <- incorrect
+- Lines 345–352: use of inferred_type with ArrayUtils._copy_list_grow1 and the check at lines 346–351 both assume inferred_type is an element/component type, but it is not.
+
+How to fix it (specific steps)
+1. If array is not None and non-empty, infer the element type from an element, not from the list object. Change line 343 to:
+   - if array:
+         inferred_type = type(array[0])
+2. If array is empty, you cannot infer element type from array contents. Decide an order of precedence and implement it:
+   - If element is not None, use type(element).
+   - Else if expected_type is provided, use expected_type.
+   - Else fall back to object.
+   Example logic:
+   - if array and len(array) > 0:
+         inferred_type = type(array[0])
+     elif element is not None:
+         inferred_type = type(element)
+     elif expected_type is not None:
+         inferred_type = expected_type
+     else:
+         inferred_type = object
+3. Ensure ArrayUtils._copy_list_grow1 accepts a Type object as you now pass (if expected_type is a type, pass that), and handle heterogeneous lists explicitly if needed (you may need to pick a common superclass or use object).
+4. Optionally add a guard before accessing array[0] to avoid IndexError when array is empty (see step 2).
+
+Minimal code fix example (replace the current if/elif chain starting at line 343):
+- if array and len(array) > 0:
+      inferred_type = type(array[0])
+  elif element is not None:
+      inferred_type = type(element)
+  elif expected_type is not None:
+      inferred_type = expected_type
+  else:
+      inferred_type = object
+
+Why this will fix it
+- You will pass a real element/component type to _copy_list_grow1, so the new list is allocated with the correct component type.
+- The check at lines 346–351 will now correctly detect "object" as the inferred element type when appropriate, and raise the TypeError only when it should.
+
+Edge cases to consider
+- Heterogeneous arrays (elements of mixed types): choosing type(array[0]) may be wrong; you may need to compute a common base class or always prefer expected_type when provided.
+- Empty array with element None: fall back to expected_type or object as described.
+
+This pinpoints the root cause (using type(array) instead of an element/component type), the exact lines involved, and concrete code-level fixes you can apply.

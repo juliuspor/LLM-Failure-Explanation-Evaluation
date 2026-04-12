@@ -1,0 +1,49 @@
+What happened (root cause)
+- In get_paint you correctly clamp the incoming parameter into v:
+  - v = max(value, self._lower_bound)
+  - v = min(v, self._upper_bound)
+- But when you compute the gray channel you use the original value variable instead of the clamped v:
+  - g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- If value is outside the bounds (e.g. -0.5 or 1.5 in the tests), that formula produces a g < 0 or > 255, so the subsequent range check
+  - if g < 0 or g > 255: raise ValueError(...)
+  raises the ValueError shown by the test.
+
+Where it occurs
+- Method: get_paint
+- Problem lines:
+  - The clamping lines (set v) are correct.
+  - The buggy line is the computation of g that still uses value instead of the clamped v.
+  - The ValueError is raised by the range-check right after that computation.
+
+Why the tests fail
+- test_lower_bound_clamping and test_upper_bound_clamping pass a value outside the [lower_bound, upper_bound] range expecting clamping to black/white.
+- Because g is computed from the un-clamped value, clamping is effectively ignored and g falls outside 0..255, triggering the ValueError instead of returning a clamped color.
+
+Exact fixes (clear steps)
+1. Use the clamped variable v when computing g:
+   - Replace value with v in the g computation:
+     g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+2. Also guard against division by zero if upper and lower bounds are equal:
+   - If self._upper_bound == self._lower_bound, decide a behavior (e.g. return black or white or a fixed mid gray). For example:
+     if self._upper_bound == self._lower_bound:
+         return (0, 0, 0)  # or (127,127,127) depending on intended behavior
+
+Minimal corrected code
+    def get_paint(self, value: float) -> Tuple[int, int, int]:
+        # Clamp value to bounds
+        v = max(value, self._lower_bound)
+        v = min(v, self._upper_bound)
+
+        # Handle degenerate range to avoid division by zero
+        if self._upper_bound == self._lower_bound:
+            return (0, 0, 0)
+
+        # Use the clamped v, not the original value
+        g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+        if g < 0 or g > 255:
+            raise ValueError("Color parameter outside of expected range: Red Green Blue")
+
+        return (g, g, g)
+
+That single change (using v) fixes the immediate failing tests; adding the zero-range guard prevents a possible ZeroDivisionError if someone constructs GrayPaintScale with equal bounds.

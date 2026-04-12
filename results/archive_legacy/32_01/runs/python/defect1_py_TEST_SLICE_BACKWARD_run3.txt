@@ -1,0 +1,42 @@
+What happened (where it failed)
+- The failure occurs inside DateTimeZone.for_offset_hours_minutes, specifically at the minutes validation on lines 400–401:
+  - Line 400 checks: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 401 raises: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Your test called DateTimeZone.for_offset_hours_minutes(-2, -15). Because minutes_offset is -15, the condition minutes_offset < 0 is true and the code raises a ValueError. That is why the test fails instead of creating a zone with id '-02:15'.
+
+Why it failed (root cause)
+- The code assumes minutes_offset must be in the 0..59 range. It does not allow a negative minutes value when the requested offset is negative. But your input expresses a negative offset by giving both hours and minutes negative (-2 hours and -15 minutes). The validator treats -15 as an invalid minutes value rather than combining it with the negative hours.
+
+Concrete fixes (step-by-step)
+Pick one of these fixes and apply it in DateTimeZone.for_offset_hours_minutes:
+
+1) Normalize minutes sign from hours (recommended)
+- Keep minutes required as 0..59, but apply the sign of hours to the minutes when computing the total offset.
+- Steps:
+  a. Change the call site / API contract to require minutes be non-negative (0..59) and have hours carry the sign. For example: for_offset_hours_minutes(-2, 15) to represent -02:15.
+  b. In code: validate minutes with the existing check (lines 400–401). Then compute total seconds using:
+     total_minutes = abs(hours_offset) * 60 + minutes_offset
+     if hours_offset < 0:
+         total_minutes = - total_minutes
+     seconds = total_minutes * 60
+  c. Return the zone with computed seconds and id constructed with sign and two-digit minutes.
+- Reason: this avoids ambiguous negative-minute input and keeps validation simple.
+
+2) Accept signed minutes and normalize to total seconds (if you want to keep the current API that allows negative minutes)
+- Allow minutes_offset to be negative and combine hours and minutes into a single signed offset.
+- Steps:
+  a. Change validation: replace lines 400–401 with a check that minutes_offset is in -59..59 (but not exceed 59 in magnitude). For example:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+  b. Compute the combined total minutes: total_minutes = hours_offset * 60 + minutes_offset
+  c. Optionally validate that total_minutes is within allowed overall range if needed.
+  d. Convert to seconds and build the id from the sign of total_minutes and absolute minutes.
+- Reason: this accepts inputs like (-2, -15) and (-2, 15) and yields correct -02:15 or -01:45 depending on the pair.
+
+What to change in code (exact places)
+- Modify the validation at lines 400–401 inside DateTimeZone.for_offset_hours_minutes as shown above.
+- Update the computation of the offset immediately after that validation so it uses the normalized total_minutes logic.
+
+Summary
+- Root cause: minutes_offset < 0 triggers the ValueError because the code requires minutes be non-negative (0..59) even when hours is negative.
+- Fix by normalizing the sign (recommended: require minutes non-negative and apply sign from hours) or by allowing signed minutes and combining hours+minutes into total minutes before converting to seconds.

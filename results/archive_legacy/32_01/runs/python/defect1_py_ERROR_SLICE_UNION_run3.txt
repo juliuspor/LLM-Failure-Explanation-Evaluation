@@ -1,0 +1,54 @@
+What happened (where it failed)
+- The ValueError was raised at line 400: the code runs the check
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  and so it threw "Minutes out of range: -15".
+- That means minutes_offset at that point is -15, so the code believes the minute component is out of the allowed 0..59 range.
+
+Why it happened (root cause)
+- The code is checking the minute component before the sign/total offset logic is applied. Lines 406–409 suggest the code later adjusts minutes_offset for negative hour offsets:
+    406:     minutes_offset = hours_in_minutes - minutes_offset
+    408:     minutes_offset = hours_in_minutes + minutes_offset
+  But those adjustments happen after the range check at line 400. So a negative minute value (for example when parsing "-8:15" the parser produced minutes = -15 or minutes_offset = -15) fails the early check even though the later arithmetic would have produced a valid total offset.
+- In short: the method validates the minute value in isolation (rejecting negative minutes) before converting the sign and combining hours and minutes into a signed total. The negative minute value is legitimate as part of a signed offset, but the check catches it prematurely.
+
+Where in code to change (specifics)
+- The failing validation is at line 400. The subsequent adjustments are at lines 406–409 and the final conversion to milliseconds is at line 409 and cls.for_offset_millis(offset) at 412. You must move or change the validation so the sign is handled before you enforce 0..59 on minutes.
+
+Concrete fixes (choose one)
+
+1) Normalize sign before range check (recommended)
+- Parse sign into a variable (sign = +1 or -1).
+- Use absolute minute value for the range check:
+    if minutes < 0:
+        minutes = -minutes
+    if minutes < 0 or minutes > 59:
+        raise ValueError(...)
+- Compute total minutes as signed_minutes = sign * (hours * 60 + minutes)
+- Then convert to millis and call cls.for_offset_millis(offset)
+- This keeps the intent of validating the minute magnitude while allowing negative offsets.
+
+2) Change the check to validate magnitude, not signed value
+- Replace the check at line 400 with:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Then continue with the adjustments at 406–409 to compute the correct total minutes.
+- This is a smaller change but relies on the later arithmetic being correct for all sign combinations.
+
+3) Compute total signed minutes first, then validate components
+- Compute minutes_abs = abs(minutes_offset)
+- Validate minutes_abs <= 59
+- Combine hours and minutes into total signed minutes.
+- Convert to millis and return.
+
+How to test the fix (steps)
+1. Add unit tests for boundary and sign cases:
+   - "8:15" (positive minutes), expect +8h15m
+   - "-8:15" (negative hours, positive minutes in input), expect -8h15m
+   - "8:-15" (if parser can produce negative minute component), verify it is handled or rejected consistently
+   - "0:00", "0:59", "-0:59"
+2. Run the tests to ensure the ValueError no longer fires for valid signed offsets like "-8:15".
+3. Verify the final offset milliseconds returned by cls.for_offset_millis(offset) match expectations.
+
+Summary
+- The code rejects a negative minute value too early (line 400) before it applies sign-handling logic (lines 406–409). Move or change the validation so the minute magnitude (0..59) is checked after or together with sign handling, then compute the signed total minutes and convert to milliseconds at line 409–412.

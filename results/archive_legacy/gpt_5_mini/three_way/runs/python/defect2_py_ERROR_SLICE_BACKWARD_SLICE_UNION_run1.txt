@@ -1,0 +1,47 @@
+What happened (where)
+- The failure comes from get_paint at line 71–75:
+  - Line 71 computes g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0).
+  - Line 74 checks if g < 0 or g > 255 and, if so, raises the ValueError at line 75 with message "Color parameter outside of expected range: Red Green Blue".
+- The code raised that ValueError because g was outside the allowed 0..255 range.
+
+Why it happened (root cause)
+- g is computed from the normalized position of value between self._lower_bound and self._upper_bound. If any of the following is true, the computed g will be outside 0..255:
+  1. value < self._lower_bound (g < 0).
+  2. value > self._upper_bound (g > 255).
+  3. self._upper_bound == self._lower_bound (division by zero would occur; depending on runtime this will either throw ZeroDivisionError or produce an extreme result and then g falls outside 0..255 and triggers the ValueError).
+  4. self._upper_bound < self._lower_bound (ratio sign flips and g can be outside 0..255).
+- The code never validates the bounds in __init__ (lines ~30–44), nor does it clamp or clearly report which input caused the out-of-range color. So when get_paint receives an out-of-range value or invalid bounds, it simply computes an out-of-range g and raises the generic ValueError at line 75.
+
+Exact places to fix
+1. Validate bounds in __init__ (lines 30–44)
+   - Add a check that upper_bound > lower_bound and raise a clear ValueError if not. Example:
+     - if upper_bound <= lower_bound: raise ValueError(f"upper_bound must be > lower_bound (got {lower_bound}, {upper_bound})")
+   - This prevents division by zero or reversed bounds.
+
+2. Validate or clamp input in get_paint (line 54 and around line 71)
+   - Either validate value and raise a clear error that includes value and bounds:
+     - if value < self._lower_bound or value > self._upper_bound:
+         raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+   - Or clamp the normalized ratio before scaling to 0..255:
+     - ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+     - ratio = max(0.0, min(1.0, ratio))
+     - g = int(ratio * 255.0)
+   - If you keep the post-compute check (lines 74–75), change the error message to include the computed g, value, lower_bound, and upper_bound so the developer can see exactly why it failed.
+
+Suggested minimal code edits (exact line references)
+- In __init__ (between lines 30 and 44):
+  - if upper_bound <= lower_bound:
+        raise ValueError(f"upper_bound must be > lower_bound (got lower_bound={lower_bound}, upper_bound={upper_bound})")
+- In get_paint (before line 71 or replace lines 71–75):
+  - ratio = (value - self._lower_bound) / (self._upper_bound - self._lower_bound)
+  - if ratio < 0.0 or ratio > 1.0:
+        raise ValueError(f"value {value} maps to ratio {ratio:.6g} outside [0,1] for bounds [{self._lower_bound}, {self._upper_bound}]")
+  - g = int(ratio * 255.0)
+
+Why these fixes solve it
+- Validating bounds at construction prevents division by zero and reversed bounds up front.
+- Validating or clamping the ratio in get_paint ensures g will be within 0..255 or produces a clear, informative error that identifies which variable caused the problem (value, ratio, lower_bound, upper_bound), instead of the opaque "Red Green Blue" message.
+
+Summary
+- Root cause: get_paint computes g from value and bounds but never ensures bounds are valid or that value falls within bounds, so g can end up <0 or >255 and trigger the ValueError at lines 74–75.
+- Fix: validate bounds in __init__ and either validate (and raise clear errors) or clamp the normalized ratio in get_paint. Include the offending numbers in error messages so the failure is obvious.

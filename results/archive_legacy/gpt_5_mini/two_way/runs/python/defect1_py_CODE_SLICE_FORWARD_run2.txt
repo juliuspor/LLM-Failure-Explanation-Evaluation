@@ -1,0 +1,42 @@
+What happens
+- The code computes the total offset in minutes and then multiplies by MILLIS_PER_MINUTE via FieldUtils.safe_multiply (lines shown 402, 404, 405).
+- That multiplication can throw an ArithmeticException (caught as ArithmeticError), which is why you see the "Offset is too large" path taken.
+
+Root cause
+- The multiply is being performed using integer arithmetic that overflows before safe_multiply can return a correct long result. In other words, minutes * MILLIS_PER_MINUTE is evaluated in a type too small (signed 32-bit) so the product can exceed Integer.MAX_VALUE and cause an arithmetic error.
+- The code reuses the parameter minutes_offset to hold the combined minutes, which makes it less obvious where the type conversion should occur. The overflow occurs at the multiplication on line 405.
+
+Where it happens (specific lines)
+- Line 402 and 404 compute total minutes into minutes_offset.
+- Line 405 calls FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) and that multiplication overflows (throws ArithmeticException) when it is done with an insufficient integer type.
+
+Why that overflow is possible
+- Even though hours_offset is constrained to -23..23 and minutes_offset to 0..59, the multiplication minutes * MILLIS_PER_MINUTE can still overflow if done in 32-bit int arithmetic before being promoted to a larger type. Relying on implicit promotion (or on safe_multiply accepting int and returning long) is fragile — in your environment safe_multiply is using/expecting larger types or throws when intermediate overflow happens.
+
+Concrete fixes (steps)
+1. Stop reusing the parameter minutes_offset. Introduce a clearly typed totalMinutes variable:
+   - long totalMinutes = (long) hours_offset * 60L;
+   - if (hours_offset < 0) totalMinutes -= minutes_offset;
+     else totalMinutes += minutes_offset;
+
+2. Do the multiplication in a long context so there is no intermediate int overflow:
+   - long offset = FieldUtils.safe_multiply(totalMinutes, (long) DateTimeConstants.MILLIS_PER_MINUTE);
+
+3. Return using cls.for_offset_millis(offset) as before.
+
+Minimal corrected code (lines to replace)
+- Replace the block from "hours_in_minutes = hours_offset * 60" through the safe_multiply call with:
+
+    long hoursInMinutes = (long) hours_offset * 60L;
+    long totalMinutes;
+    if (hoursInMinutes < 0) {
+        totalMinutes = hoursInMinutes - minutes_offset;
+    } else {
+        totalMinutes = hoursInMinutes + minutes_offset;
+    }
+    long offset = FieldUtils.safe_multiply(totalMinutes, (long) DateTimeConstants.MILLIS_PER_MINUTE);
+
+Why this fixes it
+- Using long for hoursInMinutes and totalMinutes forces the multiplication to be done in 64-bit arithmetic, preventing overflow of the intermediate product. Using a separate variable avoids confusion from reusing the minutes_offset parameter.
+
+If you prefer a smaller change: cast one operand to long when multiplying (e.g., ((long) minutes_offset) * DateTimeConstants.MILLIS_PER_MINUTE) so the multiplication is performed in long. But introducing totalMinutes is clearer and prevents accidental reuse errors.

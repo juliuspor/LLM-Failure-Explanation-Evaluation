@@ -1,0 +1,57 @@
+What happened (root cause)
+- The failure comes from the minutes range check at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  This check rejects any negative minutes immediately. That prevents the later sign-handling code (lines 402–405) from ever running for negative minutes. The docstring explicitly allows negative minutes in some cases (for zero or negative hours), so the check is too strict and placed too early.
+
+Where it occurs (file/lines/variables/method)
+- Method: DateTimeZone.for_offset_hours_minutes
+- Variables: minutes_offset, hours_offset
+- Exact lines (from the slice you supplied):
+  - Line 396–397: the early range check that rejects negative minutes.
+  - Lines 402–405: later logic that expects to be able to handle negative minutes by adjusting minutes_offset based on the sign of hours_offset.
+- Because negative minutes are blocked at line 396, tests that expect negative minutes to be accepted (e.g., test_zero_hours_negative_minutes, test_negative_hours_negative_minutes, and (-2, 15) handling) fail; also some tests expect ValueError only for the mixed-sign case (2, -15), but the current code rejects all negative minutes instead.
+
+Why this is wrong
+- The docstring (and Joda-Time behavior being emulated) allows minutes in the range -59..+59. The code checks the wrong range (0..59) and thus disallows valid inputs.
+- The early rejection happens before sign-dependent handling code (lines 402–405), so the intended logic for different sign combinations never executes.
+
+Concrete fixes (exact steps and minimal code changes)
+Option A — fix the range check to allow negative minutes and keep later sign validation:
+1. Change the minutes range test on line 396 from:
+     if minutes_offset < 0 or minutes_offset > 59:
+to:
+     if minutes_offset < -59 or minutes_offset > 59:
+2. Add an explicit check to reject mixed-sign positive hours with negative minutes (as docstring requires):
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes must not be negative when hours is positive")
+
+This preserves the later logic that adjusts minutes_offset for negative hours.
+
+Option B — move/adjust checks so sign-handling runs first:
+1. Remove or loosen the early negative-minute rejection.
+2. After computing combined minutes (using the existing lines 402–405 logic), validate the resulting offset range and raise ValueError if it exceeds allowed limits.
+
+Minimal patch example (preferred, explicit):
+
+Replace lines 396–397 with:
+    # allow minutes in -59..+59; handle sign combinations below
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Then immediately after that, add:
+    # reject mixed-sign where hours is positive but minutes negative
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must not be negative when hours is positive")
+
+Why this fix works
+- It allows negative minutes to reach the later sign-handling code that creates offsets for negative or zero hours (e.g., (0, -15) -> -00:15 and (-2, 15) -> -02:15).
+- It still enforces the rule that (2, -15) is invalid by explicitly checking hours_offset > 0 with minutes_offset < 0.
+- It keeps a clear, narrow range check for minutes magnitude (-59..+59) and leaves more complex sign logic to the code already written at lines 402–405.
+
+What tests were failing and why
+- test_zero_hours_negative_minutes and test_negative_hours_negative_minutes failed because the code raised ValueError at line 396 for negative minutes, while the tests expect those calls to succeed.
+- test_mixed_signs_invalid expected only (2, -15) to raise ValueError; the code incorrectly raised for all negative minutes, causing other tests to fail too.
+
+If you want, I can produce the exact diff/patch for the file.

@@ -1,0 +1,46 @@
+What happened (root cause)
+- The bug is in the loop that advances pos after a translator reports it consumed code units:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- code_point_at (lines 38–44 in your slice) combines a high surrogate and the following low surrogate into a single code point when one is present:
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+      low = code_units[index + 1]
+      if 0xDC00 <= low <= 0xDFFF:
+          return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  return high
+- char_count(code_point) returns 2 for a supplementary code point and 1 for a BMP code point.
+
+Why that causes the failure
+- Suppose a translator consumed a surrogate pair at position pos (consumed == 1 or 2 depending on your contract, see below). On the first iteration of the for-loop you call code_point_at(code_units, pos). Because pos points at a high surrogate, code_point_at returns the combined supplementary code point, so char_count(...) returns 2. The loop then increments pos by 2.
+- But the for-loop runs consumed times. That means you add 2 (for the surrogate pair) multiple times. If consumed > 1 you end up advancing pos too far (for example 2 * 2 = 4), skipping code units and eventually hitting out-of-range indices or corrupting the scan logic.
+- In short: you are double-counting (or multiplicatively counting) surrogate code units by using char_count(code_point_at(...)) inside a loop that already iterates consumed times.
+
+Where it occurs (specific names/lines)
+- The problematic code is the for pt in range(consumed) loop that advances pos (the block immediately after the comment "Contract with translators..." in translate).
+- The helper causing the surprising value is code_point_at (lines 38–44 in your slice_forward), which returns a combined code point when a surrogate pair is present, making char_count(...) return 2.
+
+How to fix it (concrete steps)
+Option A — If translate_codepoint returns the number of UTF-16 code units it consumed:
+1. Replace the whole for-loop with a single advance:
+     pos += consumed
+   Rationale: consumed already counts code units; advancing by consumed is correct and simple.
+
+Option B — If translate_codepoint returns the number of code points consumed (not code units):
+1. Advance pos by examining one code unit at a time (not by char_count of the combined codepoint). For example:
+     for _ in range(consumed):
+         # advance by a single code unit; if it's a high surrogate followed by a low surrogate, advance by 2
+         if 0xD800 <= code_units[pos] <= 0xDBFF and pos + 1 < length and 0xDC00 <= code_units[pos+1] <= 0xDFFF:
+             pos += 2
+         else:
+             pos += 1
+   Rationale: this advances per code point but counts code units correctly without calling code_point_at which masks the surrogate pair.
+
+Which option to choose
+- If your comment "they just took care of a surrogate pair" means translate_codepoint reports how many code units it consumed (1 or 2), use Option A (pos += consumed).
+- If translate_codepoint reports number of code points consumed, use Option B.
+
+Minimal patch (likely correct)
+- Replace the for-loop with:
+     pos += consumed
+
+That removes the double-counting and fixes the out-of-range/skip behavior.

@@ -1,0 +1,67 @@
+What happened (high level)
+- The function infers the wrong element type and then raises a TypeError incorrectly when the caller supplied an expected_type.
+- Root causes are in two places:
+  1. inferred_type = type(array) (line where you compute inferred_type)
+  2. the TypeError check that throws when inferred_type == object and expected_type != object
+
+Why that breaks the tests
+- type(array) returns the Python list class, not the element type. If array is a list, type(array) is list (i.e. <class 'list'>). Later code (ArrayUtils._copy_list_grow1) expects an element-type (e.g. str, int or object) to create a correctly-typed result. Using list as the inferred element type is wrong and can cause incorrect behavior.
+  - This is the immediate mistake when array is not None (covers many tests).
+- When both array and element are None and the caller passed expected_type=str (test_add_null_to_null_with_expected_type), your code sets inferred_type = object (the fallback) and then immediately raises:
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+  That logic rejects the valid call ArrayUtils.add(None, None, expected_type=str). The caller explicitly told the function what element type they want; the function should honor expected_type instead of raising.
+
+Where exactly in the code
+- inferred_type wrong assignment:
+    if array is not None:
+        inferred_type = type(array)
+  This is wrong because type(array) is the list type, not element type.
+- Incorrect rejection of expected_type:
+    if expected_type is not None:
+        if inferred_type == object and expected_type != object:
+            raise TypeError(...)
+
+Concrete sequence that causes the failing test
+1. test calls ArrayUtils.add(None, None, expected_type=str)
+2. array is None and element is None => your code sets inferred_type = object
+3. expected_type is str, so the nested if triggers and raises a TypeError saying "Cannot cast object list to String list"
+4. The test expects [None] and no exception, so it fails.
+
+Recommended fixes (precise steps)
+1. Use expected_type first if provided: if expected_type is given, use it as the inferred element type.
+2. When inferring from an existing array, look at element types in the array (first non-None element or element type of array contents), not at type(array). For example:
+   - if array is not None and len(array) > 0:
+       - scan for first non-None item and set inferred_type = type(item)
+       - if all items are None, fall back to expected_type if provided, else object
+3. If array is None but element is not None, set inferred_type = type(element).
+4. If nothing is available (array and element are None) and expected_type is provided, set inferred_type = expected_type; otherwise use object.
+5. Remove the current TypeError raise that rejects expected_type when inferred_type == object. Instead, prefer expected_type over object when available.
+
+Exact replacement sketch (drop into your function; line numbers correspond to the two problematic blocks):
+Replace the whole inferred_type computation and TypeError block with something like:
+
+    # prefer caller's expected_type
+    if expected_type is not None:
+        inferred_type = expected_type
+    elif array is not None and len(array) > 0:
+        # find first non-None element to infer element type
+        first = next((x for x in array if x is not None), None)
+        inferred_type = type(first) if first is not None else object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+    # no premature TypeError here — honor expected_type above
+
+Why this fix works
+- If the caller gives expected_type we use it (so ArrayUtils.add(None, None, expected_type=str) will produce a list with element type str and won’t raise).
+- If the array exists, you infer the element type from an array element, not from the list object itself.
+- If both array and element are None, but expected_type is absent, you safely fall back to object.
+
+Optional extra: when inferring from array where elements have mixed types, you may choose to:
+- prefer the first non-None element type, or
+- default to object if there is a mix; either is acceptable as long as it's consistent with your intended semantics.
+
+That pinpoints the exact lines and the minimal, concrete fixes to make the tests pass.

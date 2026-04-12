@@ -1,0 +1,52 @@
+What happened (what the error message tells you)
+- At lines 396–397 the code checks minutes_offset and raises ValueError if it is outside 0..59:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The raised ValueError shows minutes_offset == -15, which fails that check. In other words, some earlier code produced -15 for minutes_offset and that value hit this validation and caused the test to fail.
+
+Why it happened (root cause)
+- The immediate root cause is that minutes_offset contains a negative value (-15). That means the logic that computes minutes_offset allowed or produced a negative minute component. The minutes component must always be between 0 and 59 because this variable represents the minute part of a time offset.
+- The most common places this kind of bug comes from:
+  - Taking a signed total offset (in seconds) and splitting it into hours and minutes incorrectly (wrong use of divmod, integer division, modulus or sign handling).
+  - Using timedelta.seconds instead of timedelta.total_seconds() for negative timedeltas (timedelta.seconds hides the sign and leads to wrong extraction).
+  - Parsing a string or external input with a negative hour sign and then applying the sign only to the hours and not to the minutes (or applying it to minutes in the wrong direction).
+
+Where to look (exact places to inspect)
+- Search for the assignment to minutes_offset in your codebase. That assignment happens before line 396 (somewhere earlier in the same function). Inspect the function that produces minutes_offset and the expressions used.
+- If minutes_offset is derived from a timedelta or second count, check for use of:
+  - td.seconds (wrong for negatives) vs td.total_seconds() (correct).
+  - expressions like minutes = (seconds // 60) % 60 or using negation incorrectly.
+- If minutes_offset is parsed from a string, check the parser that handles signs and split of hours/minutes and ensure the sign is handled consistently.
+
+How to fix it (step‑by‑step, concrete)
+1. Find the exact line where minutes_offset is set (search for "minutes_offset =" or similar).
+2. Replace incorrect extraction logic with code that:
+   - Uses total seconds if starting from a timedelta: total = int(td.total_seconds()).
+   - Computes absolute minute component and then applies sign only to the hour component, or keeps minutes as a non‑negative remainder.
+   - Example correct extraction from total seconds (pseudo-Python you can paste in place of the buggy code):
+
+   total = int(td.total_seconds())        # use total_seconds(), not td.seconds
+   sign = 1 if total >= 0 else -1
+   abs_total = abs(total)
+   hours = abs_total // 3600
+   minutes = (abs_total % 3600) // 60
+   # if you need signed hours and non-negative minutes:
+   hours = hours * sign
+   minutes_offset = int(minutes)         # guaranteed 0..59
+
+   Or, if minutes_offset is supposed to carry sign with hours (rare), be explicit:
+   signed_minutes = sign * int(minutes)  # only if your representation expects signed minutes
+
+3. If parsing a string like "-02:15", ensure you set sign = -1 if the leading sign is '-' and then compute:
+   hours = sign * parsed_hours
+   minutes = parsed_minutes      # keep minutes as 0..59, do not make it negative
+4. Add unit tests that exercise negative offsets (e.g. -00:15, -02:30) and verify minutes_offset is in 0..59 and hours carry the sign (or matches your data model).
+5. Run tests. If tests still fail, log the computed intermediate values just before the check:
+   - print or log total, sign, hours, minutes, minutes_offset immediately before line 396 to see how -15 was produced.
+
+Why these steps fix it
+- Using td.total_seconds() yields the correct signed total seconds, so splitting into hours/minutes works correctly for negative offsets.
+- Extracting minutes from the absolute remainder ((abs_total % 3600) // 60) guarantees minutes is in 0..59.
+- Explicit sign handling keeps the sign and magnitude separate, preventing a negative minute value like -15.
+
+If you paste the code that sets minutes_offset (the few lines before 396), I will show the exact replacement lines you should use.

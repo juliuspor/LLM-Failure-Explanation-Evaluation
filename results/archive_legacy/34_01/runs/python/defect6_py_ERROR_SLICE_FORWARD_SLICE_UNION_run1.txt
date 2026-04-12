@@ -1,0 +1,47 @@
+What happened (short): your add method calls append (line 126 → 138). Inside append you turn any value that compares equal to zero into plain 0 (or you cast it to int). Because -0.0 == 0.0 in Python, that normalization code discards the negative sign on negative zero. The test expected -0.0 but the append path produced 0 (positive zero), so the assertion failed: "Expected -0.0, got 0".
+
+Why that happens (root cause, precisely):
+- In Python floats, -0.0 is a distinct IEEE float bit pattern but compares equal to 0.0 (i.e. -0.0 == 0.0 is True).
+- Your code detects "zero" with an equality or truthy check (for example, code like if newcode == 0: newcode = 0 or a cast newcode = int(newcode) or similar normalization).
+- That normalization runs in append (called from add at line 126; append is invoked at line 138), so any incoming -0.0 gets replaced with the canonical 0 value (losing the negative sign).
+- The test assertion checks for -0.0 specifically, so it fails because append returned 0.
+
+Where to look (exact places):
+- add(self, newcode) at line 126 — this calls append(newcode).
+- append (the implementation referenced at line 138) — inspect any code that:
+  - compares newcode to 0 (== 0) or tests truthiness (if not newcode), or
+  - casts newcode to int or otherwise coerces numeric types,
+  - or explicitly sets newcode = 0 when it thinks it has a zero.
+Those statements are where the negative-zero sign is being dropped.
+
+Concrete fixes (step-by-step):
+1. Open the append implementation (the method called at line 138).
+2. Find any zero-normalization code, for example:
+   - if newcode == 0: newcode = 0
+   - if not newcode: newcode = 0
+   - newcode = int(newcode)
+   - or any float -> int coercion that would convert -0.0 to 0
+3. Decide whether you must preserve -0.0 semantics:
+   - If you must preserve the sign of zero:
+     - Remove the normalization that replaces zeros with plain 0.
+     - If you need to coerce type but keep sign, use float(newcode) (not int) and preserve sign. Or explicitly preserve sign with math.copysign:
+       - Replace code like if newcode == 0: newcode = 0
+         with:
+           if newcode == 0:
+               newcode = math.copysign(0.0, newcode)
+       - Or, when converting, use: newcode = float(newcode)
+     - If you need to detect negative zero later in logic or tests, use math.copysign or struct.pack/np.signbit to test sign bit.
+   - If you do not need to preserve negative zero in your app logic, change the test instead:
+     - Update the test to not rely on the sign of zero (compare numeric equality or use assertAlmostEqual). If the negative sign carries semantic meaning, do not change the test.
+4. Run the tests again.
+
+How to detect sign-of-zero in code/tests (if you need to assert it):
+- Use math.copysign or struct.pack to inspect sign bit:
+  - import math; is_negative_zero = (value == 0.0 and math.copysign(1.0, value) < 0)
+  - Or use struct.pack('!d', value) to see the bit pattern.
+
+Why other vague suggestions would be bad:
+- Blindly removing all zero checks may reintroduce other bugs; instead, specifically remove only the code that coerces or casts zeros in append if preserving -0.0 is required.
+- Casting to int is the common culprit — avoid it if you need floating-point sign fidelity.
+
+Summary: the append code (called from add at line 126 / call at 138) normalizes zeros using equality or coercion, which collapses -0.0 to 0.0 because -0.0 == 0.0. Fix by preserving the float and its sign (use float() or math.copysign) or change the test if negative zero shouldn't matter.

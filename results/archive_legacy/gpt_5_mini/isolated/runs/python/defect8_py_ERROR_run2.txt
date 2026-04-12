@@ -1,0 +1,84 @@
+What happened (root cause)
+- The program tried to parse a locale string that contains an empty component: "fr__POSIX". The parser rejected it and raised ValueError: Invalid locale format: fr__POSIX.
+- "fr__POSIX" has two underscores in a row, which means “language = fr, territory = (empty), variant = POSIX”. Many locale parsers (Python’s locale functions, Babel’s Locale.parse, and similar code) expect either:
+  - "fr" or
+  - "fr_FR" or
+  - "fr_FR_POSIX"
+  but not a missing territory between two underscores. That malformed format is what triggered the ValueError.
+
+Where to look (how to find the exact line and variable)
+1. Open the full traceback you got from the test failure. The traceback shows the file, function, and line number where the ValueError was raised. Example lines you will see:
+   - File "myapp/i18n.py", line 42, in set_app_locale
+   - File "/usr/lib/python3.8/locale.py", line XXX, in setlocale
+   - ValueError: Invalid locale format: fr__POSIX
+2. In your code file and line referenced by the traceback (e.g., myapp/i18n.py:42) find the call that passes the string into the locale parser. Typical calls/variables to inspect:
+   - locale.setlocale(locale.LC_ALL, locale_name)
+   - babel.Locale.parse(locale_name) or babel.Locale.parse(locale_name, sep='_')
+   - any custom parser: parse_locale(locale_name)
+   - environment usage: os.environ.get('LANG') or os.environ.get('LC_ALL') being assigned to a variable like locale_str or locale_name
+3. Identify the variable that contains the value "fr__POSIX" (likely named locale_name, locale_str, lang, env_lang, or similar). Print/log it right before the parser call to confirm.
+
+Why it happens in practice
+- The string usually comes from environment variables (LANG, LC_ALL), from user input, or from a database. If code builds the string by concatenating parts (language + '_' + territory + '_' + variant) and one part is empty, you can end up with a double underscore.
+- Some systems set LANG to values like "fr_POSIX" or "fr__POSIX" for POSIX variants; your code/library does not accept that format.
+
+Concrete fixes (step-by-step)
+Pick one of these fixes depending on where the string comes from:
+
+A. Sanitize the locale string before parsing (recommended when input can be malformed)
+1. Locate the call that raises the error (from the traceback). Suppose it is:
+   locale.setlocale(locale.LC_ALL, locale_name)
+   and locale_name is the variable with the offending value.
+2. Normalize/sanitize before calling the parser:
+
+   - Remove empty territory segments and collapse double underscores:
+     locale_name = locale_name.replace('__', '_')  # quick fix
+
+   - More robust normalization: split into parts and rejoin while skipping empty parts:
+     parts = [p for p in locale_name.split('_') if p]
+     locale_name = '_'.join(parts)
+
+   - If you need the POSIX variant preserved but in an accepted form:
+     # For "fr__POSIX" -> "fr_POSIX" or "fr_POSIX" -> "fr_POSIX" (depending on your parser)
+     parts = locale_name.split('_')
+     if len(parts) >= 3 and parts[1] == '':
+         # move variant into second position, or drop empty territory
+         parts = [parts[0]] + parts[2:]
+     locale_name = '_'.join([p for p in parts if p])
+
+3. Then call the parser:
+   locale.setlocale(locale.LC_ALL, locale_name)
+
+B. Use a tolerant parser or fallback
+1. If you use Babel: use babel.Locale.parse with default or a try/except fallback:
+   try:
+       locale_obj = babel.Locale.parse(locale_name)
+   except (ValueError, UnknownLocaleError):
+       locale_obj = babel.Locale.parse('fr')  # fallback or map variant to base language
+
+2. If environment variable gives "fr__POSIX", override it with a sane value:
+   os.environ['LANG'] = sanitize(os.environ.get('LANG', ''))
+
+C. Fix source of the malformed string
+1. If your code constructs locales with string building, change construction to skip empty parts:
+   def build_locale(lang, territory=None, variant=None):
+       parts = [lang]
+       if territory:
+           parts.append(territory)
+       if variant:
+           parts.append(variant)
+       return '_'.join(parts)
+
+2. If the value originates from external config, correct the config to "fr" or "fr_POSIX" or a canonical form like "fr_FR.UTF-8".
+
+How to verify the fix
+1. Re-run the unit/test that failed. The traceback should no longer show the ValueError.
+2. Add a unit test that passes "fr__POSIX" and verifies your sanitize function or parsing logic transforms it to an accepted value (e.g., "fr_POSIX" or "fr").
+
+Exact things to check in your code right now
+- The traceback file and line number where ValueError occurs.
+- The variable name used at that location (likely locale_name, locale_str, lang, env_lang).
+- Any code that constructs that variable (concatenation, reading os.environ['LANG'], or DB/config read).
+
+Summary
+The error is caused by a malformed locale string "fr__POSIX" (empty territory between underscores). Find the line in the traceback that passes that string into the parser (e.g., locale.setlocale or babel.Locale.parse), then either sanitize the string (collapse/remove empty components), use a tolerant parse with fallback, or fix the source that produces the string.

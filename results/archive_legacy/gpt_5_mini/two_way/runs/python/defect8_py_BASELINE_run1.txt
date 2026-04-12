@@ -1,0 +1,48 @@
+What happened
+- Input "fr__POSIX" reaches LocaleUtils.to_locale (length == 8).
+- After the language check the code assumes positions 3 and 4 (ch3, ch4) always contain an uppercase country code and does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError
+- For "fr__POSIX" locale_str[3] is '_' (because the country is empty and there are two underscores). That fails the uppercase check and causes the ValueError you see.
+
+Where it occurs
+- The failure happens in to_locale, specifically the check at lines 237–240 (the ch3/ch4 uppercase validation). The code incorrectly assumes that when length > 2 a non-empty country code must exist at indices 3–4.
+
+Why it’s wrong (root cause)
+- The code does not handle the valid "language__variant" form (empty country, double underscore). In that form:
+  - index 2 == '_' (separator)
+  - index 3 == '_' (empty country separator)
+  - the variant begins at index 4 (e.g. 'P' in "fr__POSIX")
+- The existing logic only allows:
+  - a 2-char language (length == 2), or
+  - a 5-char language+country (length == 5), or
+  - a language_country_variant where country is assumed non-empty (so ch3/ch4 must be uppercase).
+- Thus it rejects valid strings where the country is empty (double underscore).
+
+Exactly what to change (concrete steps)
+1. After confirming locale_str[2] == '_' (line ~233), detect the empty-country case where locale_str[3] == '_' and handle it:
+   - If locale_str[3] == '_' (double underscore), set country = "" and variant = locale_str[4:], return Locale(language, "", variant).
+2. Otherwise, validate ch3/ch4 as uppercase country as the code already does, and continue with the existing branches for length == 5 or with variant.
+
+Minimal corrected logic sketch (replace the block that begins with ch3 = locale_str[3]):
+- After the check locale_str[2] == '_':
+  - if locale_str[3] == '_':
+      return Locale(locale_str[0:2], "", locale_str[4:] if length > 4 else "")
+  - else:
+      ch3 = locale_str[3]; ch4 = locale_str[4]
+      validate ch3,ch4 are 'A'..'Z'
+      if length == 5:
+          return Locale(locale_str[0:2], locale_str[3:5])
+      else:
+          check locale_str[5] == '_'
+          return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Example handling for "fr__POSIX"
+- With the fix: locale_str[3] == '_' triggers the empty-country branch and returns Locale("fr", "", "POSIX") instead of raising.
+
+Why this fix is safe
+- It keeps the existing strict validations for non-empty country codes and separators.
+- It explicitly supports the documented and commonly used "language__variant" form.
+
+If you want I can provide the exact edited function body with line-for-line replacement.

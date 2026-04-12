@@ -1,0 +1,41 @@
+What happened (where it fails)
+- The IndexError is raised at line 36 because the code saw index == 2 while len(code_units) was 2, so the test at line 35 failed:
+  - Line 35–36:
+    if index < 0 or index >= len(code_units):
+        raise IndexError(f"String index out of range: {index}")
+  - Because index == len(code_units) (2), the code raises IndexError before it ever reads code_units[index].
+
+Why that happened (root cause)
+- The code that calls to_utf16_code_units (or the code using the code_units list afterwards) is passing an index that is equal to the length of the code_units list instead of a valid position.
+- Valid indices into code_units are 0 .. len(code_units)-1. If len(code_units) == 2, only indices 0 and 1 are valid; index 2 is out of range.
+- A likely practical cause: the caller computed or iterated using the original Python string length (len(s) in code points) or some other counter, not the number of UTF-16 code units. For Unicode characters outside the BMP (e.g., U+1F600 😀) a single code point becomes two UTF-16 code units. That makes len(code_units) larger or smaller than the original loop bound and can produce index values equal to len(code_units).
+
+Exactly where to look (variables & lines)
+- Inspect the value of index that’s passed into the function (the code that invokes the code_unit access).
+- Relevant lines in this function:
+  - code_units is built earlier (line ~12).
+  - Line 35 checks bounds: if index < 0 or index >= len(code_units)
+  - Line 38 reads high = code_units[index], which will never be reached when index == len(code_units) because of the guard.
+  - Lines 39–44 handle surrogate pairs using code_units[index] and code_units[index+1].
+
+Concrete examples that reproduce the problem
+- If s contains one astral character (e.g., "😀"):
+  - code_units becomes two entries [high, low] => len(code_units) == 2
+  - A caller using index = len(s) (1) or incorrectly computing offsets might produce index == 2 and trigger the error.
+- If the caller loops i from 0 to len(s) inclusive or uses the wrong bound, it can produce index == len(code_units).
+
+How to fix it (clear, numbered steps)
+1. Confirm the caller’s index source:
+   - Find where index is computed or the loop that supplies it. Make sure it is based on len(code_units) (number of UTF-16 units) if you intend to index code_units.
+2. Use correct bounds when iterating:
+   - If you iterate positions into code_units, loop for i in range(len(code_units)): (this yields 0..len(code_units)-1).
+   - Do not use len(s) or code point counts to bound accesses into code_units.
+3. If the caller should be working in UTF-16 code units but currently works in code points, convert the indexing scheme:
+   - Either build and use code_units as the iteration source, or map code-point indices to code-unit indices before accessing.
+4. (Optional) Improve diagnostics:
+   - Change the exception to include len(code_units) so the message shows both index and valid range:
+     raise IndexError(f"Index {index} out of range for code_units of length {len(code_units)}")
+   - That will make future debugging immediate.
+
+Summary
+The function raised IndexError because index == len(code_units) (2) is out of valid range. Fix the code that computes or loops over index so it uses the number of UTF-16 code units (len(code_units)) as the bound, or adjust the indexing mapping between code points and UTF-16 code units.

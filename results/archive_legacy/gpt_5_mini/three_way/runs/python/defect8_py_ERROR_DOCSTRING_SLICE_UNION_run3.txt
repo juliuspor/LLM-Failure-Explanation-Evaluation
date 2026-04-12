@@ -1,0 +1,41 @@
+What happened (where and why)
+- At line 188 you call to_locale(cls, locale_str). For the failing input "fr__POSIX", length = len(locale_str) = 9 (computed at line 222).
+- The code reaches the branch that expects a language plus country/variant starting at line 231 and then reads ch3 = locale_str[3] and ch4 = locale_str[4] (lines 237–238).
+- For "fr__POSIX" the characters are:
+  - locale_str[0:2] = "fr" (language)
+  - locale_str[2] = '_' (separator)
+  - locale_str[3] = '_' (empty country — second underscore)
+  - locale_str[4] = 'P' (start of variant)
+- The code then validates the country letters with:
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+  (line 239)
+- Because ch3 == '_' is not between 'A' and 'Z', the condition is true and a ValueError("Invalid locale format: fr__POSIX") is raised (the exact failure you see).
+
+Root cause
+- The method assumes the country is always two uppercase letters at positions 3–4. It does not handle the valid form where the country is empty and the variant follows a double underscore (language + "__" + variant), e.g. "fr__POSIX". That pattern uses an empty country, but the current code treats the second underscore as an invalid country character and fails the uppercase-letter check.
+
+Exact location to change
+- Lines 231–247: the logic that reads ch3/ch4 and validates them must allow the special case where locale_str[3] == '_' (empty country) and the variant starts at locale_str[4] (or locale_str[4:] after the second underscore).
+
+Concrete fix (step-by-step)
+1. Before validating ch3/ch4 (before line 237), detect the empty-country pattern:
+   - if locale_str[2] == '_' and locale_str[3] == '_':
+       return Locale(locale_str[0:2], "", locale_str[4:])
+   This returns language, empty country, and the variant starting at index 4.
+
+2. Keep the existing validation for the normal language_country or language_country_variant forms:
+   - Otherwise, check that ch3 and ch4 are uppercase letters and proceed as currently implemented.
+
+3. (Optional) Ensure language characters are validated as lowercase earlier (if not already) and that variant is non-empty if you require it.
+
+Minimal patch example (pseudo-Python to insert around line 237):
+- Insert right after reading locale_str[2] (i.e., after you know length != 2 and locale_str[2] == '_'):
+    if locale_str[2] == '_' and locale_str[3] == '_':
+        # language + "__" + variant -> empty country
+        return Locale(locale_str[0:2], "", locale_str[4:])
+- Then continue with the existing ch3/ch4 uppercase checks for the normal case.
+
+Why this fixes it
+- It explicitly recognizes the valid pattern language + "__" + variant and avoids treating the second underscore as an invalid country letter. That prevents the erroneous uppercase-letter check from rejecting "fr__POSIX".
+
+If you want, I can produce an exact diff/hunk for the source file showing the insertion at the correct line numbers.

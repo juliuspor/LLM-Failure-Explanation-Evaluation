@@ -1,0 +1,48 @@
+What happened
+- The failure happens inside GrayPaintScale.get_paint (the method imported by your tests). The method computes a fraction from the input value and then converts that to a grayscale byte (r,g,b). Because the input value is not clamped before the conversion, the computed gray value can be < 0 or > 255 for out-of-range inputs. The implementation then hits code that raises ValueError when an RGB component is out of the 0–255 range (per the docstring). That causes your tests for values like -0.5 and 1.5 to raise instead of returning clamped black or white.
+
+Where it occurs (what to look for)
+- In GrayPaintScale.get_paint: look for the lines that compute something like
+    fraction = (value - lower_bound) / (upper_bound - lower_bound)
+  and the lines that compute gray from fraction:
+    gray = int(fraction * 255)
+  and immediately afterwards a range check that raises ValueError when gray < 0 or gray > 255.
+- The exception-raising line is the immediate visible symptom. The root cause is that value is not clamped to [lower_bound, upper_bound] (or fraction is not clamped to [0.0, 1.0]) before producing gray.
+
+Why it happened (root cause)
+- You convert the raw value into color without preventing negative fractions or fractions > 1.0.
+  - Example: value = -0.5, lower_bound = 0.0 -> fraction = (-0.5 - 0.0) / (1.0 - 0.0) = -0.5
+    -> gray = int(-0.5 * 255) = -127 -> triggers the ValueError check.
+  - Example: value = 1.5 -> fraction = 1.5 -> gray = 382 -> triggers the ValueError check.
+- Tests expect clamping to the endpoints (black for anything below lower_bound and white for anything above upper_bound), not an exception.
+
+How to fix it (concrete steps)
+1. Clamp the input value (or the computed fraction) to the legal range before converting to a byte. For instance:
+   - fraction = (value - lower) / (upper - lower)
+   - fraction = max(0.0, min(1.0, fraction))
+   (or clamp value first: value = max(lower, min(upper, value)), then compute fraction)
+2. Compute gray byte after clamping:
+   - gray = int(fraction * 255)
+3. Ensure the code handles the degenerate case upper == lower (either disallow it or return black/white or raise a clear ValueError about bounds, not because of RGB overflow).
+4. Remove the RGB overflow exception for normal out-of-range values (the clamping step makes that exception unnecessary for those inputs). Keep an explicit check only for programming-errors like non-finite numbers if desired.
+
+Minimal corrected implementation sketch
+- Replace the fraction/gray computation with:
+
+    # clamp the incoming value to [lower, upper]
+    value_clamped = max(self.lower_bound, min(self.upper_bound, value))
+    # safe fraction in [0.0, 1.0]
+    fraction = (value_clamped - self.lower_bound) / (self.upper_bound - self.lower_bound)
+    gray = int(fraction * 255)  # 0 -> 0, 1 -> 255, 0.5 -> int(127.5) = 127
+    return (gray, gray, gray)
+
+- If upper_bound == lower_bound, decide and implement a clear policy, e.g. return (0,0,0) or raise ValueError with a descriptive message.
+
+Why this will make your tests pass
+- For value = -0.5 the clamp maps it to lower_bound -> fraction = 0.0 -> gray = 0 -> (0,0,0).
+- For value = 1.5 the clamp maps it to upper_bound -> fraction = 1.0 -> gray = 255 -> (255,255,255).
+- For value = 0.5 fraction becomes 0.5 -> int(0.5 * 255) = 127 -> (127,127,127) as your test expects.
+
+Summary
+- Root cause: no clamping before converting to bytes, leading to negative or >255 gray values and a ValueError.
+- Fix: clamp value (or fraction) to [lower_bound, upper_bound] (or [0.0,1.0]) before computing gray, and handle equal-bounds explicitly. This directly stops the ValueError and yields the expected grayscale tuples.

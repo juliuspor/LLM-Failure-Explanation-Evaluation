@@ -1,0 +1,56 @@
+What fails
+- The code cannot represent negative offsets that are less than one hour (for example, −00:30). That causes callers who try to express a negative minute-only offset to either get a ValueError at the minutes-range check or to get the wrong sign/behavior.
+
+Where it goes wrong (line references use the excerpt you posted)
+1. Line that validates minutes:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   This rejects negative minutes. So callers cannot pass minutes_offset = -30 to mean “minus thirty minutes”.
+
+2. The code assumes the sign of the whole offset is carried only by hours_offset, and treats minutes_offset as always non‑negative. The sign handling block:
+   hours_in_minutes = hours_offset * 60
+   if hours_in_minutes < 0:
+       minutes_offset = hours_in_minutes - minutes_offset
+   else:
+       minutes_offset = hours_in_minutes + minutes_offset
+
+   This implements the convention “minutes_offset is always positive, and you apply it as a subtraction when hours_offset is negative.” That convention is fine only if the caller follows it, but the earlier range check (disallowing negative minutes) plus typical expectations about passing -0 or negative-only offsets makes it brittle and surprising.
+
+Concrete failure scenario
+- Caller wants −00:30 and calls for_offset_hours_minutes(0, -30). The minutes check raises ValueError("Minutes out of range: -30"). The caller might instead try for_offset_hours_minutes(-0, 30) (where -0 is 0) or for_offset_hours_minutes(0, 30) with a separate sign flag — neither expresses −00:30. So the method cannot create a timezone offset of −00:30.
+
+Why this is the root cause (simple terms)
+- The method requires the sign to be carried only by hours_offset but disallows negative minutes. That makes it impossible to describe negative offsets whose hours portion is zero. In other words, the API and validation disagree about how sign is supplied.
+
+Precise location to change
+- The minutes range check (minutes_offset < 0 or minutes_offset > 59) — adjust this if you want to accept negative minute inputs.
+- The sign-handling block that combines hours_in_minutes and minutes_offset — replace with a clear calculation using a separate variable for total minutes, instead of reusing minutes_offset for two different meanings.
+
+A clear, concrete fix (step-by-step)
+1. Keep validation for hours (-23..23) and minutes magnitude (0..59), or allow minutes to be negative depending on intended API. Decide one of these two conventions and document it:
+   - Convention A (current intent in combination code): minutes_offset must be 0..59 and the sign is given by hours_offset.
+   - Convention B (more flexible): minutes_offset may be negative to express negative-only offsets; sign can be on either parameter.
+
+2. Implement the total-minute calculation explicitly and unambiguously. For Convention A (sign on hours only), compute:
+   total_minutes = hours_offset * 60
+   if hours_offset < 0:
+       total_minutes -= minutes_offset   # minutes_offset is non-negative
+   else:
+       total_minutes += minutes_offset
+
+   For Convention B (allow negative minutes), compute:
+   total_minutes = hours_offset * 60 + minutes_offset
+
+   Use a new variable (total_minutes) rather than reusing minutes_offset.
+
+3. Validate total_minutes is in the expected bounds (e.g., -1439..1439) before multiplying, then multiply by MILLIS_PER_MINUTE using safe_multiply.
+
+4. Update or add tests:
+   - for_offset_hours_minutes(0, -30) -> behavior according to chosen convention
+   - for_offset_hours_minutes(-1, 30) -> should produce −1:30
+   - for_offset_hours_minutes(0, 30) -> +0:30
+   - boundary tests: ±23:59
+
+Summary
+- The method fails because it disallows negative minute arguments but also expects the sign to be carried in hours. That makes it impossible to represent negative offsets whose hour part is zero (e.g. −00:30). Fix by choosing one clear sign convention, computing total minutes in a separate variable, and validating total_minutes instead of reusing minutes_offset for two meanings.

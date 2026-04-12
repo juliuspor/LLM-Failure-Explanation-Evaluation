@@ -1,0 +1,54 @@
+What happened (what failed)
+- The surrogate-pair handling helper (the code shown in [SLICE_FORWARD], i.e. code_point_at) detects a high surrogate at code_units[index], reads the low surrogate at code_units[index + 1] (lines 38–41), and returns the combined code point (line 43).
+- The caller (translate_string in CsvEscaper) then advances index by 1 unconditionally (it assumes one code unit was consumed).
+- That mismatch—code_point_at consuming two UTF‑16 code units internally but the caller only moving index forward by one—causes the caller to re-process the low surrogate as if it were a new character. When the low surrogate is at the end of the string, the caller's subsequent logic tries to read past the end (index+1) and you get an IndexError. Even when there is a following ASCII character (your failing test input "\U0001F630A"), the loop processes the low surrogate incorrectly and the logic becomes wrong.
+
+Why this is the root cause (concrete variables, lines)
+- In code_point_at (lines 38–44):
+  - high = code_units[index] (line 38)
+  - It checks for a high surrogate and then reads low = code_units[index + 1] (line 40).
+  - When valid, it returns the combined code point (line 43).
+- But the caller translate_string (in CsvEscaper) does not know that two code units were read; it only increments index by 1. That means:
+  - index still points to the low surrogate on the next iteration, so the low surrogate gets treated as a separate unit.
+  - Any code that again tries to form a code point will access index+1 and may be out of bounds → IndexError.
+
+Where it occurred
+- The bug is in the interaction between code_point_at (lines 38–44 in [SLICE_FORWARD]) and translate_string in CsvEscaper. code_point_at reads two code units for a surrogate pair but does not inform the caller how many code units were consumed. The caller then advances index incorrectly.
+
+How to fix it (concrete steps)
+You must make the caller and the helper agree about how many UTF‑16 code units were consumed. Two straightforward fixes:
+
+1) Return (code_point, consumed) from code_point_at
+- Change code_point_at to return a tuple: (code_point, length), where length is 1 for BMP characters and 2 for surrogate pairs.
+- In translate_string, use:
+  - cp, consumed = code_point_at(code_units, index)
+  - advance index += consumed
+
+2) Do the surrogate detection in the caller (translate_string) and advance index there
+- Remove the helper’s internal read of index + 1 or at least don’t hide the fact two units were read.
+- In translate_string:
+  - If code_units[index] is a high surrogate and index + 1 < len(code_units) and code_units[index+1] is a low surrogate:
+    - combine into code point and set index += 2
+  - else:
+    - treat as single unit and set index += 1
+
+Minimal example patch (approach 1)
+- Change the helper signature and return:
+  def code_point_at(code_units, index):
+      high = code_units[index]
+      if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+          low = code_units[index + 1]
+          if 0xDC00 <= low <= 0xDFFF:
+              return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), 2
+      return high, 1
+- In translate_string:
+      cp, consumed = code_point_at(code_units, index)
+      # use cp...
+      index += consumed
+
+Why that fixes your failing tests
+- The caller will now skip both code units of a surrogate pair when one is consumed, so the low surrogate is not reprocessed and you will not read past the end of the array. Tests with a surrogate followed by another character ("😰A") or a surrogate at the end ("Test😄") will behave correctly.
+
+Summary
+- Root cause: code_point_at reads two UTF‑16 code units for a surrogate pair but does not tell the caller, and the caller advances index by only one (off-by-one in units consumed).
+- Fix: make the helper report how many units it consumed (or move surrogate handling into the caller) and advance index by that amount.

@@ -1,0 +1,48 @@
+What went wrong (root cause)
+- At line 340 you check whether self._min_start_index >= 0. If true you fetch min_start_period (line 341) and then only set min_start inside the nested if that tests its type (lines 342–346). The comparison on line 346 uses min_start unconditionally:
+  - line 342: if isinstance(min_start_period, SimpleTimePeriod):
+  - line 345:     min_start = int(min_start_period.get_start().timestamp() * 1000)
+  - line 346: if start < min_start:
+If min_start_period is NOT a SimpleTimePeriod, min_start is never assigned. That causes an UnboundLocalError (local variable 'min_start' referenced before assignment) at line 346.
+
+- There is also a second, separate bug: line 349 sets self._min_start_index = index unconditionally. Because of wrong indentation or a stray statement, the code always assigns index to _min_start_index even when the comparison (line 346) should decide whether to update it. That makes the comparison pointless and will incorrectly change _min_start_index for every item.
+
+Where it happened (specific lines)
+- Missing assignment before use causing crash: lines 341–346 (min_start_period lookup, conditional assignment to min_start, then unconditional use of min_start on line 346).
+- Incorrect/unconditional update that breaks logic: line 349 (self._min_start_index = index) — this should not execute in all cases.
+
+Why it fails (concise)
+- The code tries to compare start < min_start but min_start may not exist if min_start_period is not a SimpleTimePeriod → UnboundLocalError.
+- Even if that were fixed, the unconditional assignment on line 349 overwrites the intended behavior and makes the comparison meaningless.
+
+Clear fixes (step-by-step)
+1. Ensure min_start is always defined before you use it:
+   - Either compute min_start for all period types (handle the non-SimpleTimePeriod case) or skip the comparison if you cannot compute a numeric min_start for that period type.
+   - Example approaches:
+     - If other period types expose a get_start/get_start_millis alternative, call it in an else branch and set min_start.
+     - Or replace the code with:
+       if isinstance(min_start_period, SimpleTimePeriod):
+           min_start = ...
+           if start < min_start:
+               self._min_start_index = index
+       else:
+           # decide what to do when min_start_period isn't SimpleTimePeriod
+           pass
+
+2. Remove or correct the stray unconditional assignment:
+   - Delete line 349 (self._min_start_index = index) or move it so it only runs where intended (e.g., inside the branch that initializes _min_start_index when it was previously -1).
+   - Likely intended structure:
+     if self._min_start_index >= 0:
+         compute min_start ...
+         if start < min_start:
+             self._min_start_index = index
+     else:
+         # first valid item becomes the minimum
+         self._min_start_index = index
+
+3. Add tests covering:
+   - When get_data_item(...).get_period() returns a SimpleTimePeriod.
+   - When it returns some other period type.
+   - Sequence of items to confirm _min_start_index updates only when a strictly smaller start is seen.
+
+Applying those two fixes (always define min_start before comparing, and remove the unconditional assignment) will stop the UnboundLocalError and restore correct behavior.

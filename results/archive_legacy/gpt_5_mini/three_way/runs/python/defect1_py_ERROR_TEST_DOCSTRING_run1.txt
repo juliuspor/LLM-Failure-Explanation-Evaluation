@@ -1,0 +1,55 @@
+What happened
+- The failing test is test_zero_hours_negative_minutes which calls:
+  DateTimeZone.for_offset_hours_minutes(0, -15)
+- The error ValueError: Minutes out of range: -15 is raised from the validation inside DateTimeZone.for_offset_hours_minutes.
+- That message and the behavior show the method rejects negative minute values unconditionally (or at least when hours == 0), even though the docstring explicitly allows (0, -15) -> -00:15.
+
+Why it failed (root cause)
+- The method's validation uses the minutes_offset variable incorrectly. It checks minutes_offset < 0 and raises a ValueError regardless of the hours_offset value. That makes negative minutes illegal for the zero-hour case.
+- According to the docstring and the tests, negative minutes are valid when:
+  - hours_offset == 0 (e.g. (0, -15) -> -00:15), or
+  - hours_offset < 0 (both (-2, 15) and (-2, -15) should produce -02:15).
+- The current validation treats any minutes_offset < 0 as out-of-range (hence the message "Minutes out of range: -15"), so it fails for (0, -15).
+
+Where it occurred
+- In DateTimeZone.for_offset_hours_minutes, during the input validation step for minutes_offset. The exception text "Minutes out of range: -15" is produced for minutes_offset = -15, which shows the validation code did not special-case hours_offset == 0 or negative hours.
+
+How to fix it (concrete steps)
+1. Change the validation logic for minutes_offset so the allowed range check is simply:
+   - assert abs(minutes_offset) <= 59 (i.e. minutes_offset in [-59, +59]).
+   This permits negative minute values where allowed by the docstring.
+2. Enforce sign rules described by the docstring:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (mixed sign not allowed for positive hours).
+   - If hours_offset < 0 and minutes_offset > 0: treat the minutes as negative (minutes_offset = -abs(minutes_offset)). The docstring shows (-2, 15) -> -02:15 (i.e. -2h - 15m).
+   - If hours_offset == 0: keep minutes_offset as-is (sign determines final sign).
+3. Compute the total offset from UTC in minutes then milliseconds using the possibly adjusted minutes_offset:
+   total_minutes = hours_offset * 60 + minutes_offset
+   total_millis = total_minutes * 60 * 1000
+   (Make sure to use integer arithmetic and check the final magnitude does not exceed allowed +/- (23*60 + 59) minutes if your API requires that.)
+4. Replace the current failing check (the one that raises "Minutes out of range: <value>") with the corrected checks above.
+
+Minimal example code patch (conceptual — adjust to your file and variable names):
+- In DateTimeZone.for_offset_hours_minutes(hours_offset, minutes_offset):
+  - if not (-23 <= hours_offset <= 23):
+        raise ValueError("Hours out of range: %d" % hours_offset)
+  - if not (-59 <= minutes_offset <= 59):
+        raise ValueError("Minutes out of range: %d" % minutes_offset)
+  - if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes not allowed")
+  - if hours_offset < 0 and minutes_offset > 0:
+        minutes_offset = -minutes_offset
+  - total_minutes = hours_offset * 60 + minutes_offset
+  - # optional: check abs(total_minutes) <= 23*60 + 59
+  - total_millis = total_minutes * 60 * 1000
+  - create/return zone with total_millis and ID formatted from total_minutes
+
+Why this fixes the failing test
+- For (0, -15):
+  - abs(-15) <= 59 passes
+  - hours_offset == 0 so we do not flip or reject the minute sign
+  - total_minutes = 0*60 + (-15) = -15 -> total_millis = -900000, and ID becomes "-00:15"
+  - No ValueError is raised.
+
+Summary
+- The method incorrectly rejects negative minutes when hours == 0 (and possibly in other valid combinations).
+- Update the minutes validation to allow minutes in [-59, 59], enforce the docstring sign rules (reject +hour with -minutes, treat +minutes with -hour as negative), then compute the total offset. This will make the tests pass and match the documented behavior.

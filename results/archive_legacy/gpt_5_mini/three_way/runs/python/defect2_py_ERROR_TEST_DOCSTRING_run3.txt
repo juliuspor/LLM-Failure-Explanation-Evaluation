@@ -1,0 +1,45 @@
+What happened (root cause)
+- The failure happens inside GrayPaintScale.get_paint when you pass a value outside the configured bounds.
+- The code converts the input value to an RGB gray level like this (conceptually):
+  proportion = (value - lower) / (upper - lower)
+  gray = int(proportion * 255)
+  return (gray, gray, gray)
+- For value = -0.5 (with default lower=0.0, upper=1.0) proportion becomes -0.5, so gray becomes int(-0.5 * 255) → -127. That produces an out-of-range component (< 0).
+- For value = 1.5 proportion becomes 1.5, so gray → int(1.5 * 255) → 382 (> 255).
+- The code (or a downstream check) raises ValueError: "Color parameter outside of expected range: Red Green Blue" when any channel is <0 or >255. So the error is triggered because you never clamp the computed gray value into the allowed 0–255 range before returning or constructing the color.
+
+Where it occurs
+- Method: GrayPaintScale.get_paint
+- Variables involved: value, lower, upper, proportion (normalized value), gray (computed channel), r/g/b (returned tuple)
+- Exact point: before you build/return the (r,g,b) tuple — the computed gray is out of [0,255] for inputs outside [lower, upper].
+
+Why it fails (short)
+- Inputs outside the lower/upper bounds are not clamped to the valid range, so scaling produces negative or >255 channel values and triggers the ValueError.
+
+How to fix (clear actionable steps)
+1. Clamp the input (or the normalized proportion) into [0.0, 1.0] before scaling to 0–255:
+   - proportion = (value - lower) / (upper - lower)
+   - proportion = max(0.0, min(1.0, proportion))
+2. Compute the gray channel after clamping:
+   - gray = int(proportion * 255)
+   - return (gray, gray, gray)
+3. Defend against division by zero if lower == upper:
+   - if upper == lower: treat proportion = 0.0 (or define desired behavior) before clamping.
+4. (Optional) If you want to match the test's expectation for 0.5 -> 127, using int(proportion * 255) is fine (it truncates 127.5 → 127).
+
+Concrete code to replace/insert in get_paint
+- (pseudocode you can paste into your get_paint)
+  if upper == lower:
+      proportion = 0.0
+  else:
+      proportion = (value - lower) / (upper - lower)
+  proportion = max(0.0, min(1.0, proportion))
+  gray = int(proportion * 255)
+  return (gray, gray, gray)
+
+Examples showing fixes
+- value = -0.5 → proportion = -0.5 → clamped to 0.0 → gray = 0 → (0,0,0) (no exception)
+- value = 1.5 → proportion = 1.5 → clamped to 1.0 → gray = 255 → (255,255,255)
+- value = 0.5 → proportion = 0.5 → gray = int(127.5) → 127 → (127,127,127)
+
+This will stop the ValueError because r,g,b will always be within 0–255 before you construct/return the tuple.

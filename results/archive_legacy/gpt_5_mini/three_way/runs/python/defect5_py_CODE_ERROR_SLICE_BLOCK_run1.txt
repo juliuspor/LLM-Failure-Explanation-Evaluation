@@ -1,0 +1,41 @@
+What happened (root cause)
+- On line 346 you set inferred_type = type(array) when array is not None. type(array) returns the Python class of the list object (i.e. list), not the element type stored in that list.
+- Later you treat inferred_type as the list element/component type (you compare it to object on line 346 and later use it in ArrayUtils._copy_list_grow1). Because inferred_type was set to the list class (or fell back to object when neither array nor element gave an element type), the logic that detects an "object" component list and raises the TypeError fires incorrectly.
+- Concretely: in the failing test inferred_type ended up being object (the fallback path), so the check on line 346–350 raised:
+  "Cannot cast object list to str list ..."
+  That message is correct for when you truly have an object-component list, but it was raised because you computed inferred_type from the list object itself rather than from its element type.
+
+Where it occurs in your code
+- Line 343–345: you compute inferred_type:
+  - if array is not None: inferred_type = type(array)  <-- wrong: gives list, not element type
+  - elif element is not None: inferred_type = type(element)  <-- OK for element
+  - else: inferred_type = object
+- Line 347–351: you check if inferred_type == object and expected_type != object and raise the TypeError. Because inferred_type was computed incorrectly, you hit the raise when you shouldn't.
+
+Why that produces the specific error
+- type(array) == list, not the element class. When array is empty you had no element to infer from so you fell back to object (line 345). That makes the code believe you have an "object" list and then you block the cast to str (expected_type=str), raising the TypeError shown.
+
+How to fix it (concrete steps)
+1. Derive the element/component type, not the list's type.
+   - If array is not None and non-empty, get the type from one of its elements, e.g. inferred_type = type(array[0]).
+   - If array is empty but element is provided, use inferred_type = type(element).
+   - If both are absent and expected_type is provided, use inferred_type = expected_type.
+   - Otherwise fall back to object.
+
+Replace the inference block (lines 343–345) with something like:
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+2. Use identity/is or equality appropriately when comparing to object.
+   - Comparing to object with == works but is clearer as inferred_type is object uses "is".
+
+3. Ensure ArrayUtils._copy_list_grow1 expects the element type. If it expects a component class, pass the element class (as above), not the list class.
+
+Summary
+The code uses type(array) (the list's class) instead of the element type. That makes inferred_type wrong and causes the subsequent guard (lines 346–351) to raise a TypeError incorrectly. Fix by inferring the element class from array[0] (or element or expected_type) and pass that into _copy_list_grow1 and the type check.

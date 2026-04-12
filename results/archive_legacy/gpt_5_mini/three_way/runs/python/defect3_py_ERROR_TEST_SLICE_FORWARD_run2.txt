@@ -1,0 +1,53 @@
+What happened (what failed)
+- The test input "\U0001F630A" ends up causing code_point_at (the function shown in the slice) to be called with index equal to len(code_units). That makes the first access on line 38:
+  high = code_units[index]
+  raise IndexError: "String index out of range: 2" (index 2 in a length-2 sequence).
+
+Why it happened (root cause)
+- The function assumes the caller never passes an out-of-range index, so it reads code_units[index] before checking bounds.
+- The bounds check on line 39 only protects the read of the low surrogate:
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+    low = code_units[index + 1]
+  But that does not prevent the initial access high = code_units[index] when index == len(code_units).
+- In this test the translate loop (caller) advanced the index incorrectly when handling surrogate pairs. That loop let index reach len(code_units) and still called code_point_at. So the immediate cause is the out-of-range call; the underlying cause is the caller advancing index past the end (off-by-one when consuming surrogate pairs).
+- Concretely: for input consisting of a surrogate pair plus another character, the translate-loop consumed the pair, advanced the index by 2, and then the loop logic advanced it again (or otherwise called code_point_at with index == len). That produced the attempt to read code_units[2] when valid indices are 0 and 1.
+
+Where it occurred (specific lines & names)
+- The crash occurs at line 38 in the shown slice (high = code_units[index]) inside code_point_at (or whatever function this slice is from).
+- The unsafe check is on line 39: the check for index+1 < len(code_units) happens too late (after the access).
+- The calling code is CharSequenceTranslator.translate (or CsvEscaper.translate_string) — its index-advance logic is letting index equal len(code_units) and then calling code_point_at.
+
+How to fix it (concrete steps)
+Give either or both of the following fixes:
+
+1) Make code_point_at robust (recommended defensive change)
+- Add a bounds check before accessing code_units[index]. Return a sentinel or raise a clear exception if index is out of range. Example:
+  - At the top of the function add:
+    if index < 0 or index >= len(code_units):
+        raise IndexError("index out of range")
+  - Then keep the existing surrogate handling. This prevents the obscure out-of-range read at line 38 and makes the failure clearer if caller is wrong.
+
+2) Fix the caller's index-advance logic (primary correctness change)
+- In the translate loop (in CharSequenceTranslator.translate or CsvEscaper.translate_string), ensure you never call code_point_at when index == len(code_units). Typical pattern:
+  - Use while index < len(code_units): ... inside the loop.
+  - When you detect a high surrogate and consume a low surrogate, advance index by 2 and continue the loop without letting the loop body do an extra increment or make another call with the old/new index incorrectly.
+- Concretely: if you currently do something like:
+    while True:
+        cp = code_point_at(code_units, index)
+        ... process cp ...
+        index += (2 if cp is from surrogate pair else 1)
+        if index > len(code_units): break
+  change to:
+    while index < len(code_units):
+        cp = code_point_at(code_units, index)
+        ... process cp ...
+        index += (2 if cp came from a surrogate pair else 1)
+
+Which to apply
+- Do both if possible: make code_point_at defensive and also correct the translate-loop index arithmetic. Defensive code_point_at avoids obscure crashes during development; fixing the caller ensures correct behavior.
+
+Why this will stop the failure
+- With a pre-check in code_point_at you avoid an out-of-range read at line 38.
+- With proper loop/advance logic the function will not be called with index == len(code_units), so the code no longer hits the error case at all.
+
+If you want, paste the translate loop and I will show the exact two-line change to stop the off-by-one.

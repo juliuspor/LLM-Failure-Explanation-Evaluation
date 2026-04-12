@@ -1,0 +1,48 @@
+What happened (what you saw)
+- Your test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The code produced the wrong zone id (e.g. "-01:45" or something else) instead of the expected "-02:15".
+- The failure is caused by incorrect sign handling when the hours and minutes are both negative.
+
+Where it goes wrong (exact places and variables)
+- In for_offset_hours_minutes the local variables involved are hours_in_minutes and minutes_offset.
+- hours_in_minutes is computed as hours_offset * 60 (for -2 this is -120).
+- The bug occurs at the lines shown in your slice:
+  - Line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404: minutes_offset = hours_in_minutes + minutes_offset
+- For (-2, -15) the code executes the branch that runs line 402, so it does:
+  minutes_offset = -120 - (-15) = -105 minutes, i.e. -1:45
+  instead of the intended -120 + (-15) = -135 minutes, i.e. -2:15.
+- That incorrect subtraction flips the sign of the minutes contribution when hours are negative and minutes are negative.
+
+Why that is wrong (root cause)
+- The minutes should be added to the hour total using their algebraic sign. The current code subtracts a negative minutes_offset in one branch, which effectively adds |minutes| in the wrong direction.
+- In short: the sign of minutes is not being combined with the sign of hours correctly. The code mixes addition and subtraction instead of consistently using hours_in_minutes + minutes_offset (or a clear signed combination).
+
+How to fix it (concrete steps)
+1. Replace the incorrect subtraction at line 402 with addition, so the combination is always hours_in_minutes + minutes_offset (after making minutes_offset have the intended sign), or compute a total using explicit sign logic.
+2. Recommended robust implementation:
+   - Compute hours_in_minutes = hours_offset * 60.
+   - Normalize minutes by its sign relative to hours (or better: use their algebraic values directly). For example:
+     total_minutes = hours_in_minutes + minutes_offset
+     (but only after validating minutes_offset range and the allowed sign combinations per the docstring)
+   - Convert to milliseconds: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - Call return cls.for_offset_millis(offset)
+3. Alternatively, ensure the existing branching does:
+   - when minutes_offset is negative and hours_offset is negative: minutes_offset = hours_in_minutes + minutes_offset
+   - (i.e. change the - to + on line 402)
+
+Example minimal patch (conceptual)
+- At line 402 change:
+    minutes_offset = hours_in_minutes - minutes_offset
+  to:
+    minutes_offset = hours_in_minutes + minutes_offset
+
+What to test after the fix
+- Your test: DateTimeZone.for_offset_hours_minutes(-2, -15).id == "-02:15"
+- Also test all combinations described in the docstring, especially:
+  - (2, -15) should raise ValueError
+  - (0, -15) -> "+00:15" or "-00:15" per spec (verify expected sign)
+  - (-2, 15) -> "-02:15"
+  - boundary cases: (23,59), (-23,-59)
+
+This will ensure the minutes are combined using their actual sign and the produced zone id matches expectations.

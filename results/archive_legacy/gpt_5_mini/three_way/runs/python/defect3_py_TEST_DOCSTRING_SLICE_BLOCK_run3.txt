@@ -1,0 +1,44 @@
+What happened (what failed)
+- The test fails with an IndexError raised at these lines:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  That check is in code_point_at (or wherever the code calls into the "code units" accessor). The translator code calls code_point_at with an out-of-range index.
+
+Why it happened (root cause)
+- The translate loop advances the loop index incorrectly when it encounters a UTF-16 surrogate pair.
+- Specifically:
+  - The translator converts the input string into UTF-16 code units (to_utf16_code_units) and iterates over those code units using a variable named index.
+  - When it sees a high surrogate it treats it as a surrogate pair and advances index by 2 (to skip both code units).
+  - But if the high surrogate is at the final code-unit position (or when a surrogate pair is followed by another character), the code later calls code_point_at(code_units, index) with index equal to len(code_units) (or otherwise out of range).
+  - That call triggers the index-range check at lines 35-36 and raises IndexError.
+- In short: the loop sometimes increments index to a value that points past the end of code_units, and then the code immediately tries to access code_point_at at that index without verifying index < len(code_units). The off-by-one/out-of-range happens only when surrogate pairs are present (emoji) because the loop advances by 2 for a pair.
+
+Where it happened (exact places in the code)
+- The failure is in the translate implementation (CharSequenceTranslator.translate / translate_string) that iterates over the UTF-16 code unit list created by to_utf16_code_units.
+- The exception is raised in code_point_at (the range-check lines 35–36 shown in your slice block).
+- Variables involved: index (loop position over code_units), code_units (list returned by to_utf16_code_units), code_point_at (accessor that performs the check and raises).
+
+How to fix it (concrete steps)
+1. Ensure your main translate loop never calls code_point_at with index >= len(code_units).
+   - Use the loop condition while index < len(code_units): rather than relying on internal calls to detect out-of-range.
+   - Example (pseudocode of the safe pattern):
+     - while index < len(code_units):
+         - if at least two code units remain and code_units[index] is a high surrogate and code_units[index+1] is a low surrogate:
+             - cp = combine_surrogates(code_units[index], code_units[index+1])
+             - index += 2
+         - else:
+             - cp = code_units[index]
+             - index += 1
+         - append translated cp to out
+   - This avoids calling code_point_at(index) when index == len(code_units).
+2. If you want to keep calling code_point_at, make code_point_at tolerant:
+   - Change code_point_at to return a sentinel (or raise a clearer error earlier) when index is out of range, but this is less desirable than fixing the loop control.
+3. Also handle malformed surrogates:
+   - If you find a high surrogate but no following low surrogate (end-of-input), treat the high surrogate as a standalone code unit (append it as-is) and advance by 1 instead of trying to read a second code unit.
+4. Add unit tests covering these cases (you already have them). Keep the test that failed:
+   - input_str = "\U0001F630A" (emoji + 'A') and ensure translate_string does not attempt an access beyond the end of code_units.
+
+Why these steps fix it
+- The fix guarantees that every read of code_unit or call to code_point_at is done only when index is valid. Advancing by 2 is only done when you successfully verified a low surrogate exists at index+1; otherwise you advance by 1. That prevents the translator from trying to access index == len(code_units) and hitting the IndexError at lines 35–36.
+
+If you want, paste the current translate loop here and I will show the minimal diff to make it safe.

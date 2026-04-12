@@ -1,0 +1,58 @@
+What happened (where, in plain terms)
+- At line 335 the code sets inferred_type = type(array) when array is not None.
+- At line 340 the code sets inferred_type = object in the branch that handles the case where no element type can be inferred (array empty and element is None).
+- At line 346 the code checks if inferred_type == object and expected_type != object and then raises the TypeError.
+
+Root cause
+- The code is using type(array) (line 336) instead of the element type (for example type(array[0])) when an array is provided. type(array) returns the type of the container (e.g. list), not the type of its elements.
+- Separately, when the code cannot determine an element type it assigns inferred_type = object (line 340). The later check at line 346 treats that sentinel object value as “I cannot infer element type” and then refuses to cast to any specific expected_type by raising a TypeError.
+- In short: inferred_type is set incorrectly (container type instead of element type) or set to the generic sentinel object when no element is available, and the code unconditionally treats that sentinel as a hard failure when expected_type is more specific. That triggers the TypeError at line 346.
+
+Why this explains the actual failure you saw
+- If you pass a non-empty array, inferred_type should be the element class (so the cast check works). But because the code uses type(array) it will not match expected element classes, or will be wrong in other logic paths.
+- If you pass an empty array (array not None but contains zero elements) or element is None, the code sets inferred_type = object (line 340). Then line 346 raises TypeError whenever expected_type is not object. That makes the routine fail for empty arrays even when a cast to expected_type would be harmless or desired.
+
+Exactly what to change (concrete fixes with lines)
+1) When array is provided, set inferred_type to the element type, not the container type:
+   - Replace line 336:
+       inferred_type = type(array)
+     with something like:
+       inferred_type = type(array[0]) if len(array) > 0 else None
+   - This ensures you infer the element class from the first element when the array is non-empty.
+
+2) Treat the empty/unknown case more permissively or use expected_type to decide:
+   - Replace line 340 (where inferred_type = object) with either:
+       inferred_type = None
+     and change the check at line 346 to only raise when inferred_type is None and expected_type is not object and you truly cannot accept casting; or
+       inferred_type = expected_type
+     if you want to allow empty arrays to be considered instances of expected_type arrays.
+
+3) Update the check at line 346 accordingly:
+   - Instead of raising whenever inferred_type == object and expected_type != object, check the actual situation. Example:
+       if inferred_type is None and expected_type != object:
+           # decide: either allow, or raise with a clear message that array was empty
+   - Or, if you use the element type from the array, you can do:
+       if inferred_type is object and expected_type != object:
+           raise TypeError(... same message ...)
+
+One compact concrete replacement (illustrative) for the block around 335–346:
+- At 335–337:
+    if array is not None:
+        inferred_type = type(array[0]) if len(array) > 0 else None
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = None
+- At 346:
+    if inferred_type is None and expected_type != object:
+        # either accept (no raise) or raise a clearer message mentioning the array is empty
+        raise TypeError(f"Cannot determine element type from empty array to cast to {expected_type.__name__}")
+
+Why these fixes work
+- They compute the element type (not the list type) so comparisons against expected_type are meaningful.
+- They avoid treating the generic sentinel object as a hard error in cases where the array was simply empty; you can then choose a correct policy (allow casting to expected_type, or raise a specific empty-array error).
+
+If you want, tell me whether you prefer to:
+- allow casting empty arrays to the expected_type (recommended for compatibility), or
+- raise a specific error that the array is empty
+and I will provide the exact code patch to apply.

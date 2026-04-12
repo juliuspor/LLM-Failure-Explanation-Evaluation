@@ -1,0 +1,48 @@
+What happened (where it fails)
+- The exception is raised in LocaleUtils.to_locale at line 244 (slice shown lines 239–246). The code checks characters 3 and 4 (ch3, ch4) and requires both to be uppercase letters:
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+- For the input "fr__POSIX" the string positions are:
+  0:'f', 1:'r', 2:'_', 3:'_', 4:'P', 5:'O', ...
+  So ch3 == '_' and ch4 == 'P'. The ch3 check fails because '_' is not between 'A' and 'Z', so the code raises ValueError: Invalid locale format: fr__POSIX.
+
+Why it happens (root cause)
+- The method enforces the 3rd and 4th characters (indexes 3 and 4) to be uppercase letters, assuming the country part is always two uppercase letters when present. That works for forms like "en_US" and "en_US_VARIANT".
+- However Java Locale also allows an empty country with a variant, written as "language__variant" (two consecutive underscores), e.g. "fr__POSIX" meaning language="fr", country="" (empty), variant="POSIX".
+- The code does not handle the empty-country case. It treats the character at index 3 as the first letter of the country and rejects '_' there, so it incorrectly rejects valid strings where country is empty and the variant starts at index 5.
+
+Where to fix (precise steps)
+1. In LocaleUtils.to_locale, after confirming locale_str[2] == '_', check for the empty-country form before validating ch3/ch4. Concretely:
+   - If locale_str[3] == '_' then this is the empty-country case. In that case you should skip the ch3/ch4 uppercase-letter checks and proceed to parse variant from index 4 or 5 depending on your indexing.
+2. Correct parsing:
+   - For "fr__POSIX": language = locale_str[0:2]; country = ""; variant = locale_str[4:] or locale_str[5:]? (Careful with indexes — see below.)
+   - The accepted canonical formats are:
+     - "ll" (length 2) → language
+     - "ll_CC" (length 5) → language and country (2 letters)
+     - "ll_CC_VARIANT" (length >= 7, with '_' at pos 2 and 5) → language, country, variant
+     - "ll__VARIANT" (length >= 5, with '_' at pos 2 and 3) → language, empty country, variant
+
+Exact code change to apply (illustrative, refer to file lines ~239–252)
+- Replace the block that reads ch3/ch4 and enforces uppercase with logic like:
+
+    # after verifying locale_str[2] == '_'
+    if locale_str[3] == '_':
+        # empty country, variant starts at index 4
+        if length < 5:
+            raise ValueError(...)
+        return Locale(locale_str[0:2], '', locale_str[4:])
+    else:
+        ch3 = locale_str[3]; ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(...)
+        if length == 5:
+            return Locale(locale_str[0:2], locale_str[3:5])
+        else:
+            if locale_str[5] != '_':
+                raise ValueError(...)
+            return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Notes
+- Be careful with slice indexes: in "fr__POSIX" variant should be "POSIX", which starts at index 4 (0:'f',1:'r',2:'_',3:'_',4:'P'). The example code above uses locale_str[4:].
+- After this change LocaleUtils.to_locale('fr__POSIX') will return Locale('fr', '', 'POSIX') instead of raising ValueError.

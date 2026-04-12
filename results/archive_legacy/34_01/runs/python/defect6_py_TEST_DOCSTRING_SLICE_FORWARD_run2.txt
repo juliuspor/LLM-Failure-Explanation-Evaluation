@@ -1,0 +1,56 @@
+Why the test fails
+- What the test did: created cc = MockCodeConsumer(), called cc.add_number(-0.0), then checked result = cc.get_code() == '-0.0'.
+- What happened: result was not '-0.0' (the test failed). That means MockCodeConsumer did not emit the negative-zero representation that the test expects.
+- Why it happened (root cause): add_number is normalizing or treating any numeric zero as a plain zero without preserving the sign bit. In other words, code in add_number or the formatting path is doing a zero check or a normalization that maps both +0.0 and -0.0 to the same representation (for example "0.0" or "0"). Common concrete ways this mistake appears:
+  - Code uses an equality test like if number == 0: ... and then emits "0" or "0.0" — that loses the negative sign on -0.0.
+  - Code takes abs(number) or otherwise removes the sign before formatting.
+  - Code converts to an integer or truncates zeros: number = 0.0 (explicit assignment) or number = float(0) etc.
+  Any of those will turn -0.0 into +0.0 and make get_code() return a non-'-0.0' string.
+
+How to confirm exactly where it happens
+1. Add a quick diagnostic inside add_number to observe what value and sign the method sees. For example, inside MockCodeConsumer.add_number (or right before the formatting call) add:
+   - print(repr(number)) or log(repr(number))
+   - print(math.copysign(1.0, number)) — this prints -1.0 for negative zero and +1.0 for positive zero.
+   If repr(number) shows '0.0' but math.copysign(1.0, number) is -1.0, you still have -0.0 as a float; if both show +1.0 sign then code already converted it to +0.0 before you get there.
+2. If you see the sign preserved at the start of add_number but lost later, inspect the lines that:
+   - compare number == 0
+   - call abs(number)
+   - cast or reassign number = 0 or number = float(0)
+   - call a formatting helper that may have its own zero normalization
+
+Concrete fixes (step-by-step)
+Pick one of these depending on where the loss occurs:
+
+A. If add_number currently does a zero test and emits a generic "0" or "0.0":
+- Change that code to preserve negative zero. Example change inside add_number:
+  1. Import math at top: import math
+  2. Before any normalization, test special-case negative zero:
+     if number == 0.0 and math.copysign(1.0, number) < 0:
+         self._emit('-0.0')   # or whatever builder method you use to append text
+         return
+  3. Keep the existing path for other numbers (positive zero or nonzero).
+- This preserves -0.0 only for true negative-zero inputs.
+
+B. If some helper takes abs(number) or otherwise removes sign:
+- Remove the abs() call or change the helper to accept a sign parameter and format sign separately. For example:
+  old: s = format(abs(number), '.12g')
+  new:
+    sign = '-' if (number != 0.0 and math.copysign(1.0, number) < 0) else ''
+    s = sign + format(abs(number), '.12g')
+  Special-case negative zero as in A if you need the literal "-0.0" instead of "-0".
+
+C. If formatting uses repr/str but code later normalizes zeros:
+- Avoid normalizing 0.0 and -0.0 to a single canonical zero string. Use math.copysign to detect negative zero and choose the string accordingly.
+
+Tests to add after the fix
+- Keep your failing test:
+  cc = MockCodeConsumer(); cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0'
+- Add symmetric tests:
+  cc = MockCodeConsumer(); cc.add_number(0.0); assert cc.get_code() == '0.0'
+  cc = MockCodeConsumer(); cc.add_number(-1.5); assert cc.get_code().startswith('-1.5')
+- Add an internal assertion in add_number diagnostics (only for debug) to ensure you see math.copysign behavior if needed.
+
+Why this is not a language bug
+- Most languages represent -0.0 as a distinct floating-point bit pattern even though equality number == 0.0 is true. If code only uses equality tests or abs(), that will intentionally mask the sign. You need an explicit test (math.copysign or bit inspection) to preserve the negative-zero sign.
+
+If you want, paste the body of MockCodeConsumer.add_number (and any helper it calls) and I will point to the exact line to change and give a one-line patch.

@@ -1,0 +1,30 @@
+What happened (where it fails)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- In the method, after computing length (line 222) the code reaches the branch that assumes a country code is present and attempts to read two country letters at:
+  - ch3 = locale_str[3] (line 237)
+  - ch4 = locale_str[4] (line 238)
+- For 'fr__POSIX' those characters are:
+  - locale_str[3] == '_' (the second underscore)
+  - locale_str[4] == 'P'
+- The code then performs an uppercase-letter check at line 239:
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- Since ch3 == '_' (which is < 'A'), that check fails and the method raises ValueError. The test therefore fails.
+
+Why this is the root cause (no guesswork)
+- The code assumes the country subtag is always two uppercase letters and located at indices 3 and 4. It does not account for the legal locale form where the country is empty and represented by two consecutive underscores (language + '_' + '_' + variant), e.g. 'fr__POSIX'.
+- Later checks (line 245) also expect an underscore at a fixed position (locale_str[5] == '_') which is invalid for an empty country because the variant starts at a different index when country is empty. Thus the index arithmetic and validation are wrong for the empty-country case.
+
+Exact place to change
+- At or before lines 237–239: do not assume two-letter country unconditionally. First check whether the country is present or empty by inspecting the underscores at the expected positions (e.g. locale_str[2] and locale_str[3]), then:
+  - If there are two underscores in a row (locale_str[2] == '_' and locale_str[3] == '_'), set country = '' and parse the variant starting at index 3 (or 4 depending on your conventions).
+  - Otherwise, validate ch3 and ch4 as two-letter country and continue as current code does.
+- Also adjust the check at line 245 (the underscore that separates country and variant) to use the correct index depending on whether the country was empty or present.
+
+Concrete steps to fix (ordered)
+1. At the branch where you handle locale strings longer than 2 characters, check for an empty country first:
+   - if locale_str[2] == '_' and locale_str[3] == '_': country = '' ; variant = locale_str[4:] (or locale_str[3:] depending on exact indexing you want). Do not run the two-letter uppercase check.
+2. Else validate ch3/ch4 (lines 237–239) as two uppercase letters and set country = locale_str[3:5].
+3. When expecting the separator underscore before variant (line 245), compute its index based on whether country was present (for present country it's index 5; for empty country it will be index 4 or 3 depending on the choice above) and validate that position.
+4. Return Locale(language, country, variant) using the properly determined start index for variant.
+
+That is the specific root cause and the exact lines to change: the unconditional two-letter country checks at lines 237–239 and the fixed-position underscore check at line 245. The code must first detect and handle the empty-country pattern 'fr__VARIANT' before validating two-letter country characters.

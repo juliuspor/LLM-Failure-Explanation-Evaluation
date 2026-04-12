@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The code raises ValueError at lines 396–397:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects negative minute values (minutes_offset < 0).
+- Later, at lines 402 and 404 the code expects minutes_offset to be negative in some cases and uses that sign to compute the final offset:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because the earlier check forbids negative minutes, any input that yields a negative minutes_offset (for example when parsing offsets like "-05:30" if the minutes component was parsed with sign) triggers the ValueError before the code that handles negative offsets can run.
+
+Why it fails (root cause)
+- The validation at lines 396–397 enforces minutes_offset >= 0, but the parsing/normalization logic that follows expects the minutes component to be able to carry a negative sign. In short: the code validates the minutes value too strictly (rejecting negative minute values) even though subsequent logic needs the minutes sign to determine the overall offset sign. That mismatch causes valid negative offsets to be rejected.
+
+How to reproduce
+- Parse or construct a zone offset where the minutes part is parsed as negative (example input that yields minutes_offset == -30). The code will raise ValueError("Minutes out of range: -30") at line 397 before lines 402/404 handle the negative case.
+
+Concrete fixes (step-by-step)
+Option A — validate the absolute value of minutes (recommended)
+1. Replace the current check with a check against the absolute value:
+   - Change lines 396–397 from:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - To:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Ensure the rest of the code uses the sign on minutes_offset consistently when computing offset; this preserves the later logic at lines 402/404 that expects a signed minutes_offset.
+
+Option B — normalize sign earlier and validate the unsigned minute component
+1. Parse the sign separately (e.g., sign = +1 or -1) before validating minutes.
+2. Validate the unsigned minute value:
+   - if minutes < 0 or minutes > 59: raise ...
+   (but minutes should be parsed as a non-negative integer)
+3. When computing the final minutes_offset, reapply the sign where needed so the later code sees correctly-signed minutes if that is required.
+
+Option C — broaden the allowed negative range if intended
+1. If you intended negative minutes to be allowed down to -59, change the condition to:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(...)
+(less clear intent than Option A)
+
+Which to pick
+- Use Option A if the minutes component can be negative in parsing but the logical constraint is that its absolute value must be 0–59. That keeps the least invasive change and matches the subsequent logic that expects a signed minutes_offset.
+- Use Option B if parsing should never produce a negative minutes number (sign should be kept separately). This is clearer and safer long term.
+
+Summary
+- The check at lines 396–397 rejects negative minutes, but subsequent lines 402/404 rely on minutes_offset carrying a sign. Fix by validating the absolute value of minutes (abs(minutes_offset) <= 59) or by parsing and storing the sign separately before validating.

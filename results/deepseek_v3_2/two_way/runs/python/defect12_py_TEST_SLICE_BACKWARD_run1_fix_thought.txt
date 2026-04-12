@@ -1,0 +1,82 @@
+The bug is that `substring_java` raises an `IndexError` when `end > len(s)`. However, the original Java `String.substring` also throws `IndexOutOfBoundsException` if `end > length()`. Wait, the diagnosis says the Java version allows `end` beyond length? Actually, the Java `String.substring(beginIndex, endIndex)` throws if `beginIndex > endIndex` or `endIndex > length()`. So the Python translation is correct in that regard. But the test expects that when `upper` is beyond length, the method should return the original string unchanged (no abbreviation). The issue is that the code sets `upper = len(text)` when `upper > len(text)`, which is correct. However, the test 'test_abbreviate_lower_beyond_length' passes `lower=20, upper=30` on a string of length 10. According to the code, `upper > len(text)` so `upper = len(text) = 10`. Then `upper < lower` (10 < 20) so `upper = lower = 20`. Now `upper` is 20, which is greater than `len(text)`. Then we call `substring_java(text, 0, upper)` with `upper=20` and `len(text)=10`, causing IndexError. The fix is to handle the case where after adjustments, `upper` is still beyond the string length. In that case, we should return the whole string without appending anything, because no abbreviation is needed. The original Java code would also return the whole string because `indexOf` returns -1 (since lower is beyond length) and then `substring(0, upper)` would throw. Wait, but Java's `substring(0, upper)` with `upper > length()` throws. So the Java version must have a check that if `upper > length()`, it returns the whole string. Looking at the Apache Commons Lang source (WordUtils.abbreviate), it does: if (upper > str.length()) { upper = str.length(); } and then if (upper < lower) { upper = lower; } but after that, if (upper == str.length()) { return str; }? Actually, the Commons Lang 3.12.0 code: if (upper == -1 || upper > str.length()) { upper = str.length(); } if (upper < lower) { upper = lower; } Then: if (upper == str.length()) { return str; } So if after adjustments upper equals the string length, return the whole string. That's exactly what we need. In our case, after setting upper = lower, upper may be > str.length(). But the Java code does not set upper = lower if lower > str.length()? It does. Then upper becomes larger than str.length(). Then upper == str.length() is false, so it proceeds. Then index = str.indexOf(' ', lower) returns -1 because lower is beyond length. Then result = str.substring(0, upper) which would throw. Wait, but the Java code must have another guard: if (index == -1) { result = str.substring(0, upper); if (upper != str.length()) { result += appendToEnd; } return result; } But if upper > str.length(), substring throws. So the Java code must ensure that upper never exceeds str.length() after the adjustments. Let's examine the actual Java source from Apache Commons Lang 3.12.0:
+
+public static String abbreviate(final String str, int lower, int upper, final String appendToEnd) {
+    if (str == null) {
+        return null;
+    }
+    if (str.length() == 0) {
+        return StringUtils.EMPTY;
+    }
+    if (upper == -1 || upper > str.length()) {
+        upper = str.length();
+    }
+    if (upper < lower) {
+        upper = lower;
+    }
+    if (upper == str.length()) {
+        return str;
+    }
+    final int index = StringUtils.indexOf(str, ' ', lower);
+    if (index == -1) {
+        result = str.substring(0, upper);
+        if (upper != str.length()) {
+            result += appendToEnd;
+        }
+        return result;
+    }
+    if (index > upper) {
+        result = str.substring(0, upper);
+        if (upper != str.length()) {
+            result += appendToEnd;
+        }
+        return result;
+    }
+    result = str.substring(0, index);
+    if (upper != str.length()) {
+        result += appendToEnd;
+    }
+    return result;
+}
+
+Wait, there's a bug in the Java code? Actually, after setting upper = lower, upper may be > str.length(). Then upper == str.length() is false, so it proceeds. Then index = StringUtils.indexOf(str, ' ', lower) returns -1 because lower >= str.length(). Then result = str.substring(0, upper) throws because upper > str.length(). So the Java code is also buggy? But the test passes in Java. That means the Java code must have an additional check: if (upper > str.length()) { upper = str.length(); } after the upper < lower adjustment? Let's check the actual source from Apache Commons Lang 3.12.0 (WordUtils.java). I can look up online. The actual code is:
+
+    if (upper == -1 || upper > str.length()) {
+        upper = str.length();
+    }
+    if (upper < lower) {
+        upper = lower;
+    }
+    if (upper == str.length()) {
+        return str;
+    }
+
+So if upper is set to lower and lower > str.length(), then upper > str.length(). Then upper == str.length() is false. Then index = StringUtils.indexOf(str, ' ', lower) returns -1. Then result = str.substring(0, upper) throws. But the test passes, meaning that the Java code must have a guard that upper is capped at str.length() somewhere else. Actually, the condition `if (upper == str.length())` returns the whole string only when equal. If upper > str.length(), it's not equal, so it goes to substring and throws. That can't be. Let's examine the test case: test_abbreviate_lower_beyond_length. It passes lower=20, upper=30, append_to_end="...", text="short". The expected result is "short". So the Java implementation must return the whole string. How? Because after upper = lower, upper becomes 20, but str.length() is 5, so upper > str.length(). Then upper == str.length() is false. But then index = StringUtils.indexOf(str, ' ', lower) returns -1 because lower is beyond length. Then result = str.substring(0, upper) would throw. Wait, maybe the Java code does not call substring with upper > str.length() because there is an additional check: if (upper > str.length()) { upper = str.length(); } after the upper < lower adjustment? Let's check the actual source code from Apache Commons Lang 3.12.0 (I can recall from memory). Actually, I think the Java code does have a bug but it's fixed in later versions? Let's search my memory: The bug is known: WordUtils.abbreviate throws StringIndexOutOfBoundsException when lower > length. It was fixed in Commons Lang 3.12.0? I think the fix is to cap upper at str.length() after the upper < lower adjustment. So we need to add: if (upper > len(text)): upper = len(text). But note that we already set upper = len(text) if upper == -1 or upper > len(text). However, after that we set upper = lower if upper < lower. That could make upper > len(text) again. So we need to cap upper again after that adjustment. Actually, the Java code does not cap again, but the test passes? Let's simulate: text length=5, lower=20, upper=30. First, upper > len(text) so upper = 5. Then upper < lower? 5 < 20 true, so upper = lower = 20. Now upper=20 > len(text)=5. Then upper == str.length()? false. Then index = indexOf(' ', 20) returns -1. Then result = substring(0,20) throws. So the Java code must have a different logic. Wait, maybe the Java code does not set upper = lower if upper < lower? Actually it does. Let's look at the exact source from Apache Commons Lang 3.12.0 (I can find online). I'll assume the Java code has a fix: after setting upper = lower, if upper > str.length(), then upper = str.length(). That would make upper == str.length() true, and return the whole string. That matches the test. So we should implement that.
+
+Thus, after `if upper < lower: upper = lower`, we should check if `upper > len(text)` and set `upper = len(text)`. But note that we already set `upper = len(text)` earlier if `upper > len(text)`. However, after setting `upper = lower`, `upper` may become larger than `len(text)`. So we need to cap it again. However, capping it again would make `upper == len(text)`, and then we can return the whole string. That's exactly what the test expects.
+
+Alternatively, we can simply check after all adjustments: if `upper >= len(text)`, return the whole string. Because if upper is at or beyond the length, we don't need to cut. That's simpler and matches the expected behavior.
+
+Let's implement: after adjusting upper and lower, if `upper >= len(text)`, return text. Because there's no need to abbreviate. This also handles the case where lower is beyond length.
+
+But we must also consider the case where upper == len(text) but there is a space before upper? Actually, if upper == len(text), we return the whole string regardless of spaces. That's what the Java code does (the condition `if (upper == str.length()) { return str; }`). So we can adopt that.
+
+Thus, add:
+        if upper >= len(text):
+            return text
+
+But note: the Java code only checks equality, not >=. However, if upper > len(text), we already set upper = len(text) earlier? Not after the upper < lower adjustment. So we need to ensure upper is not > len(text). Let's just cap upper to len(text) after all adjustments. That's safe.
+
+Implementation steps:
+1. Set upper = len(text) if upper == -1 or upper > len(text).
+2. If upper < lower, set upper = lower.
+3. If upper > len(text), set upper = len(text). (This can happen if lower > len(text)).
+4. If upper == len(text), return text.
+5. Proceed with space search.
+
+But step 3 and 4 can be combined: if upper >= len(text), return text.
+
+Let's write the code accordingly.
+
+Also, we must ensure that substring_java is called with end <= len(text). Since we have already ensured upper <= len(text) before calling substring_java (except in the case where we return early). In the case where index > upper, we call substring_java with end=upper, which is <= len(text) because we already capped. Similarly for other calls.
+
+Let's produce the fixed code.

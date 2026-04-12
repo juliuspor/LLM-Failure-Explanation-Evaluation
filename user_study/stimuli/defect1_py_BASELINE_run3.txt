@@ -1,0 +1,64 @@
+What happened (where it failed)
+- The code raises ValueError("Minutes out of range: -15") at the check on line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+  That check rejects any negative minutes (minutes_offset < 0), so calling for_offset_hours_minutes(0, -15) triggers this error immediately.
+- The test expects negative minutes to be allowed when hours is zero or negative (per the docstring). The validation on line 396 is therefore too strict for the documented behavior.
+
+Why it happens (root cause)
+- The code enforces minutes_offset to be between 0 and 59 only (line 396), but the docstring and tests allow minutes in the range -59..+59.
+- Because of that incorrect validation the function never reaches the later logic that combines hours and minutes into a total minute offset.
+
+Other related bugs you should fix while you’re here
+- The code reuses the input variable minutes_offset to hold the computed total minutes (lines 402 and 404). That makes reasoning harder and leads to confusing arithmetic:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  This arithmetic is error-prone and incorrect for some sign combinations (e.g. subtracting a negative minutes_offset yields the wrong sign).
+- There is no explicit check forbidding the invalid combination hours > 0 and minutes < 0 (the doc says that should be a ValueError). The current code attempts to handle signs later but the initial minutes check prevents many valid cases and allows invalid ones to slip through if changed naively.
+
+Concrete fixes (specific changes to lines/variables)
+1. Accept minutes in -59..+59 instead of 0..59:
+   - Replace the line at 396–397 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the invalid sign combination (hours positive and minutes negative) explicitly:
+   - After the minutes range check, add:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is not allowed")
+
+3. Compute total minutes into a new variable (avoid reusing minutes_offset) and handle signs according to the docstring:
+   - Replace the try block arithmetic with something like:
+
+         total_minutes = hours_offset * 60
+         if hours_offset < 0:
+             # For negative hours, minutes (positive or negative) should extend the negative offset
+             total_minutes -= abs(minutes_offset)
+         else:
+             # hours >= 0: minutes must be >= 0 due to the check above
+             total_minutes += minutes_offset
+
+         offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   This exactly implements:
+   - (0, -15) => total_minutes = -15
+   - (-2, 15) => total_minutes = -120 - 15 = -135
+   - (-2, -15) => total_minutes = -120 - 15 = -135
+   - (2, 15) => total_minutes = 120 + 15 = 135
+   - (2, -15) will be rejected by the sign check
+
+4. (Optional) Rename variables so intent is clear: use hours_offset, minutes_offset (input) and total_minutes (computed), and then convert total_minutes to millis.
+
+Why these steps fix the failure
+- Step 1 allows minutes = -15 to pass initial range validation (so the method can handle zero/negative-hour cases).
+- Step 2 enforces the documented invalid combination (positive hours with negative minutes) explicitly and predictably.
+- Step 3 produces a correct, readable computation of the total minutes that respects the docstring sign rules and avoids the confusing reuse of minutes_offset.
+
+Summary of minimal code change (lines)
+- Change minutes range check (line ~396) to use -59..59 range.
+- Add a check forbidding (hours_offset > 0 and minutes_offset < 0).
+- Replace the arithmetic in the try block with the total_minutes calculation above and use a new variable total_minutes when multiplying to millis.
+
+With those changes, for_offset_hours_minutes(0, -15) will produce the expected -00:15 zone instead of raising "Minutes out of range: -15".

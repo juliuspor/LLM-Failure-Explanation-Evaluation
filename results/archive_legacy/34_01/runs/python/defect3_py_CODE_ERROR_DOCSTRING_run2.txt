@@ -1,0 +1,47 @@
+What happened (in plain terms)
+- The crash occurs inside this block:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- When that loop runs more than once, one of the iterations calls code_point_at(code_units, pos) with pos == length (past the end) and that raises IndexError: "String index out of range: 2".
+
+Why it happens (root cause)
+- The variable pos is both the index you read from and the thing you increment inside the loop.
+- The loop runs for consumed iterations. After the first iteration pos is advanced. If that advance moves pos to the end (pos == length), the next loop iteration still tries to call code_point_at(code_units, pos). code_point_at attempts to access code_units[pos] (or code_units[pos+1] for a surrogate pair) and now pos is out of range, so you get IndexError.
+- Conceptually the code is doubling up: translate_codepoint returned "consumed" (the number of code units the translator handled), but the inner loop then advances pos again by computing char_count(code_point_at(...)) repeatedly. That lets pos walk past the valid range and makes code_point_at be called at an invalid index.
+
+Where it occurs (exact spot)
+- The problematic lines are the for loop that follows the "if consumed == 0" branch:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  This is the immediate cause of the IndexError.
+
+Concrete example that reproduces the failure
+- Suppose length == 2 and pos == 0. translate_codepoint returns consumed == 2.
+- Enter the for pt in range(2) loop:
+  - First iteration: code_point_at(code_units, 0) works, you advance pos to 1 or 2 depending on char_count.
+  - Second iteration: pos may be 2 (== length). The loop tries code_point_at(code_units, 2) -> IndexError.
+
+How to fix it (clear steps)
+Option A — the simplest correct fix (if consumed is already the number of code units to skip):
+- Replace the entire for-loop with a single increment by consumed:
+  pos += consumed
+  Rationale: translate_codepoint already reports how many code units it consumed, so you should advance by that many code units directly.
+
+Option B — safe iteration by codepoint (if you truly need to walk codepoints inside the consumed range):
+- Use a while loop that checks bounds before calling code_point_at, and stop when you have advanced exactly consumed code units:
+  advanced = 0
+  while advanced < consumed:
+      cp_len = char_count(code_point_at(code_units, pos))
+      pos += cp_len
+      advanced += cp_len
+  This ensures you never call code_point_at with pos >= length.
+
+Things to check after the fix
+- Confirm the meaning of translate_codepoint: does it return number of code units consumed (e.g., 0, 1, or 2) or number of codepoints? Use that contract to pick Option A or B.
+- Add unit tests for edge cases:
+  - input ending with a single surrogate pair at the end
+  - input where translate_codepoint returns >1 near the end of the input
+- Consider adding asserts or explicit bounds checks before calling code_point_at to catch future misuse early.
+
+Summary
+- The loop advances pos inside its body and then calls code_point_at with the already-advanced pos on the next iteration, which can read past the end. Replace the loop with pos += consumed (if consumed counts code units) or otherwise ensure you check bounds before each code_point_at call.

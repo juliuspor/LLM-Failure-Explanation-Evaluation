@@ -1,0 +1,45 @@
+What happened (where it failed)
+- The IndexError was raised on line 35 in SLICE_UNION:
+  - if index < 0 or index >= len(code_units):
+  - raise IndexError(f"String index out of range: {index}")
+- The exception message shows index == 2. That means len(code_units) was 2 and the caller passed index == 2, so index >= len(code_units) caused the error.
+
+Why it happened (root cause)
+- to_utf16_code_units(s) builds code_units as a list of UTF‑16 code units.
+- The function that then reads code_units (slice_forward) expects the caller to pass an index measured in UTF‑16 code units (0..len(code_units)-1).
+- The caller passed index == 2 but len(code_units) == 2, so the passed index was out of range for the UTF‑16 code units list.
+- Most likely the caller computed index as a Python string character index (codepoint index) or as a byte/character offset, not as a UTF‑16 code‑unit index. For strings that contain characters outside the Basic Multilingual Plane (BMP), a single Python character (a single codepoint with ord() > 0xFFFF) maps to two UTF‑16 code units. That mismatch between “character index” and “UTF‑16 code‑unit index” leads to passing an index that is invalid for code_units.
+
+Exactly where to look in your code
+- Line 12: to_utf16_code_units(s) produces code_units (UTF‑16 units).
+- Line 35: the bounds check uses len(code_units) and rejects index == len(code_units).
+- The caller that provides index (the code that calls the function containing lines 35–44) is passing an index value computed with a different unit (probably Python string characters). Inspect that caller and how index is computed.
+
+Concrete fixes (step‑by‑step)
+Pick one of these depending on the intent:
+
+1) If index is supposed to be a Python string character index (common):
+   - Convert the character index to a UTF‑16 code‑unit index before calling slice_forward.
+   - Example conversion:
+     - code_unit_index = 0
+     - for ch in s[:char_index]:
+         code_unit_index += 1 if ord(ch) <= 0xFFFF else 2
+   - Then call your code with code_unit_index instead of char_index.
+   - This ensures index < len(code_units) unless char_index > len(s).
+
+2) If index is supposed to be a UTF‑16 code‑unit index:
+   - Fix the caller so it produces code‑unit indices, not character indices.
+   - Make the unit you use for indexes explicit in names/documentation (e.g., use utf16_index).
+
+3) If you just need safe behavior (prevent crash):
+   - Before accessing code_units[index], enforce bounds or clamp:
+     - if index < 0 or index >= len(code_units): raise IndexError(...)  (keep current check)
+     - or return a sensible default / slice result when index == len(code_units) (but this changes semantics).
+   - Prefer explicit conversion (option 1) because silent clamping hides the real mismatch.
+
+4) Alternative implementation (avoid manual UTF‑16 list):
+   - Work with Python codepoints directly (use s and ord(s[i])) unless you actually need UTF‑16 code units.
+   - Or use s.encode('utf-16-le') and compute unit offsets in bytes // 2 if you really need UTF‑16 layout.
+
+Summary
+The IndexError occurs because the caller passed an index counted in the wrong units (likely Python characters) while the code checks against len(code_units) (UTF‑16 units). Fix by converting the caller’s index to UTF‑16 code‑unit index (or change the code to use codepoint indexes consistently).

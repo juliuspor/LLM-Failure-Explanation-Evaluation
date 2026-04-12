@@ -1,0 +1,52 @@
+What happened (what the test shows)
+- The test creates a TimePeriodValues instance s and calls s.add(...) four times.
+- The test expects s.get_max_middle_index() to return 1, but the method returned 3 (AssertionError).
+- get_max_middle_index() is just returning the internal field self._max_middle_index (slice shows lines 449–451):
+  - 449 | def get_max_middle_index(self) -> int:
+  - 451 |     return self._max_middle_index
+
+Root cause (where and why it broke)
+- The failure is not in get_max_middle_index() itself; it simply returns the stored value _max_middle_index.
+- The bug is in the add(...) logic that maintains self._max_middle_index when items are inserted. After the four adds, _max_middle_index has been set to 3 instead of the correct index 1.
+- Concretely, the code that updates _max_middle_index is using the wrong value when you insert new periods:
+  - It appears to set _max_middle_index based on the current size/append index (for example using len(self._items) or the new last index) rather than on the insertion index relative to the existing middle index.
+  - When you insert the third and fourth periods (SimpleTimePeriod(0,50) and SimpleTimePeriod(50,100)), they are inserted before existing elements in the internal ordering. The update logic mistakenly shifts _max_middle_index to the end (3) instead of adjusting it relative to the insertion point, producing the wrong final value.
+
+Why that produces 3 instead of 1
+- Suppose initial items after first two adds are at indices 0 and 1; _max_middle_index should be 1.
+- When the code handles the third add, it inserts it at an earlier index (e.g. index 0 or 1). The buggy update code treats the insertion like an append and sets _max_middle_index to the new length-based index (3) or otherwise overwrites it incorrectly.
+- The result is that _max_middle_index no longer reflects the original element that was the middle; it now equals 3 (the wrong absolute index), causing the assertion to fail.
+
+Exact places to look and correct
+- Inspect the add(...) method (where you insert a SimpleTimePeriod). Find the code that updates self._max_middle_index after insertion. That is the place that sets/changes the field that get_max_middle_index() returns.
+- Typical buggy patterns to look for:
+  - Setting self._max_middle_index = len(self._items) or self._last_index after an insert, instead of using the insertion index.
+  - Always assigning a fresh value without considering whether the insertion point is before or after the current _max_middle_index.
+
+Two concrete fixes (pick one and apply)
+1) Update by insertion-position logic
+- Determine the insertion index pos (the index where you insert the new period).
+- Update _max_middle_index like this:
+  - if pos <= self._max_middle_index:
+      self._max_middle_index += 1
+    else:
+      # inserting after the current middle index doesn't move it
+      pass
+- This preserves the intended element that was the middle when earlier items are shifted right.
+
+2) Recompute deterministically after each change
+- After any add/remove, recompute _max_middle_index from the stored items based on the class’s definition of “max middle”:
+  - e.g. iterate items and compute the index that should be considered the max middle, then assign self._max_middle_index = computed_index
+- This is slightly simpler and less error-prone at the cost of extra iteration.
+
+What to change (exactly)
+- In add(...), replace the incorrect assignment (e.g. self._max_middle_index = len(self._items) or similar) with one of the snippets above.
+- Or add a call at the end of add(...) to a new helper:
+    def _recompute_max_middle_index(self):
+        # compute correct index from self._items and assign self._max_middle_index
+    and call self._recompute_max_middle_index() after inserts/deletes.
+
+Why this will fix the test
+- With the insertion-aware update (or full recompute), inserting the two earlier periods will shift indices correctly and leave _max_middle_index = 1 after all four adds, matching the test expectation.
+
+If you want, paste the add(...) implementation here (or the lines that change _max_middle_index) and I will give the exact line edit.

@@ -1,0 +1,50 @@
+What happened
+- The test calls ArrayUtils.add(None, None, expected_type=str).
+- At runtime the code goes to the branch that handles when array is None and element is None.
+- At line 340 the code sets inferred_type = object because element is None.
+- At line 346 there is a guard:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(
+- Because inferred_type == object and expected_type == str (not object), that guard raises a TypeError. That is exactly why the test fails.
+
+Why that is wrong
+- The docstring says: "If the input list is None, a new one element list is returned whose component type is the same as the element, unless the element itself is None, in which case the return type is List[object]."
+- In this call the element is None, so per the docstring the return list's element type should be object. But the caller provided expected_type=str; the code treats that as a mismatch and raises a TypeError instead of returning [None]. The code is conflating two different ideas:
+  - inferred_type (derived from the element or existing array contents), and
+  - expected_type (a type hint the caller passed).
+- When element is None, inferred_type must be object (line 340). The later guard at 346 incorrectly treats any non-object expected_type as a conflict and raises, even though the correct behavior for element==None is to allow the call and return [None] (or at least permit expected_type to be used as the component type).
+
+Where to change it (concrete steps)
+1. Decide policy: when element is None and array is None, either
+   - honor expected_type as the desired component type and return [None], or
+   - follow docstring strictly and return List[object] regardless of expected_type.
+   The test expects the first behavior (honor expected_type and return [None], typed as List[str]).
+
+2. Minimal concrete fix: if inferred_type was set to object because element is None, allow expected_type to define the component type instead of raising. For example:
+   - Replace the raise check at line 346–347 with logic that uses expected_type when inferred_type == object.
+
+Example patch (illustrative; adjust to your exact formatting and surrounding code):
+  # current lines around 340, 346
+  inferred_type = object  # line 340 (element is None)
+  # old guard:
+  # if inferred_type == object and expected_type != object:
+  #     raise TypeError(...)
+
+  # new logic:
+  if inferred_type == object:
+      if expected_type is not None:
+          # use the caller's expected_type (this will allow expected_type=str)
+          inferred_type = expected_type
+      else:
+          # keep object if caller didn't provide an expected_type
+          inferred_type = object
+
+3. After that change, the call ArrayUtils.add(None, None, expected_type=str) will set inferred_type to str and proceed to return [None] without raising.
+
+What to test after the change
+- The original failing test: ArrayUtils.add(None, None, expected_type=str) returns [None].
+- A call with no expected_type: ArrayUtils.add(None, None) returns [None] and inferred_type remains object (matches docstring).
+- Calls where array is non-None and has concrete element types still enforce type checks as intended.
+
+Summary
+The code raises a TypeError at lines 346–347 because inferred_type was set to object when element is None (line 340) and the function treats any non-object expected_type as a mismatch. Fix by allowing expected_type to set the component type when element is None (or by changing the guard to match the documented behavior).

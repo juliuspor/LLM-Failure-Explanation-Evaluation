@@ -1,0 +1,48 @@
+What happened (what failed)
+- The tests that pass negative minute values (for example DateTimeZone.for_offset_hours_minutes(-2, -15)) raise a ValueError at the validation step:
+  - This occurs at lines 396–397:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because that condition rejects any negative minutes, calls like for_offset_hours_minutes(-2, -15) never reach the later code that combines hours and minutes. The test fails with "Minutes out of range: -15".
+
+Why it happened (root cause)
+- The minutes validation incorrectly requires minutes_offset to be non-negative (minutes_offset < 0 triggers error). The intended valid range is -59..+59 (tests and docstring expect negative minutes allowed).
+- Concretely:
+  - The code disallows negative minutes at line 396, but later logic (lines after 402) expects to be able to handle negative minutes for negative hour offsets.
+  - So the check is too strict and prevents valid inputs from being processed.
+
+Where in the code it occurs
+- The problematic lines are exactly the validation lines shown in the slice block:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- After this early rejection, the method never reaches the combination/offset calculation block (hours_in_minutes and the arithmetic inside the try).
+
+How to fix it (clear steps)
+1. Allow negative minutes in validation. Change the minutes check to permit -59 through +59:
+   - Replace line 396 with:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Keep (or verify) the later sign-handling logic that combines hours and minutes. If you want clearer logic, compute total minutes explicitly and consistently:
+   - Example replacement for the combination block (after validation):
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+       else:
+           total_minutes = hours_in_minutes + abs(minutes_offset) if minutes_offset >= 0 else hours_in_minutes - abs(minutes_offset)
+     Or simpler and clearer (handles signs directly):
+       total_minutes = hours_offset * 60 + minutes_offset
+       # If you need the semantics that (-2, 15) -> -135 minutes (i.e. treat minutes always as magnitude added when hours negative),
+       # use sign logic consistent with the docstring instead of raw addition.
+3. Run the test suite and ensure tests that expect negative minutes now pass.
+
+Notes about sign semantics you should check
+- Decide which semantics you want for mixed-sign inputs:
+  - If you want to allow (-2, 15) to mean -02:15 (i.e., treat minutes as adding magnitude when hours negative), implement explicit sign-handling rather than naive addition.
+  - If you want strict validation (disallow mixed signs like (2, -15) or (-2, 15)), add those checks after fixing the minutes range.
+
+Minimal concrete change to fix the immediate failure
+- Change the minutes validation to:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+That single change prevents the spurious ValueError for negative minutes (the immediate cause of the test failures).

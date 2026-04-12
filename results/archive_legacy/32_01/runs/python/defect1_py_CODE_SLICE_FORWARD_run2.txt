@@ -1,0 +1,43 @@
+What fails
+- The code computes the total offset minutes by reusing the input parameter minutes_offset, then multiplies that result by MILLIS_PER_MINUTE (lines 406–409). That reuse and the sign-handling are the source of the bug: the code mixes the input minute-of-hour value and the computed total minutes in the same variable, making the computation fragile and easy to get wrong.
+
+Where it happens
+- The problematic lines are these (numbers from your slice):
+  - line 406: hours_in_minutes = hours_offset * 60
+  - line 407: if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: else: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause)
+- The code reassigns minutes_offset to mean two different things:
+  1. The original input minute component (0..59).
+  2. The total minutes offset (hours_in_minutes ± minutes_offset).
+- Reusing the same variable makes the intent unclear and produces errors when reasoning about sign and arithmetic. In particular, the code’s sign logic is brittle: it assumes that the minute part must always be subtracted when hours_in_minutes is negative (and added when positive). That may look correct, but because the variable name is reused the result is easy to get wrong or to confuse later code that expects the input minutes still available.
+- Because the same variable is used for different meanings, when that combined value is passed to FieldUtils.safe_multiply (line 409) the wrong value can be multiplied. That leads to incorrect offsets or to overflow being detected and surfaced as "Offset is too large" even when the inputs were nominally valid (for example, when a negative hour plus minute combination is mishandled).
+
+Concrete example (illustrates the bug)
+- Suppose hours_offset == -1 and minutes_offset == 30.
+  - hours_in_minutes = -60
+  - code does minutes_offset = hours_in_minutes - minutes_offset => minutes_offset becomes -60 - 30 = -90 (this is intended to produce -90 total minutes)
+  - if any later logic expected the original minutes (30) it’s gone; any future change to compute sign in a different place can break.
+- More importantly, because the variable is overloaded, small edits can accidentally use the wrong value at the wrong time and produce an incorrect multiplication on line 409 (or trigger an overflow/exceptions that are hard to trace).
+
+What to do (concrete, step-by-step fixes)
+1. Stop reusing the input parameter. Introduce a new variable for the total minutes:
+   - total_minutes = hours_offset * 60
+   - if hours_offset < 0:
+       total_minutes -= minutes_offset
+     else:
+       total_minutes += minutes_offset
+2. Use total_minutes when converting to milliseconds:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Keep the input minutes_offset parameter unchanged so callers, logs, and later code aren’t surprised.
+4. (Optional) Add a small unit test for boundary values:
+   - for (-23, 59), (-1, 30), (0, 15), (1, 0) to ensure you get the expected millis.
+
+Why this fixes it
+- Using a separate total_minutes variable keeps the meaning of each variable clear and avoids accidental misuse of the minute component. The sign logic becomes explicit and easier to verify. Any overflow will now be detected exactly at the multiplication point on the computed total, and the code will not accidentally multiply the wrong value.
+
+Summary
+- Root cause: mixing two different meanings (input minute component and computed total minutes) in the same variable and doing sign arithmetic in-place (lines 406–409).
+- Fix: compute total_minutes in a separate variable and use that when converting to milliseconds (see steps above). This makes the code correct and easier to reason about.

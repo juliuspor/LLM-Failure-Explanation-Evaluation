@@ -1,0 +1,61 @@
+What happened (where and what failed)
+- The bug is in the branch that combines hours and minutes into total minutes (lines shown in the slice: around lines 402–405).
+- The code overwrites the input parameter minutes_offset with a computed value and uses the wrong sign logic:
+
+  Current code (roughly, lines 402–405)
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset    <-- line ~402
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset    <-- line ~404
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why that fails (concrete examples)
+- Example (-2, -15):
+  - hours_in_minutes = -2 * 60 = -120
+  - code does minutes_offset = -120 - (-15) = -105
+  - expected total minutes (per Joda/Test) is -(2*60 + 15) = -135
+  - So the code produced -105 minutes instead of -135 — wrong sign arithmetic when hours are negative and minutes are negative.
+
+- Example (-2, 15):
+  - hours_in_minutes = -120
+  - code does minutes_offset = -120 - 15 = -135 — that one happens to be correct by coincidence, but it masks the real problem.
+
+- Example (2, -15):
+  - hours_in_minutes = 120
+  - code does minutes_offset = 120 + (-15) = 105 (i.e. +01:45). According to the test expectations this combination should be rejected (ValueError). The current code silently produces an incorrect positive offset instead.
+
+Root cause (simple, precise)
+- The code conflates (1) the “minutes parameter” and (2) the computed total minutes by reusing the variable minutes_offset, and it applies the wrong sign operation when hours are negative. The formula minutes_offset = hours_in_minutes - minutes_offset is not the correct rule for all sign combinations.
+- There is also no explicit validation for mixed sign combinations that the tests expect to reject (e.g., hours > 0 with minutes < 0).
+
+What to change (step-by-step and exact replacement)
+Replace the existing combination logic (the if hours_in_minutes < 0 … block at lines ~402–405) with code that:
+1. Validates mixed signs: if hours_offset > 0 and minutes_offset < 0 -> raise ValueError; if hours_offset < 0 accept positive or negative minutes but treat minutes as adding to the magnitude (i.e. make minutes negative).
+2. Compute a new local variable total_minutes (do not reuse minutes_offset) using a clear formula.
+
+Concrete replacement (pseudo-Python ready to paste):
+
+    # validate mixed signs
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if hours_offset < 0:
+        # ensure minutes contribute to the negative magnitude
+        minutes = -abs(minutes_offset)
+    else:
+        minutes = abs(minutes_offset)
+
+    total_minutes = hours_in_minutes + minutes
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Notes on correctness relative to tests
+- For (-2, -15): hours_in_minutes = -120, minutes = -15 -> total_minutes = -135 ✓
+- For (-2, 15): minutes = -15 -> total_minutes = -135 ✓
+- For (2, -15): hours_offset > 0 and minutes_offset < 0 triggers ValueError ✓
+- For (2, 15) or (0, 15) etc.: computes correct positive totals ✓
+
+Where to edit
+- Replace the block starting at the if hours_in_minutes < 0 branch (around line 402) through the safe_multiply call (line ~405) with the replacement above, keeping the same try/except structure and the existing safe_multiply call on the computed total_minutes.
+
+Summary
+- The bug is incorrect sign handling and variable reuse in the code that combines hours and minutes (lines ~402–405). Fix by validating mixed signs, computing a separate total_minutes variable, and making minutes negative when hours are negative (use -abs(minutes_offset)). This yields the expected offsets and ensures invalid mixed-sign inputs are rejected.

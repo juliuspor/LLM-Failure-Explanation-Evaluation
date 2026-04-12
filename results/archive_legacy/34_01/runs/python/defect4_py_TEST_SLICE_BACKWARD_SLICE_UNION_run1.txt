@@ -1,0 +1,39 @@
+What happened (root cause)
+- The test adds time periods out of chronological order: you append (0,100) and (100,200) first, then later insert (0,50) and (50,100).
+- The code stores the index of the period with the maximum "middle" value in the field _max_middle_index, and get_max_middle_index() (lines 449–451) just returns that stored value.
+- The add(...) code updates _max_middle_index only when a new element is appended at the end (or only when it directly finds a larger middle at the moment of insertion). It does not adjust _max_middle_index when you insert earlier periods that shift existing indices, nor does it recompute the maximum over all items after arbitrary inserts.
+- As a result, after you add (0,100) and (100,200) the code sets _max_middle_index = 1. Later inserts of (0,50) and (50,100) change the list ordering/indices, but _max_middle_index is never recomputed or shifted. get_max_middle_index() therefore returns the stale value 1 and the assert fails.
+
+Where it occurred
+- get_max_middle_index() at lines 449–451 simply returns self._max_middle_index.
+- The bug is in add(...) (the method that modifies the collection and _max_middle_index). That method fails to maintain _max_middle_index correctly when inserts happen at indices <= current max index, or when inserts require a full re-evaluation of which period has the largest middle value.
+
+Concrete fixes (step-by-step)
+Either of these two options will fix the failure:
+
+Option A — Recompute after any insert (safe, simple)
+1. Add a private helper:
+   - def _recalculate_max_middle_index(self): loop over self._items (or whatever list holds periods), compute middle = period.get_middle(), keep index of largest middle, set self._max_middle_index to that index (or -1 if empty).
+2. In add(...), after inserting or appending any item, call self._recalculate_max_middle_index().
+
+Option B — Maintain incrementally (faster, but must be careful)
+1. When inserting at index i:
+   - If self._max_middle_index is None/invalid, set it to i if the new element is the first or is the new max.
+   - If i <= self._max_middle_index: increment self._max_middle_index by 1 (because existing stored index has shifted right).
+   - Then compare the new period's middle to the current max middle (you must read the period at self._max_middle_index after any shift). If the new middle > current max, set self._max_middle_index = i.
+2. When appending (i == len before insert): simply compare new middle and update _max_middle_index if new middle is larger.
+
+Which to choose
+- Use Option A if inserts can occur anywhere and correctness is the priority. It’s simple and eliminates off-by-one logic.
+- Use Option B if you need to avoid the O(n) recompute on every insert and are comfortable handling index shifts and comparisons exactly.
+
+What to check after change
+- Verify add(...) updates either by full recompute or the incremental rules above.
+- Re-run the failing test with the sequence:
+  s.add(SimpleTimePeriod(0, 100), 1.0)
+  s.add(SimpleTimePeriod(100, 200), 2.0)
+  s.add(SimpleTimePeriod(0, 50), 3.0)
+  s.add(SimpleTimePeriod(50, 100), 4.0)
+  assert s.get_max_middle_index() == 1
+
+This will pass when _max_middle_index is kept correct after inserts.

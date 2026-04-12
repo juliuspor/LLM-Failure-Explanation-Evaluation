@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The bug is in the sign handling when combining hours and minutes into a single minutes value. The incorrect operation happens at line 402:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+- Because minutes_offset can be negative, subtracting a negative minute value actually increases the magnitude in the wrong direction. Concretely:
+  - For hours_offset = -2 you get hours_in_minutes = -120.
+  - For minutes_offset = -15 you want total minutes = -120 + (-15) = -135 (i.e. -02:15).
+  - The code does hours_in_minutes - minutes_offset => -120 - (-15) = -105 (i.e. -01:45), which is wrong.
+
+Why it happens (root cause)
+- The code uses the same variable minutes_offset both for the input minutes and for the computed total minutes, and it chooses the wrong arithmetic sign in the branch that executes line 402.
+- Subtracting minutes_offset only makes sense when minutes_offset is positive and the hour value has the opposite sign; when minutes_offset is negative you must add it to the hour minutes. The code does the opposite in that branch, so negative minute inputs get combined incorrectly.
+- That wrong total then flows into offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) (line 405), producing an incorrect offset (and potentially triggering the "Offset is too large" check at line 407 if the result goes outside expected bounds).
+
+Exact lines/variables to change
+- At line 402: change the subtraction to addition.
+  - Current: minutes_offset = hours_in_minutes - minutes_offset
+  - Correct: minutes_offset = hours_in_minutes + minutes_offset
+- Also, avoid reusing minutes_offset for both input and computed value; use a new variable (e.g. total_minutes) to make the intent explicit and prevent sign mistakes.
+
+Suggested fixes (step-by-step)
+1. Replace the offending line:
+   - Change line 402 from minutes_offset = hours_in_minutes - minutes_offset to minutes_offset = hours_in_minutes + minutes_offset.
+2. Clarify variable names:
+   - Compute hours_in_minutes = hours_offset * 60
+   - Use total_minutes = hours_in_minutes + minutes_offset (after validating signs)
+   - Use total_minutes for further checks and for multiplying into milliseconds.
+3. Keep and/or add validation:
+   - Ensure you still reject the disallowed sign combinations (e.g., positive hours with negative minutes).
+   - Verify the final total_minutes is within -1439 .. +1439 (i.e. +/- 23:59) before multiplying.
+4. Add unit tests for all edge cases the docstring lists, especially:
+   - (-2, -15) -> -02:15
+   - (-2, +15) -> -01:45? (confirm intended behavior from doc—if doc says (-2, +15) -> -02:15 then also test that)
+   - (2, -15) should raise ValueError
+   - (0, -15) -> -00:15
+   - (23, 59), (-23, -59)
+
+Why this fix works
+- Adding the input minutes to the hours-in-minutes produces the mathematically correct total minutes regardless of sign, and using a distinct total_minutes variable makes the code clear and prevents sign inversion bugs.
+
+If you want, I can:
+- Provide the exact patched code snippet replacing the lines.
+- Create a small test matrix (inputs -> expected total_minutes and expected +/- result) you can run to verify.

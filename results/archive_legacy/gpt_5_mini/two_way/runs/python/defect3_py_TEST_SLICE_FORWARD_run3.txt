@@ -1,0 +1,63 @@
+What happened (where the error occurs)
+- The failure happens in the surrogate-pair handling path that converts UTF-16 code units to a Unicode codepoint. The relevant code is the slice you provided (lines shown below):
+  - Line 38: high = code_units[index]
+  - Line 39: if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+  - Line 40:     low = code_units[index + 1]
+  - Line 41:     if 0xDC00 <= low <= 0xDFFF:
+  - Line 43:         return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  - Line 44: return high
+- The function (looks like code_point_at) returns a code point when it sees a valid high+low surrogate pair, otherwise it returns the single 16-bit code unit (the value in variable high).
+
+Why that causes the test to fail (root cause)
+- The function returns the combined code point for a surrogate pair, but it gives no information to the caller about how many UTF-16 code units were consumed (1 or 2).
+- The caller (CsvEscaper.translate_string) therefore cannot know whether the code_point_at call consumed two code units (a surrogate pair) or just one. If the caller always advances its index by 1 (or otherwise assumes a single code unit consumed), it will then attempt to interpret the low surrogate as the next "high" unit on the next iteration.
+- That leads to reading past the end of the code_units array or misinterpreting the low surrogate. In the scenario shown by your failing test (a surrogate pair followed by 'A'), the incorrect index advancement causes an IndexError or incorrect behavior when the loop tries to read beyond the string bounds or to parse the low surrogate incorrectly.
+- In short: code_point_at correctly detects and returns a combined code point (lines 39–43), but because it does not tell the caller that it used two code units, the caller advances index incorrectly. That mismatch between consumed units and index advancement is the bug.
+
+Where exactly to change code (concrete, actionable fixes)
+You must make the caller and callee agree about how many UTF-16 code units were consumed. Two straightforward fixes:
+
+Option A — Return the units consumed from code_point_at
+- Change code_point_at so it returns both the code point and how many code units were consumed (1 or 2).
+- Example change (pseudocode):
+
+  def code_point_at(code_units, index):
+      high = code_units[index]
+      if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+          low = code_units[index + 1]
+          if 0xDC00 <= low <= 0xDFFF:
+              cp = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+              return cp, 2
+      return high, 1
+
+- Then adjust the caller (translate_string) to accept the tuple:
+  cp, size = code_point_at(code_units, i)
+  i += size
+  ...process cp...
+
+Option B — Detect the surrogate pair in the caller and advance accordingly
+- Keep code_point_at returning only the code point, but make translate_string check whether code_units[i] is a high surrogate and code_units[i+1] is a low surrogate and then advance i by 2 in that case.
+- Example change in translate_string loop (pseudocode):
+
+  if 0xD800 <= code_units[i] <= 0xDBFF and i + 1 < len(code_units) and 0xDC00 <= code_units[i+1] <= 0xDFFF:
+      cp = code_point_at(code_units, i)  # returns combined code point
+      i += 2
+  else:
+      cp = code_point_at(code_units, i)
+      i += 1
+
+- This makes explicit the units consumed and prevents reading the low surrogate as a separate unit on the next loop iteration.
+
+Alternative (Pythonic) approach
+- Since Python's str is already in Unicode code points, you can avoid working with UTF-16 code units at all. Use ord(s[i]) and iterate characters (not code units). That avoids the surrogate-pair complexity entirely in normal CPython builds because each Python character is a full code point. (Use this only if you don't need to simulate UTF-16 unit-level behavior.)
+
+Why the fix works
+- Both options ensure the loop index i is advanced by 2 when a surrogate pair is read, preventing the low surrogate from being re-read as a separate code unit and avoiding out-of-range reads. That matches what your test expects: a surrogate-pair emoji followed by 'A' should be handled as two logical characters (one code point emoji, one 'A').
+
+Summary checklist for the code change
+1. Decide whether code_point_at should return (code_point, units_consumed) or leave it returning a single value.
+2. If code_point_at returns single value, modify translate_string to inspect code_units[i] and code_units[i+1] to decide whether to advance i by 1 or 2.
+3. Add unit tests (you already have them) that cover: surrogate pair in middle, surrogate pair at end, multiple pairs, and ASCII-only strings.
+4. Run tests to confirm the IndexError and mis-handling are gone.
+
+This is the exact root cause: code_point_at (lines 39–43) forms a code point from two UTF-16 units but does not inform the caller it consumed two units, so the caller advances its index incorrectly and later reads the low surrogate as if it were a new high surrogate (leading to IndexError or wrong output). The fixes above correct that mismatch by making the number of consumed units explicit and ensuring the caller advances the index by the correct amount.

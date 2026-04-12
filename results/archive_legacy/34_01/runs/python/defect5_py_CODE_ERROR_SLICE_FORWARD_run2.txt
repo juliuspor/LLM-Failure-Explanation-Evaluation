@@ -1,0 +1,75 @@
+What happened (root cause)
+- The code tries to pick an element type by setting inferred_type = type(array) on the first branch. But type(array) returns the Python list class, not the element type. So inferred_type becomes list, never the element class you want.
+- When both array and element are None (or element is None and you don't otherwise set a type), the code sets inferred_type = object. Later you check:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  That raises the TypeError you saw: inferred_type was object and expected_type was str, so the code refuses to proceed and throws the message about "Cannot cast object list to str list".
+- In short: the function fails because it infers the wrong type (type(array) instead of the element type) and then treats a missing element type (object) as an error instead of using expected_type to construct the new list.
+
+Exactly where it happens in your code
+- inferred_type assignment:
+    if array is not None:
+        inferred_type = type(array)          <- wrong: gives list, not element type
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+- The exception is raised here:
+    if expected_type is not None:
+        if inferred_type == object and expected_type != object:
+            raise TypeError(...)
+
+Why that logic is incorrect
+- type(array) returns the list class, not the element class. If array is non-empty you should inspect the array's elements to learn their type (e.g. type(array[0]) or ensure all elements match).
+- If element is None you currently fall back to object. But if the caller provided expected_type (str), you should use expected_type to create the new list instead of rejecting it.
+- Raising a TypeError when inferred_type == object and expected_type is not object is the wrong behavior: you should accept expected_type as the intended element type and use it to construct the new list (or raise only if you cannot create the list that way).
+
+How to fix it (clear, step-by-step)
+1. When array is not None:
+   - If array is non-empty: infer element type from an element (e.g. inferred_type = type(array[0])) and optionally verify all existing elements have the same type.
+   - If array is empty: prefer expected_type if provided; otherwise fall back to object.
+2. When element is not None:
+   - Use inferred_type = type(element).
+3. If element is None and expected_type is provided:
+   - Use expected_type as inferred_type (don’t set inferred_type = object and then raise).
+4. Only raise an error when you truly cannot satisfy the requested expected_type (for example, when array contains elements that are not instances of expected_type and you can’t safely cast).
+
+Minimal corrected implementation
+Replace your inference block and the check with something like:
+
+    # determine inferred_type
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+        elif expected_type is not None:
+            inferred_type = expected_type
+        elif element is not None:
+            inferred_type = type(element)
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+    # if expected_type provided, enforce or adopt it
+    if expected_type is not None:
+        # if we inferred object but expected_type is concrete, use expected_type
+        if inferred_type == object:
+            inferred_type = expected_type
+        # optionally validate compatibility:
+        # if not issubclass(inferred_type, expected_type):
+        #     raise TypeError(...)
+
+    new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+    new_list[-1] = element
+    return new_list
+
+Notes and suggestions
+- If you allow None as a valid element, you must rely on expected_type to know how to type the list when element is None.
+- If your lists must be typed strictly, add explicit compatibility checks (issubclass/ isinstance) and decide whether to raise or coerce.
+- If ArrayUtils._copy_list_grow1 expects a Java-style class name string or needs a different form, ensure inferred_type is in the form that method expects (class object vs class name). The original error string suggests a Java environment or a Java interop layer; make sure inferred_type and expected_type are the correct objects for that API.
+
+This addresses the precise lines and variables where inference goes wrong (the inferred_type = type(array) and the conditional that raises when inferred_type == object), why the TypeError is raised, and gives exact steps and replacement code to fix it.

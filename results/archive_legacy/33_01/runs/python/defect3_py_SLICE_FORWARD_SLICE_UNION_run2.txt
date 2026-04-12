@@ -1,0 +1,47 @@
+What went wrong (short answer)
+- The body shown in [SLICE_UNION] has two different responsibilities mixed into one function. The function named to_utf16_code_units (line 10) is supposed to build and return the list code_units, but later in the same function the code performs an index check and returns a single code unit or a decoded code point (lines 35–44). That makes the function sometimes return an int instead of the List[int] it promises. Code that calls to_utf16_code_units and expects a list will fail (wrong type / missing data).
+
+Exactly where it happens
+- Function header: line 10 — def to_utf16_code_units(s: str) -> List[int]:
+- The function initializes code_units at line 12.
+- Instead of finishing by returning code_units, the code from line 35 onward treats code_units as if it were in a different function that takes an index and returns either:
+  - an index error at line 36,
+  - a decoded supplementary code point for a surrogate pair at line 43, or
+  - the single code unit high at line 44.
+- Because that indexing/return logic is inside to_utf16_code_units, the function can return an int at line 43/44 instead of returning the list built earlier.
+
+Why that causes the failure (one clear example)
+- Callers expect to_utf16_code_units(s) -> List[int]. If the function instead returns an int (a single code point) when the input string contains a surrogate pair, later code that treats the result as a list will raise TypeError or behave incorrectly. Even if the function returns the list in some cases, the mixed responsibilities make the behavior non-deterministic and incorrect.
+
+Root cause
+- Two different pieces of logic were accidentally merged:
+  1. A constructor that builds and returns the code_units list (to_utf16_code_units).
+  2. A function that, given code_units and an index, returns one code unit or decodes a UTF-16 surrogate pair (the slice-forward logic at lines 35–44).
+- They share the same local name code_units and ended up inside one function, causing an incorrect return path and wrong return type.
+
+Concrete fixes (step-by-step)
+1. Separate the functions:
+   - Keep to_utf16_code_units(s: str) to only build and return the List[int]. At the end of that function add: return code_units.
+   - Move the index-checking / surrogate-decoding logic into a separate function, e.g.
+     def slice_forward(code_units: List[int], index: int) -> int:
+         if index < 0 or index >= len(code_units):
+             raise IndexError(f"String index out of range: {index}")
+         high = code_units[index]
+         if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+             low = code_units[index + 1]
+             if 0xDC00 <= low <= 0xDFFF:
+                 return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+         return high
+2. Ensure each function returns the correct type:
+   - to_utf16_code_units returns List[int] (the full list).
+   - slice_forward returns int (the code point at index or decoded pair).
+3. Rename or scope variables if necessary to avoid accidental capture or reuse (keep code_units a parameter to slice_forward).
+4. Add unit tests:
+   - Test to_utf16_code_units returns a list for various inputs.
+   - Test slice_forward returns the expected code point for BMP characters and for surrogate pairs, and raises IndexError for out-of-range indexes.
+
+Why this exact fix fixes the problem
+- Returning the list from to_utf16_code_units (and not a single int) preserves the function’s contract and the type callers expect.
+- Moving the index logic into its own function restores a clear single responsibility: building data vs reading/decoding it. That prevents accidental early returns of the wrong type.
+
+If you paste the full function text you currently have, I can show exactly where to cut-and-paste to separate the two functions and provide the corrected code.

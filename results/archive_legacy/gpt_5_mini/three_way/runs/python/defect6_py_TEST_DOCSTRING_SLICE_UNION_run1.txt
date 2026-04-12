@@ -1,0 +1,57 @@
+What happened (what you see)
+- Calling add_number(-0.0) produces "0" (or "0" with some float format) instead of "-0.0".
+- The sign on negative zero is lost inside the branch that treats numbers that are integral (x == int(x)). The code converts the value to int and then writes that int, which cannot represent the negative zero sign.
+
+Where it happens (lines & variables)
+- The problematic check is at line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- Immediately after (line 177) the code does:
+  value = int(x)
+  mantissa = value
+- Later the code writes out the integer form (line 192) with:
+  self.add(str(value))
+  (or, if no special cases matched, line 194 does self.add(str(x)))
+
+Why it fails (root cause, simple)
+- In Python -0.0 == 0 is True. So for x == -0.0 the condition on line 176 is true and the code takes the integer branch.
+- value = int(x) (line 177) gives value == 0. An int cannot hold the negative-zero sign; converting that int back to string yields "0".
+- The negative sign information in the floating point bit pattern is lost by int(x), so the code outputs "0" rather than preserving the original negative zero sign ("-0.0").
+
+Why other checks don't protect it
+- math.isinf(x) and math.isnan(x) are only excluding infinities and NaNs; they do not detect negative zero.
+- There is no check for negative zero before converting to int, so the code never preserves the sign when the value is integral.
+
+Concrete places to change (precise steps)
+1. Detect negative zero before converting to int. Use an is_negative_zero check and short-circuit the integer branch:
+   - Either add a guard to line 176:
+     if x == int(x) and not math.isinf(x) and not math.isnan(x) and not self.is_negative_zero(x):
+   - Or test negative zero at the top of add_number and handle it separately:
+     if self.is_negative_zero(x):
+         self.add("-0.0")   # or whatever canonical string you want for negative zero
+         return
+
+2. Implement is_negative_zero correctly (if not already present). A safe implementation:
+   - Use math.copysign or struct unpacking. Example:
+     @staticmethod
+     def is_negative_zero(x):
+         return x == 0.0 and math.copysign(1.0, x) < 0.0
+   - This returns True only for -0.0, False for +0.0 and other numbers.
+
+3. Decide canonical output for negative zero:
+   - The tests expect "-0.0", so handle negative zero by emitting "-0.0" explicitly before any integer formatting branch.
+
+Exact minimal change example
+- At top of the branch (before line 176) insert:
+  if self.is_negative_zero(x):
+      self.add("-0.0")
+      return
+
+What this prevents
+- The code will no longer convert -0.0 into an int and lose the sign.
+- All other integer cases (0.0, 42.0, -42.0) continue to be handled the same way; only -0.0 is treated specially to preserve the sign.
+
+Why this is the right fix
+- It addresses the root cause (loss of negative-zero sign during int conversion) without changing the behavior for ordinary integers or floats.
+- It matches the test expectation that negative zero should be printed as "-0.0".
+
+If you want, I can produce the exact diff to apply to add_number and a suggested is_negative_zero method implementation.

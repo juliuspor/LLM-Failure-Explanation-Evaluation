@@ -1,0 +1,15 @@
+The code incorrectly reassigns the parameter minutes_offset to hold a combined minutes value, which corrupts later validation and calculations. Specifically:
+
+- What happened (where): In for_offset_hours_minutes, lines 383–386 the local variable minutes_offset is overwritten with a computed total minutes value: either minutes_offset = hours_in_minutes - minutes_offset (line 383) or minutes_offset = hours_in_minutes + minutes_offset (line 385). That changes the meaning of minutes_offset from the input minute component to the total minute offset.
+
+- Why it fails (root cause): The method then calls FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) (line 386) with this mutated minutes_offset. Overwriting the parameter makes the code hard to read and leads to wrong arithmetic when hours_offset is negative: the subtraction uses minutes_offset (the input) as if it were a signless component. For example, for hours_offset = -1 and minutes_offset = 30 the code computes hours_in_minutes = -60 then minutes_offset = -60 - 30 = -90, which is correct as total minutes, but it mutates the original minutes_offset variable which may confuse readers and could break earlier validation expectations. The actual bug is that the code validates minutes_offset only as 0..59 (line ~381) but does not validate that a negative hours_offset with a non-zero minutes_offset produces a total offset within range -23:59..+23:59. Also, the conditional for hours range allows -23..+23 but later the code can produce a total minutes value outside those bounds (e.g. hours_offset = -23, minutes_offset = 59 gives total -23*60 - 59 = -1439 minutes which is -23:59 and is okay, but the bounds checks and arithmetic are fragile). More importantly, if minutes_offset is negative or out of 0..59 it is already rejected, but reusing the same variable name hides the two different meanings and risks sign errors.
+
+- Where it occurred: the problematic lines are 383, 385 and 386 (the two assignments to minutes_offset and the call to FieldUtils.safe_multiply). The earlier validation checks are at lines ~379-381 (hours and minutes range checks).
+
+- Concrete fix steps:
+ 1) Do not overwrite the input minutes_offset. Introduce a new local variable total_minutes (e.g. total_minutes = hours_in_minutes + (minutes_offset if hours_in_minutes >= 0 else -minutes_offset)).
+ 2) Use total_minutes when calling FieldUtils.safe_multiply.
+ 3) Keep the input validation but also consider validating the resulting total_minutes against the allowed total-minute range (e.g. between -23*60-59 and +23*60+59 if that is intended).
+ 4) Prefer clear variable names (hours_in_minutes, total_minutes) to avoid sign confusion.
+
+These changes make the arithmetic explicit, avoid mutating parameters, and prevent sign-related bugs at lines 383–386.

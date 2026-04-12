@@ -1,0 +1,62 @@
+What happened (where it fails)
+- At lines 346–349 the code tries to update self._min_start_index based on a comparison, but the update logic is wrong:
+  - Line 346: if start < min_start:
+  - Line 347:     self._min_start_index = index
+  - Line 349: self._min_start_index = index
+  As written, line 349 always executes and overwrites the conditional assignment from line 347, so self._min_start_index is unconditionally set to index for every data item. That breaks the “minimum start” tracking — the value never actually records the minimum, it always becomes the most recently seen index.
+
+Why that causes the failure (root causes)
+1. Logic bug (main cause): the unconditional assignment at line 349 defeats the conditional update at line 347. The intention looks like “set _min_start_index to index only if this period’s start is less than the current minimum,” but the unconditional assignment ensures _min_start_index ends up equal to the current item index every time. This produces incorrect behavior (wrong minimum index).
+
+2. Secondary possible runtime error: when self._min_start_index >= 0 (line 340) the code reads min_start_period and only assigns min_start if min_start_period is a SimpleTimePeriod (lines 342–345). If min_start_period is not a SimpleTimePeriod, min_start is never assigned but line 346 still compares start < min_start. That would raise an UnboundLocalError (NameError-like) because min_start is undefined. So there are two separate bugs around lines 340–349:
+   - unconditional overwrite (logic),
+   - missing initialization of min_start in the non-SimpleTimePeriod branch (runtime error).
+
+Where exactly (line references)
+- Conditional update and unconditional overwrite: lines 346–349.
+- Potential undefined variable: lines 340–346 and 342–345 (min_start only set inside the isinstance(SimpleTimePeriod) branch).
+
+What to change (explicit fixes and steps)
+1. Remove the unconditional overwrite (line 349).
+   - Delete line 349 (self._min_start_index = index). This restores the intended conditional behavior.
+
+2. Ensure min_start is always defined before comparing to start.
+   Option A — if min_start_period can be other known types:
+   - Assign min_start for all supported period types, matching how start was assigned earlier:
+     - If min_start_period is SimpleTimePeriod: min_start = min_start_period.get_start_millis()
+     - Else: min_start = int(min_start_period.get_start().timestamp() * 1000)
+   Option B — if unsupported types may appear:
+   - Add a safe guard before the comparison:
+     - Only perform the comparison and update if min_start was assigned or the min_start_period is of a handled type.
+     - Example:
+       if isinstance(min_start_period, SimpleTimePeriod):
+           min_start = min_start_period.get_start_millis()
+       else:
+           min_start = int(min_start_period.get_start().timestamp() * 1000)
+       if start < min_start:
+           self._min_start_index = index
+
+3. Verify start is always assigned before the comparison.
+   - The code at lines 331–335 and 335–340 should ensure start is set for both SimpleTimePeriod and other period types. Confirm those branches always assign start before reaching line 346.
+
+Suggested patch (conceptual)
+- Remove the unconditional assignment at line 349.
+- Replace the min_start block with code that assigns min_start for every handled period type, e.g.:
+
+  if self._min_start_index >= 0:
+      min_start_period = self.get_data_item(self._min_start_index).get_period()
+      if isinstance(min_start_period, SimpleTimePeriod):
+          min_start = min_start_period.get_start_millis()
+      else:
+          min_start = int(min_start_period.get_start().timestamp() * 1000)
+      if start < min_start:
+          self._min_start_index = index
+  else:
+      self._min_start_index = index
+
+Tests to add
+- A case where multiple periods are added out of order; assert get_min_start_index() returns the index of the earliest start.
+- A case where min_start_period is not a SimpleTimePeriod (if that can happen); ensure no exception is raised and min is computed correctly.
+
+Summary
+- Root cause: unconditional assignment at line 349 overwrites the conditional update, so _min_start_index is always set to the current index. Also, min_start may be undefined if min_start_period is not a SimpleTimePeriod, causing a runtime error. Fixes: remove the unconditional assignment and make sure min_start is assigned for all handled period types before comparing.

@@ -1,0 +1,43 @@
+What happened (root cause)
+- The failing test shows get_max_middle_index() returned 3 instead of 1. That means the code accepted the item at index 3 as having the largest middle value even though the item at index 1 has the true largest middle.
+- The bug is in TimePeriodValues._update_bounds: when the method compares the new period’s middle against the stored maximum middle it uses the wrong index/variable to fetch the stored period for comparison. Because the wrong index is read, the comparison uses the wrong “current max middle” value and can update the max index incorrectly (or fail to update when it should). In short: the wrong index variable is used in the comparison, so the logic that should test "is new_middle > current_max_middle?" is comparing against the wrong period.
+
+Where it occurs (specific references)
+- The pattern for start-index logic is visible in the snippet you provided around lines 331–349:
+  - At line 331 the code checks if period is a SimpleTimePeriod and computes start.
+  - At lines 340–349 the code checks self._min_start_index >= 0, gets the stored min_start_period = self.get_data_item(self._min_start_index).get_period(), reads its start, compares start < min_start and (if true) sets self._min_start_index = index.
+- The max_middle bug is the same kind of mistake but for the middle-value branch: the code that should use self._max_middle_index to fetch the "current max middle" is using a different index variable (for example using min index variable or an unrelated local variable). That wrong-variable usage causes subsequent comparisons and assignments to be done against the wrong stored middle, producing the observed incorrect value of 3 instead of 1.
+
+Why it leads to the exact failure you saw
+- The data added in the test has middles: index 0 → 50, index 1 → 150, index 2 → 25, index 3 → 75.
+- After index 1 is added, max_middle_index should be 1 (150).
+- Because the comparison later reads the wrong stored middle (due to the wrong index variable), index 3 can be treated as larger than whatever incorrect reference value is used, so the code ends with max_middle_index == 3.
+
+Concrete steps to fix it
+1. Locate the middle-value branch in _update_bounds (the code block responsible for computing/updating min/max middle indices). It will be similar in structure to the start/update block you posted (lines ~331–349).
+2. Ensure the comparison and assignment consistently use the correct member variables:
+   - To compare new middle to the stored maximum, fetch the stored period with self._max_middle_index:
+     - curr_period = self.get_data_item(self._max_middle_index).get_period()
+     - curr_middle = (curr_start + curr_end) / 2  (computed the same way you compute new middle)
+     - if new_middle > curr_middle:
+         self._max_middle_index = index
+   - To compare new middle to the stored minimum, use self._min_middle_index similarly.
+3. Do not reuse unrelated index variables when fetching the stored period. Explicitly reference self._max_middle_index and self._min_middle_index in those comparisons and assignments.
+4. Run the full test suite (the provided tests plus others) to confirm the fix.
+
+Minimal example of the correct logic (insert/replace the buggy branch)
+- Compute new_middle from the new period (either using get_start_millis()/get_end_millis() for SimpleTimePeriod or timestamp-based ints for generic periods).
+- For max middle:
+  if self._max_middle_index >= 0:
+      max_period = self.get_data_item(self._max_middle_index).get_period()
+      max_middle = ...compute middle for max_period...
+      if new_middle > max_middle:
+          self._max_middle_index = index
+  else:
+      self._max_middle_index = index
+- Mirror the same pattern for self._min_middle_index with the comparison new_middle < min_middle.
+
+Why this explanation fixes the guesswork
+- The failure is deterministic and caused by a simple wrong-variable lookup. The exact symptom (wrong index returned) and the snippet you pasted (correct pattern for start index) show the intended pattern. Replacing the wrong index usage in the middle-value comparisons with explicit self._max_middle_index / self._min_middle_index restores the intended behavior.
+
+If you want, paste the _update_bounds method here and I will show the exact one-line change (or a small patch) to correct the wrong index usage.

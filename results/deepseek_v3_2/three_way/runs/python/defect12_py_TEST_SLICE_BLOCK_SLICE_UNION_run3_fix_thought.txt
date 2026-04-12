@@ -1,0 +1,139 @@
+The bug is in the `substring_java` function, which raises an IndexError when `end > len(s)`. However, the original Java `String.substring` does allow `end` to be equal to `length()` (returns empty string) but throws if `end > length()`. Wait, the Java substring method throws `IndexOutOfBoundsException` if `beginIndex` or `endIndex` are greater than the length of the string. Actually, Java's `String.substring(start, end)` requires `end <= length()`. So the original Java `WordUtils.abbreviate` must have logic to ensure `end` is within bounds. Looking at the Java source code (Apache Commons Lang 3.12.0), the `abbreviate` method does adjust `upper` to `str.length()` if `upper == -1` or `upper > str.length()`. That's already done in the Python code: lines 7-8 set `upper = len(text)` if `upper == -1 or upper > len(text)`. But the test case passes `upper=20` and `lower=15` on a string of length 10. So `upper > len(text)` is true, so `upper` should be set to 10. Then `upper < lower`? `upper=10`, `lower=15`, so `upper < lower` is true, then `upper = lower` (line 9) sets `upper = 15`. Wait, that's the problem: after adjusting `upper` to `len(text)` (10), we then set `upper = lower` because `upper < lower`. That makes `upper = 15`. Then later we call `substring_java(text, 0, upper)` with `upper=15` which is greater than `len(text)=10`. That triggers the IndexError. The original Java code does the same? Let's examine the Java logic: In `WordUtils.abbreviate(String str, int lower, int upper, String appendToEnd)`, they have:
+
+if (upper == -1 || upper > str.length()) {
+    upper = str.length();
+}
+if (upper < lower) {
+    upper = lower;
+}
+
+So indeed, if `upper` is set to `str.length()` (10) and `lower` is 15, then `upper < lower` so `upper = lower` (15). Then they call `str.substring(0, upper)`. But Java's `substring` will throw if `upper > str.length()`. Wait, but the test expects no exception and returns the original string? Actually the test 'test_abbreviate_lower_beyond_length' likely expects the method to return the original string unchanged (maybe with append if abbreviated?). Let's think: The test passes `lower=15`, `upper=20`, string length 10. Since `lower` is beyond the string length, there is no space at or after `lower`. The index of space is -1. Then the code goes to the branch `if (index == -1)`. It computes `result = str.substring(0, upper)`. But `upper` is 15 after adjustments? Actually after adjustments: `upper` becomes 10 (since `upper > len`), then `upper < lower` so `upper = lower = 15`. So `upper` is 15. Then `str.substring(0, 15)` throws because 15 > 10. That's the bug. The original Java code must have additional logic to avoid this. Let's check the actual Java source: I recall that in Apache Commons Lang 3.12.0, the `abbreviate` method does:
+
+if (upper == -1 || upper > str.length()) {
+    upper = str.length();
+}
+if (upper < lower) {
+    upper = lower;
+}
+
+But then they have:
+
+if (upper > str.length()) {
+    upper = str.length();
+}
+
+Wait, that's redundant? Actually after setting `upper = lower`, `upper` could be > str.length() if `lower > str.length()`. So they need to clamp `upper` again. Let's look at the exact Java source from the repository. I can simulate: The Java code likely does:
+
+if (upper == -1 || upper > str.length()) {
+    upper = str.length();
+}
+if (upper < lower) {
+    upper = lower;
+}
+// Then later they call str.substring(0, upper) but they must ensure upper <= str.length().
+// Actually they don't; they rely on the fact that upper is set to str.length() if upper > str.length() initially, but after setting upper = lower, it could exceed str.length(). So they need to clamp again.
+
+Let's check the actual Java source from Apache Commons Lang 3.12.0 (WordUtils.java). I found online: 
+
+public static String abbreviate(final String str, int lower, int upper, final String appendToEnd) {
+    // parameter checks...
+    if (str.length() == 0) {
+        return StringUtils.EMPTY;
+    }
+    if (upper == -1 || upper > str.length()) {
+        upper = str.length();
+    }
+    if (upper < lower) {
+        upper = lower;
+    }
+    final StringBuffer result = new StringBuffer();
+    final int index = StringUtils.indexOf(str, ' ', lower);
+    if (index == -1) {
+        result.append(str.substring(0, upper));
+        if (upper != str.length()) {
+            result.append(StringUtils.defaultString(appendToEnd));
+        }
+    } else if (index > upper) {
+        result.append(str.substring(0, upper));
+        result.append(StringUtils.defaultString(appendToEnd));
+    } else {
+        result.append(str.substring(0, index));
+        result.append(StringUtils.defaultString(appendToEnd));
+    }
+    return result.toString();
+}
+
+Wait, they don't clamp again. So if `lower > str.length()`, then `upper = lower` and `upper > str.length()`. Then `str.substring(0, upper)` will throw IndexOutOfBoundsException. That seems like a bug in the Java version? But the test 'test_abbreviate_lower_beyond_length' likely expects the method to return the original string (or maybe the whole string with append?). Actually the test name suggests lower beyond length. Let's infer the expected behavior: If lower is beyond the string length, there is no space after lower, so the abbreviation should just return the whole string? But the method is designed to abbreviate at a space after lower. If lower is beyond length, there is no space, so it should return the whole string (since there's no need to abbreviate). The Java method would throw an exception? That seems wrong. Let's check the test case from the original Lang-45? The bug report might be about this exact scenario. The diagnosis says the test fails because IndexError is raised. The fix should be to ensure that when `upper` exceeds the string length after adjustment, we clamp it to the string length before calling `substring_java`. Actually the `substring_java` function is too strict; it should allow `end == len(s)` but not `end > len(s)`. However, the Java substring throws if `end > length()`. So we need to ensure `end <= len(s)`. So we should clamp `upper` to `len(text)` before calling `substring_java`. That can be done by adding a clamp after the `upper = lower` assignment. Alternatively, we can modify `substring_java` to be more lenient: if `end > len(s)`, set `end = len(s)`. But that would deviate from Java behavior. The original Java method does not have that clamp, but it would throw. However, the test expects no exception. So maybe the test expects the method to return the whole string unchanged (no abbreviation). That would mean the method should handle `lower > len(text)` by returning the whole string (maybe with append if upper < len?). Actually the logic: If `lower` is beyond length, `index` will be -1 (since no space after lower). Then we go to the `index == -1` branch. There we compute `result = substring_java(text, 0, upper)`. But `upper` is set to `lower` (since `upper < lower`), and `lower > len(text)`, so `upper > len(text)`. That's invalid. So we need to adjust `upper` to not exceed `len(text)`. The simplest fix: after setting `upper = lower`, check if `upper > len(text)` and set `upper = len(text)`. That would make sense: if `lower` is beyond the string length, we cannot abbreviate at a space after lower, so we just return the whole string (since there is no need to cut). Actually the method should return the whole string (maybe with append if `upper < len(text)`? But `upper` is now set to `len(text)` because we clamped, so `upper == len(text)`, then `upper != len(text)` is false, so no append. That returns the whole string. That seems correct.
+
+Thus, the fix: after `if upper < lower: upper = lower`, add `if upper > len(text): upper = len(text)`. But note that `upper` may have already been set to `len(text)` earlier if `upper > len(text)`. However, after `upper = lower`, `upper` could be larger than `len(text)`. So we need to clamp again.
+
+Alternatively, we can change the order: first adjust `upper` to `len(text)` if out of bounds, then if `upper < lower`, set `upper = lower` but then clamp again to `len(text)`. That's fine.
+
+Let's implement:
+
+if upper == -1 or upper > len(text):
+    upper = len(text)
+if upper < lower:
+    upper = lower
+if upper > len(text):
+    upper = len(text)
+
+But the last condition will only be true if `lower > len(text)`. That's exactly the case.
+
+Now, with `upper` clamped, `substring_java` will not throw because `end <= len(s)`.
+
+Also, we need to ensure that `substring_java` does not throw for `end == len(s)`. The current `substring_java` checks `end > len(s)` and throws. But `end == len(s)` is allowed (returns empty string? Actually substring(0, len(s)) returns the whole string). In Java, `substring(0, length())` returns the whole string. The condition `end > len(s)` is the problem. So we need to adjust `substring_java` to allow `end == len(s)`. However, the current condition is `start < 0 or end < 0 or start > end or start > len(s) or end > len(s)`. That's too strict; Java allows `end == len(s)`. So we should change `end > len(s)` to `end > len(s)`. Wait, that's the same. Actually Java's substring throws if `beginIndex < 0` or `endIndex > length()` or `beginIndex > endIndex`. Note: `endIndex` can be equal to `length()`. So the condition is `endIndex > length()`, not `endIndex >= length()`. So `end > len(s)` is correct; `end == len(s)` is allowed. So the condition `end > len(s)` throws when `end` is strictly greater. That's what we have. So if `upper` is clamped to `len(text)`, `end == len(text)`, it's allowed. Good.
+
+Now, we must also consider the case where `lower` is beyond length but `upper` is -1 or also beyond length. The clamp will set `upper = len(text)`. Then `upper < lower`? `upper = len(text)`, `lower > len(text)`, so `upper < lower` is true, then `upper = lower`. Then we clamp again: `upper > len(text)` so set `upper = len(text)`. That's a cycle, but we can avoid by doing: after setting `upper = lower`, if `upper > len(text)`, set `upper = len(text)`. That's fine.
+
+Let's write the fixed `abbreviate` method accordingly.
+
+We'll also need to update `substring_java`? Actually the bug is not in `substring_java`; it's that we pass an `end` that is too large. So we should ensure `end` is within bounds. So we'll add the clamp.
+
+Now, we must output only the fixed `abbreviate` method code, not the whole class. The output format requires the complete, fully valid Python code for the fixed `WordUtils.abbreviate` only, including decorators if any. Do NOT include a docstring. That's a bit odd: they say "Do NOT include a docstring." But the original method has a docstring. However, the instruction says not to include a docstring. So we should output the method without the docstring? The example output format likely expects just the method body? Actually they said "the complete, fully valid Python code for the fixed `WordUtils.abbreviate` only (including decorators if any)." That means we should include the `@staticmethod` decorator and the method definition, but not the docstring. So we'll strip the docstring.
+
+Let's construct the method without docstring.
+
+We'll keep the signature and the body with the fix.
+
+We'll also need to import? No, because we are only outputting the method, assuming the surrounding class is already defined.
+
+We'll write:
+
+    @staticmethod
+    def abbreviate(
+        text: Optional[str], lower: int, upper: int, append_to_end: Optional[str]
+    ) -> Optional[str]:
+        if text is None:
+            return None
+        if len(text) == 0:
+            return StringUtils.EMPTY
+
+        if upper == -1 or upper > len(text):
+            upper = len(text)
+        if upper < lower:
+            upper = lower
+        if upper > len(text):
+            upper = len(text)
+
+        index = StringUtils.index_of(text, " ", lower)
+        if index == -1:
+            result = substring_java(text, 0, upper)
+            if upper != len(text):
+                result += StringUtils.default_string(append_to_end)
+            return result
+
+        if index > upper:
+            return substring_java(text, 0, upper) + StringUtils.default_string(append_to_end)
+
+        return substring_java(text, 0, index) + StringUtils.default_string(append_to_end)
+
+But note: after clamping, `upper` may be equal to `len(text)`. That's fine.
+
+We should also consider the case where `lower` is beyond length, but `upper` is -1. The first condition sets `upper = len(text)`. Then `upper < lower`? Since `lower > len(text)`, `upper = len(text) < lower`, so `upper = lower`. Then `upper > len(text)` so we clamp again to `len(text)`. That's fine.
+
+Now, we also need to ensure that `lower` itself is not used in `StringUtils.index_of` with a value greater than `len(text)`. That's okay because `StringUtils.index_of` will return -1 if start is beyond length? Actually `StringUtils.index_of` uses `str.find`. If `start` is greater than or equal to `len(text)`, `find` returns -1. So that's fine.
+
+Thus, the fix is done.
+
+We'll output the code as specified.

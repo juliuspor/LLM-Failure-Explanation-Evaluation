@@ -1,0 +1,43 @@
+What happened (where, in the snippet)
+- At line 38 you load high = code_units[index].
+- At lines 39–43 you detect and decode a valid UTF-16 surrogate pair and on line 43 you return the combined code point.
+- At line 44 you return high if no valid surrogate pair was formed.
+
+Why this fails (root cause, exactly)
+- The function decodes a surrogate pair and returns the combined code point (line 43) but it does not tell the caller that it consumed two code units. The caller still has the same index after the call, so on the next iteration it will read the same high surrogate again. That leads to repeated processing of the same input (infinite loop or incorrect slicing) or otherwise broken iteration over code_units.
+- A secondary, related problem: if you intended to return code unit count or a new index, returning only the code point (an int) at line 43 is the wrong contract; the caller cannot know whether one or two code units were consumed.
+- Note: the bounds check at line 39 (index + 1 < len(code_units)) prevents an IndexError. So the failure is not an out-of-bounds read but a logic/contract error about advancing index.
+
+Exact places to change and concrete fixes (step-by-step)
+You have two clear, explicit options. Pick the one that matches how the caller expects to use this function.
+
+Option A — return code point plus how many code units were consumed
+1. Change the function to return a tuple (code_point, consumed_count).
+2. Replace the returns:
+   - Line 43: return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), 2
+   - Line 44: return high, 1
+3. Update the caller to receive (code_point, consumed) and advance its index by consumed.
+
+Example replacement lines:
+- line 43 -> return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), 2
+- line 44 -> return high, 1
+
+Option B — return the new index and write the code point into an out parameter or as part of a result object
+1. Change function signature to return (code_point, new_index).
+2. Replace returns:
+   - line 43 -> return combined_code_point, index + 2
+   - line 44 -> return high, index + 1
+3. Update caller to use the new_index instead of incrementing by 1 unconditionally.
+
+Example replacement lines:
+- line 43 -> return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), index + 2
+- line 44 -> return high, index + 1
+
+Why these fixes work (explicit)
+- They make the function’s behavior explicit: when a surrogate pair is consumed, the caller is told it used two code units. That prevents the caller from re-processing the same high surrogate and removes the infinite loop / incorrect slicing.
+- Both fixes keep the bounds check at line 39 so you still won’t read past the end of code_units.
+
+Small additional note you should check
+- If you intentionally want to return raw code units (e.g., return high as-is when high is a lone high surrogate), be explicit in the caller about how lone surrogates are handled. Returning a lone high surrogate (line 44) might also be incorrect UTF-16 semantics depending on your requirements — you may want to treat it as an error or replacement character instead.
+
+If you paste the calling code I can show the exact minimal edits in caller + this function to make it correct.

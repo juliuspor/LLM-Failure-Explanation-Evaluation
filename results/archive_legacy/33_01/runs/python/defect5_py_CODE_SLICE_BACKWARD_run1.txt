@@ -1,0 +1,55 @@
+What went wrong (root cause)
+- At line 337 you do: inferred_type = type(array). That gets the Python type of the list object itself (i.e. <class 'list'>), not the type of the elements stored in the list. The code later treats inferred_type as the element/component type when creating a grown copy via ArrayUtils._copy_list_grow1, so you end up asking the copy routine to create a list whose component type is the list class instead of the element class. That mismatch is the real reason the code fails.
+- The check at lines 346–347 (if inferred_type == object and expected_type != object) never triggers for the "list-of-objects" case, because inferred_type is <class 'list'>, not object. That means you miss the opportunity to raise a helpful error early, and the bad component-type propagates into _copy_list_grow1 or into assignments, causing the runtime failure you saw.
+- Another related issue: when array is non-None but empty, type(array[0]) would fail if you change to use array[0] without guarding for length. The current code’s use of type(array) hides that logical issue until later.
+
+Where it happens (lines from your slice)
+- Line 337: inferred_type = type(array) — wrong value for element type.
+- Line 340: inferred_type = object — fallback when both array and element are None — that part is OK.
+- Lines 346–347: the conditional that tries to protect a cast assumes inferred_type will be object when the element type is unknown, but inferred_type is actually list so the protection is ineffective.
+
+Why that causes the crash
+- _copy_list_grow1 expects the element/component type (so it can allocate/copy correctly). Passing the list class instead makes it create a list typed as containing lists (or otherwise use the wrong metadata), and assigning element into the new slot triggers an incompatible-type situation or a downstream error that looks like a class/cast failure. The root mismatch is inferred_type holding the container type instead of the element type.
+
+How to fix it (concrete steps, exact places to change)
+1. Determine element type from the list contents, not from the list object. Replace line 337 with:
+   - if array is not None and len(array) > 0:
+         inferred_type = type(array[0])
+   - This ensures you get the actual element type when the list has elements.
+
+2. If array exists but is empty, fall back to element or expected_type (avoid using type(array) or array[0] when length == 0). For example:
+   - if array is not None:
+         if len(array) > 0:
+             inferred_type = type(array[0])
+         elif element is not None:
+             inferred_type = type(element)
+         else:
+             inferred_type = object
+
+3. Prefer expected_type when it is provided and reliable. For example, after computing inferred_type, if expected_type is not None and inferred_type is object, set inferred_type = expected_type (or validate compatibility). That avoids later surprises:
+   - if expected_type is not None and inferred_type == object:
+         inferred_type = expected_type
+
+4. Keep the existing check that raises TypeError, but adjust it to use the corrected inferred_type logic. For example (replace lines 346–347 check):
+   - if expected_type is not None and not issubclass(inferred_type, expected_type):
+         raise TypeError(...)
+
+5. Defensive programming: ensure _copy_list_grow1 can accept inferred_type and array=None. If _copy_list_grow1 assumes a component type, document it and make its contract clear.
+
+Minimal concrete replacement for the top block (pseudo-code you can paste in):
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+        elif element is not None:
+            inferred_type = type(element)
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Then adjust the expected_type check to compare element/component types (use issubclass if comparing classes).
+
+Summary
+- The bug is that inferred_type = type(array) returns the list’s class, not the element class. Use the first element’s type (with an empty-list guard), and prefer or validate against expected_type. That will stop the component-type mismatch that causes the runtime failure.

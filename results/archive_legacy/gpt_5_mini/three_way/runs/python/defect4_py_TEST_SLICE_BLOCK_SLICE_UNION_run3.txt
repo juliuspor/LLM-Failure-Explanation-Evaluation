@@ -1,0 +1,58 @@
+What happened (root cause)
+- In TimePeriodValues._update_bounds the code that updates the min/max index fields assigns the current index unconditionally (or uses the wrong index variable) instead of only when the current period is actually a new extreme. That makes the bound index end up as the last-added item (index 3 in your test), not the actual extreme (index 1).
+- You can see the relevant fragment in the slice: lines around 331–349 show two problematic behaviors:
+  - The code computes start (lines 331–335 and 340–345), compares start < min_start (line 346) and then sets self._min_start_index = index at line 347.
+  - Immediately after (line 349) there is another assignment self._min_start_index = index that runs regardless of the comparison. Because of that unconditional assignment the stored index is overwritten with the current index every time an item is added.
+- The symptom in your tests (expected max_middle_index == 1, got 3) follows from the same pattern: the "max middle" index is being overwritten by the last index because the update routine does not limit assignments to the case where the new item is actually a new maximum.
+
+Where it happened (specific names and lines)
+- Method: TimePeriodValues._update_bounds (slice shows its body).
+- Variables: self._min_start_index, self._max_middle_index (and the analogous min/max for start/end/middle).
+- Lines from the slice:
+  - Initialization: self._min_start_index = -1 (line 253).
+  - Computation of start for SimpleTimePeriod vs generic period (lines 331–345).
+  - Comparison: if start < min_start (line 346).
+  - Problematic assignments: self._min_start_index = index (line 347) followed by another unconditional self._min_start_index = index (line 349) that overwrites the previous logic.
+- The same pattern exists for the middle/max logic that your test hits (so max_middle_index gets set to the last index instead of the index with the true maximum middle value).
+
+Why that causes the test to fail
+- When the update routine always (or incorrectly) assigns the current index, the stored min/max index reflects the last insertion, not the actual extremum.
+- In test_max_middle_index_simple you add four periods where the true max middle is at index 1, but after the 4th add the update code has overwritten the stored max_middle_index with index 3 — hence the failure.
+
+Concrete fix (clear steps)
+1. Open TimePeriodValues._update_bounds.
+2. For each bound you update (min_start, max_start, min_end, max_end, min_middle, max_middle):
+   - Compute the numeric value for the newly added period (start, end, or middle).
+   - If the stored index for that bound is < 0 (initial case) set it to the current index.
+   - Else compute the stored bound value from the existing data item and compare properly:
+     - Only assign self._XXX_index = index when the new value is strictly a new extreme (e.g., start < min_start, or middle > max_middle).
+   - Do NOT perform any unconditional assignment to the stored index outside those cases.
+3. Remove the stray/unconditional assignment lines (like the one at slice line 349) so that the index is only updated when the comparison says so.
+
+Illustrative (minimal) patch idea (pseudocode)
+- Replace the problematic block:
+
+    if self._min_start_index >= 0:
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        ...
+        if start < min_start:
+            self._min_start_index = index
+    self._min_start_index = index   # <-- WRONG (unconditional)
+
+- With this:
+
+    if self._min_start_index < 0:
+        self._min_start_index = index
+    else:
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        ...
+        if start < min_start:
+            self._min_start_index = index
+
+- Apply the same pattern for max_middle_index and the other min/max fields.
+
+Why this fix is safe
+- It ensures initial indices get set on the first add and subsequent adds only change stored indices when the new item is a real min or max.
+- That produces the expected results in your unit tests (max_middle_index remains 1 in the failing test instead of being overwritten to 3).
+
+If you want, paste the full _update_bounds implementation here and I will prepare an exact line-by-line patch you can drop in.

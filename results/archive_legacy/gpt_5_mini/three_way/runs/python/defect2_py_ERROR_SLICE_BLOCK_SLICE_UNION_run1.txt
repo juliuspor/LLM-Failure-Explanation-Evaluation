@@ -1,0 +1,58 @@
+What happened (where): The exception is raised at lines 74–75 inside get_paint (slice_union). The code computes g on line 71:
+
+  71 | g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+then checks:
+
+  74 | if g < 0 or g > 255:
+  75 |     raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+
+Root cause (why): g is outside the expected 0–255 range because the fraction (value - lower_bound) / (upper_bound - lower_bound) is outside 0.0–1.0. That happens when either:
+
+- The caller passed value < self._lower_bound (produces a negative g), or
+- The caller passed value > self._upper_bound (produces g > 255), or
+- self._lower_bound >= self._upper_bound (if equal, you would have division by zero; if greater, the fraction sign is flipped and yields out-of-range g).
+
+The code only detects that g is out-of-range and raises a generic ValueError at line 75. It does not validate the inputs beforehand or show which variable caused the problem, so the test fails with the unhelpful message.
+
+Exact variables and lines involved:
+- get_paint(value: float) (slice_union line 54)
+- uses self._lower_bound (set at line 43) and self._upper_bound (line 44)
+- computes g at line 71
+- raises at lines 74–75
+
+Concrete fixes (step-by-step):
+
+1. Validate bounds in __init__ (lines 30–44):
+   - Ensure upper_bound > lower_bound and raise a clear error if not.
+   Example replacement at end of __init__:
+   ```
+   if self._upper_bound <= self._lower_bound:
+       raise ValueError(f"upper_bound must be greater than lower_bound: lower_bound={self._lower_bound}, upper_bound={self._upper_bound}")
+   ```
+
+2. Validate or clamp value at start of get_paint (line 54):
+   - Either raise a clear error that includes the offending value and the expected range, or clamp the value to the range before converting.
+   - If you prefer raising:
+   ```
+   if value < self._lower_bound or value > self._upper_bound:
+       raise ValueError(f"value out of range: value={value}, expected between {self._lower_bound} and {self._upper_bound}")
+   ```
+   - If you prefer clamping:
+   ```
+   v = max(self._lower_bound, min(self._upper_bound, value))
+   g = int((v - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+   ```
+
+3. Improve the error message at lines 74–75 (if you keep that check):
+   - Include actual numeric values so the failure is actionable:
+   ```
+   if g < 0 or g > 255:
+       raise ValueError(f"computed g out of range: g={g} (value={value}, lower_bound={self._lower_bound}, upper_bound={self._upper_bound})")
+   ```
+
+Which approach to pick:
+- If values outside the range should be treated as programmer errors, validate in get_paint and raise with the clear message in step 2 (raise).
+- If out-of-range inputs should be tolerated, clamp before computing (step 2, clamp).
+
+Summary: The ValueError at lines 74–75 occurs because g is computed from a value outside the configured [lower_bound, upper_bound] (or because the bounds are invalid). Add explicit validation of bounds in __init__ and either validate or clamp value in get_paint, and replace the vague error message with one that shows value, lower_bound, upper_bound, and the computed g.

@@ -1,0 +1,48 @@
+What happened
+- The input "fr__POSIX" has a double underscore: language = "fr" (chars 0–1), then an underscore at pos 2, another underscore at pos 3, and the variant starts at pos 4 ("POSIX").
+- The code at the shown slice (lines 243–247) assumes a non-empty 2-char country always occupies pos 3–4 and treats pos 5 as the separator for a variant. Concretely:
+  - Line 243: return Locale(locale_str[0:2], locale_str[3:5])
+    - For "fr__POSIX", locale_str[3:5] == "_P" (not a valid country).
+  - Line 245: if locale_str[5] != '_': raise ValueError(...)
+    - For "fr__POSIX", locale_str[5] == 'O', so the check fails and a ValueError is raised ("Invalid locale format").
+- Root cause: the code does not handle an empty country (language__variant) — it always expects a 2-character country at positions 3–4. When the country is empty (double underscore), slicing and the subsequent index check use the wrong positions and lead to an incorrect country value and a spurious ValueError.
+
+Where exactly it occurs
+- In LocaleUtils.to_locale, lines 243–247 (the branch that parses locales with an underscore after the language) are responsible. The problematic assumptions are:
+  - Using locale_str[3:5] for country unconditionally.
+  - Checking locale_str[5] as the variant separator unconditionally.
+
+Why that fails for "fr__POSIX"
+- Double underscore means locale_str[3] == '_' and variant should start at index 4.
+- The code instead reads characters at indices 3–5 as if they were a country + separator, producing wrong slices and index checks, then raises ValueError.
+
+Concrete fix (step-by-step)
+1. Detect the empty-country case before slicing a 2-char country:
+   - After confirming locale_str[2] == '_', check if locale_str[3] == '_'.
+2. If locale_str[3] == '_':
+   - Treat country as "" and variant as locale_str[4:].
+   - Return Locale(locale_str[0:2], "", locale_str[4:]).
+3. Else (country present):
+   - Validate that locale_str has at least 5 characters for country at 3–4.
+   - Keep the existing behavior for country + optional variant, but make sure index checks refer to the correct positions.
+
+Example patch (pseudo-Python to apply at lines 243–247)
+- Replace the unconditional country slice with:
+
+    # after verifying language + '_' at pos 2
+    if locale_str[3] == '_':
+        # empty country, variant starts at pos 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # else: country present in pos 3-4
+    if len(locale_str) < 5:
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    country = locale_str[3:5]
+    if len(locale_str) == 5:
+        return Locale(locale_str[0:2], country)
+    if locale_str[5] != '_':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    return Locale(locale_str[0:2], country, locale_str[6:])
+
+Notes
+- Ensure you also keep/replicate the existing case checks (language lowercase, country uppercase) where appropriate.
+- With this change "fr__POSIX" becomes Locale("fr", "", "POSIX") and the tests you provided will pass.

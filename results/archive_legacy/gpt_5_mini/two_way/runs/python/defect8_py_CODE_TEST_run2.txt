@@ -1,0 +1,56 @@
+What happened (where it fails)
+- The failure occurs inside to_locale after the code checks locale_str[2] == '_' and then immediately reads ch3 = locale_str[3] and ch4 = locale_str[4] and enforces ch3 and ch4 to be uppercase (the block starting with "ch3 = locale_str[3]"). For the test input "fr__POSIX" that makes ch3 == '_' and ch4 == 'P', so the check ch3 < 'A' or ch3 > 'Z' is true and a ValueError is raised. In other words the method rejects the "language__variant" form (empty country) because it assumes the two characters after the first underscore are always an uppercase country code.
+
+Why that assumption is wrong (root cause)
+- The code never handles the allowed locale form language__variant (two underscores in a row meaning empty country and a variant follows). After verifying locale_str[2] == '_' the code treats positions 3 and 4 as a two-letter country (uppercase). It does not check for the case where locale_str[3] == '_' (the second underscore) which indicates empty country and a variant starting at index 4. That exact situation occurs for "fr__POSIX": locale_str[2] is '_' (OK), locale_str[3] is '_' (empty country), but the code expects an uppercase letter there and raises ValueError.
+
+Where in your code this happens (exact names/places)
+- Method: to_locale(cls, locale_str: str)
+- Variables: locale_str, length, ch3, ch4
+- Relevant lines (described): the branch after "if locale_str[2] != '_':" where you set ch3 = locale_str[3]; ch4 = locale_str[4]; then check if ch3/ch4 in 'A'..'Z'. That is the precise place the wrong assumption causes the exception for "fr__POSIX".
+
+What to change (concrete steps to fix)
+1. After confirming locale_str[2] == '_', detect an empty country by checking if locale_str[3] == '_'. If so:
+   - Set country = ""
+   - Set variant = locale_str[4:] (variant may be empty or non-empty; validate as needed)
+   - Return Locale(locale_str[0:2], "", locale_str[4:]) (or raise if variant missing depending on rules)
+
+2. Otherwise (locale_str[3] is not '_'), proceed with the existing country validation: ensure ch3 and ch4 are uppercase and handle the length==5 (language + '_' + 2 country) or >=7 variant case.
+
+3. (Optional but recommended) Make the initial length validation clearer. The current check
+   if length != 2 and length != 5 and length < 7:
+is hard to read and confusing. Replace it with explicit allowed-pattern checks or a clearer condition like:
+   if length == 0 or length == 1 or length == 3 or length == 4:
+       raise ValueError(...)
+or validate per branch (language-only, language_country, language__variant, language_country_variant) after parsing separators.
+
+Example of the minimal code change (conceptual)
+- Replace the block
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    else:
+        ...
+  with:
+    if locale_str[3] == '_':
+        # empty country, variant starts at index 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # else country must be two uppercase letters
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    else:
+        ...
+
+Why this fixes the failing test
+- For "fr__POSIX", locale_str[3] == '_' so the new branch returns Locale("fr", "", "POSIX") instead of trying to validate ch3 as an uppercase country letter. That matches the expected Java behavior and the unit test.
+
+Summary
+- Root cause: the code assumes a non-empty 2-letter uppercase country at positions 3–4 and never handles the double-underscore empty-country case.
+- Fix: detect locale_str[3] == '_' and treat that as country == "" with variant = locale_str[4:], otherwise validate a two-letter uppercase country as before. Also consider clarifying the initial length checks.

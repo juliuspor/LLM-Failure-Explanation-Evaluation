@@ -1,0 +1,52 @@
+What happened
+- The failing assertion is about stringifying the floating value -0.0: the test calls MockCodeConsumer.add_number(-0.0) and expects get_code() to return the string "-0.0", but the actual output was "0".
+- The loss of the negative sign happens when the code in MockCodeConsumer.add_number converts the numeric value to text. That conversion code treats -0.0 as ordinary zero and emits "0" (or "0.0") instead of preserving the sign bit.
+
+Where exactly it occurs
+- Inside MockCodeConsumer.add_number (the method the test calls).
+- Specifically in the line that turns the numeric argument (let’s call it num) into a string. Typical culprits are:
+  - using num.toString() or String(num) in JavaScript (String(-0) yields "0"),
+  - applying a numeric formatting routine that treats any zero as unsigned,
+  - or doing an explicit equality/conditional like if (num == 0) result = "0".
+- After that conversion, get_code() returns the already‑stringified value, so the test sees "0" instead of "-0.0".
+
+Why that happens (root cause)
+- Floating-point negative zero is a distinct value at the bit level but compares equal to +0.0 in normal equality checks. Many common stringification paths or logic that special-case zero discard the sign bit and produce "0".
+- The code path in add_number unconditionally normalizes zeros to a plain zero string. It never checks for a negative zero bit, so the sign is lost before get_code() sees it.
+
+Concrete fixes (step-by-step)
+Below are concrete edits to make in MockCodeConsumer.add_number. I give language-specific examples because the detection method differs by language. Replace the line that currently does the naive conversion (for example: out = String(num) or out = format(num) or if (num == 0) out = "0") with a check for negative zero first.
+
+JavaScript (if your project is JS/Node/browser)
+1. Find the line in MockCodeConsumer.add_number that does the conversion. It might look like:
+   - let s = String(num);
+   - or if (num === 0) s = "0";
+2. Replace it with:
+   - if (num === 0 && 1 / num === -Infinity) {
+       s = "-0.0"; // or preserve original formatting you expect
+     } else {
+       s = String(num); // or your existing formatter
+     }
+3. Keep the rest of the method unchanged. The 1/num === -Infinity test detects negative zero reliably.
+
+Python (if your project is Python)
+1. Find the line that produces the string, e.g. s = str(num) or if num == 0: s = "0".
+2. Replace with:
+   - import math
+     if num == 0.0 and math.copysign(1.0, num) < 0:
+         s = "-0.0"
+     else:
+         s = str(num)
+3. math.copysign(1.0, num) returns -1.0 for negative zero.
+
+General steps to apply
+1. Open MockCodeConsumer.add_number (the failing method).
+2. Locate the exact statement that converts num to text (search for toString, String(…), str(…), format(…)).
+3. Insert the negative-zero detection before that conversion and emit "-0.0" (or otherwise preserve the negative sign according to your desired printed format).
+4. Run the test: cc = MockCodeConsumer(); cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0' should now pass.
+
+Why the suggested check is safe
+- It only changes behavior for the special case of negative zero, which is what the test expects you to preserve.
+- It leaves all other numbers and normal zero handling untouched.
+
+If you show me the current contents of MockCodeConsumer.add_number (paste the method or the file and line numbers), I can produce the exact one-line patch to apply.

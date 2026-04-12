@@ -1,0 +1,49 @@
+What happened (what you saw)
+- You called: zone = DateTimeZone.for_offset_hours_minutes(-2, -15)
+- You expected id '-02:15' (total offset = -2 hours and -15 minutes = -135 minutes).
+- The code produced the wrong offset (e.g. '-01:45'), so the assertion failed.
+
+Where it failed (exact place)
+- The error originates in the branch around lines shown in the slice:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+  - hours_in_minutes is hours_offset * 60
+
+Why it failed (root cause)
+- For hours_offset = -2 and minutes_offset = -15:
+  - hours_in_minutes = -2 * 60 = -120
+  - The correct total minutes is -120 + (-15) = -135 (-> -02:15)
+- The code executed the assignment on line 402, computing:
+  - minutes_offset = hours_in_minutes - minutes_offset = -120 - (-15) = -105
+  - That gives -105 minutes (-> -01:45), which is wrong.
+- In short: the branch logic chose subtraction when it should have used addition for the combination (hours negative, minutes negative). The sign-handling condition that selects between line 402 and 404 is incorrect — it inverts the arithmetic for the negative/negative case.
+
+Consequence
+- The wrong arithmetic on line 402 when minutes_offset is negative with a negative hours_offset produces an incorrect total offset and thus a wrong zone.id, so the assert fails.
+
+Concrete fixes (steps you can apply)
+1. Replace the special-case arithmetic with a single clear computation of total minutes that does not rely on fragile sign-branching. For example:
+   - total_minutes = hours_offset * 60 + minutes_offset
+   - But that only works if minutes_offset is already the signed minutes matching hours sign. If the API intends separate-sign semantics, normalize first:
+     - minutes_sign_corrected = minutes_offset if hours_offset >= 0 else -abs(minutes_offset) if minutes_offset > 0 else minutes_offset
+     - total_minutes = hours_offset * 60 + minutes_sign_corrected
+2. Or, fix the incorrect branch so negative/negative uses addition. Concretely change line 402 from subtraction to addition, and ensure the branch condition is corrected so:
+   - if hours_offset < 0 and minutes_offset < 0:
+       minutes_offset = hours_in_minutes + minutes_offset   # use line 404 logic
+   - if hours_offset < 0 and minutes_offset > 0:
+       minutes_offset = hours_in_minutes - minutes_offset   # make it more negative
+   - (mirror logic for hours positive)
+3. Add unit tests for all sign combinations listed in the docstring:
+   - (2, 15) => +02:15
+   - (2, -15) => ValueError (per doc)
+   - (0, -15) => -00:15
+   - (-2, 15) => -02:15
+   - (-2, -15) => -02:15
+   - Also test boundary values (±23, ±59) to ensure raising when out of range.
+
+Why the suggested fixes are safe
+- Using a single normalized computation (step 1) avoids duplicated branches and the sort of sign-inversion bug you’re seeing.
+- If you prefer minimal change, correcting the subtraction-to-addition and the branch condition fixes the immediate bug at lines 402/404.
+
+Summary
+The code picked the subtraction formula (line 402) for hours = -2 and minutes = -15, so it computed -120 - (-15) = -105 instead of -120 + (-15) = -135. The sign-branch that chooses between line 402 and 404 is wrong; fix by normalizing signed minutes then computing total_minutes = hours_in_minutes + minutes_or by correcting the branch so negative/negative uses addition.

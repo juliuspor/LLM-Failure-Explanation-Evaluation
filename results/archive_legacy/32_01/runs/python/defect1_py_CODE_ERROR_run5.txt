@@ -1,0 +1,59 @@
+What happened (where it failed)
+- The method raises ValueError at this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+  That check runs before any combination of hours and minutes occurs. The exception message shows Minutes out of range: -15, so the caller passed minutes_offset == -15 and the code rejected it immediately.
+
+Why it failed (root cause)
+- The code treats minutes_offset as always non‑negative (0..59), but callers often pass negative minute values to indicate a negative total offset (for example -0:15). Because the method validates minutes_offset < 0 as an error, any negative minutes like -15 are rejected before the code ever combines hours and minutes.
+- Additionally, the method later overwrites the minutes_offset variable to hold the combined minute total:
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That reuse is confusing: the input minutes_offset is expected to be a magnitude (0..59) but is later treated as part of the signed total. Because of the early validation, some valid intended offsets (e.g. -0:15) are blocked.
+
+Where in the code this occurs
+- The failure happens at the validation block:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This is before the combination logic that uses hours_in_minutes and the subsequent safe_multiply.
+
+How to fix it (clear, actionable steps)
+Option A — Treat minutes_offset as a magnitude and derive sign from hours_offset (recommended if API expects minutes to be 0..59)
+1. Keep minutes_offset required to be 0..59 (no negative allowed).
+2. Compute the signed total minutes using the sign of hours_offset:
+   - If hours_offset < 0: total_minutes = hours_offset*60 - minutes_offset
+   - Else: total_minutes = hours_offset*60 + minutes_offset
+3. Special-case hours_offset == 0: decide how to accept negative offsets like -0:15 — either disallow and require hours_offset be negative, or add a separate sign parameter.
+
+Example code change (replace the combination block with):
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Option B — Allow signed minutes (if you want callers to be able to pass -15)
+1. Change the validation to allow minutes_offset in -59..59:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Compute total_minutes simply as:
+    total_minutes = hours_offset * 60 + minutes_offset
+   (This lets minutes_offset carry its sign; you must document that callers may pass negative minutes.)
+3. Use distinct local variables; don’t overwrite the input variable for clarity.
+
+Example code change:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    total_minutes = hours_offset * 60 + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Which to choose
+- If your public API currently expects minutes to be a magnitude (0..59), use Option A and document that sign comes from hours_offset.
+- If you want to support negative minute inputs like -15, use Option B and document that minutes_offset may be negative.
+
+Summary
+- The code fails because it forbids negative minute inputs but the caller passed -15. The validation occurs before combining hours and minutes. Fix by either treating minutes as an unsigned magnitude and deriving the sign from hours, or allow signed minutes and compute total_minutes = hours*60 + minutes; also avoid reusing the minutes_offset variable for the combined total.

@@ -1,0 +1,56 @@
+What happens
+- At line 396 you reject any minutes_offset < 0 with:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later, at lines 402 and 404 you change minutes_offset relative to hours_in_minutes:
+  402: minutes_offset = hours_in_minutes - minutes_offset
+ 404: minutes_offset = hours_in_minutes + minutes_offset
+- That means you parse a negative time zone like "-05:30" so minutes_offset is parsed as -30, then the check at line 396 fires and raises ValueError before you ever apply the sign/normalize the minutes.
+
+Why it fails (root cause)
+- You validate minutes_offset before you normalize or apply the sign coming from the hours part.
+- The validation treats a negative minutes value (which is legitimate when parsing "-05:30" as "-5 hours and -30 minutes") as an out-of-range error because the range check is done too early.
+- In other words: the order is wrong. The code checks minutes_offset’s sign before the code at lines 402/404 uses hours_in_minutes (and the sign) to compute the combined offset.
+
+Where it occurs
+- The erroneous check is at line 396.
+- The sign/combination logic that should happen before or instead of that check is at lines 402 and 404.
+- The computed offset is then multiplied at line 405 and returned at line 408 via for_offset_millis.
+
+Precise fixes (pick one and apply exactly)
+1) Validate the absolute value of minutes, then apply sign (minimal change)
+   - Replace the check at line 396 with:
+       if abs(minutes_offset) > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Reason: allows minutes_offset to be negative during parsing but still enforces 0..59 magnitude.
+
+2) Move the range check after sign/normalization (logical reorder)
+   - Remove the check at line 396.
+   - After you compute the combined minutes at lines 402/404, add:
+       if minutes_offset < -59 or minutes_offset > 59 + hours_in_minutes:
+           # or more simply check the minutes component before combining: see option 1
+           raise ValueError(f"Minutes out of range after normalization: {minutes_offset}")
+   - Better: parse minutes as a non-signed integer, apply sign from hours, then validate magnitude.
+
+3) Parse minutes as non-signed and apply sign explicitly (recommended for clarity)
+   - Ensure when you parse the minutes token you produce a non-negative int minutes_part (0..59).
+   - Keep the check:
+       if minutes_part < 0 or minutes_part > 59:
+           raise ValueError(...)
+   - Then apply sign using hours_in_minutes sign:
+       minutes_offset = hours_in_minutes + (minutes_part if hours_in_minutes >= 0 else -minutes_part)
+   - Then multiply and return.
+
+Why each fix works
+- Option 1 fixes the direct cause: the bad check flags negative but valid minute values. It preserves current flow with minimal edits.
+- Option 2 fixes the root ordering problem by only checking after the sign is applied.
+- Option 3 is the cleanest: keep minutes parsing and validation tied to the minutes token (non-negative, 0–59), then combine with the hours sign. That avoids ambiguous negative minute values entirely.
+
+What to change, exactly
+- If you want the simplest patch, change line 396 from:
+    if minutes_offset < 0 or minutes_offset > 59:
+to:
+    if abs(minutes_offset) > 59:
+- Or better refactor parsing so minutes_offset is always the unsigned minute component and apply sign from hours_in_minutes when computing minutes_offset at lines 402/404.
+
+That is the direct cause and specific, actionable changes to fix it.

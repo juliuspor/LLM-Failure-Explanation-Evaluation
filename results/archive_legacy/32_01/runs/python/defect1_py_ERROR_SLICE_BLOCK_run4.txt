@@ -1,0 +1,57 @@
+What happened (where it failed)
+- The ValueError was raised at lines 400–401 because minutes_offset held -15 and the code explicitly rejects any negative minute:  
+  Line 400: if minutes_offset < 0 or minutes_offset > 59:  
+  Line 401:     raise ValueError(f"Minutes out of range: {minutes_offset}")  
+- The exception message shows the actual value: Minutes out of range: -15. So the immediate cause is that minutes_offset became negative (−15) and the guard treats any negative minute as invalid.
+
+Why it happened (root cause)
+- The code is validating the minutes part independently and assumes minutes_offset must be in the range 0..59. That assumption is fine only if the sign handling for the whole offset was applied before this check.
+- The real bug is upstream: the sign handling or parsing of the offset applied the minus sign inconsistently (or not at all) to minutes. For example, when parsing an offset like "-1:15" the code probably turned hours into -1 but turned minutes into -15 (or left minutes negative) instead of parsing minutes as 15 and then applying the common negative sign to the combined offset. As a result minutes_offset contains a negative number and trips the check.
+
+Where to look (specific places)
+- The failing check is at lines 400–401 (the method that contains those lines — the timezone/offset parsing or setter).  
+- Inspect the code just before line 400 where minutes_offset is computed or assigned (parsing routine). Look for:
+  - Where the sign is extracted from the input string (e.g. '+' or '-')
+  - How hours_offset and minutes_offset are produced from that string
+  - Any code that applies the sign to hours but not to minutes (or that subtracts minutes into a negative value)
+
+Concrete fixes (step-by-step)
+1. Parse sign once, keep minutes positive, then apply the sign to the combined offset
+   - Example steps:
+     a. Extract sign = +1 or -1 from the input string.
+     b. Parse hours = int(hours_str) and minutes = int(minutes_str) as non-negative integers.
+     c. Compute total_minutes = sign * (hours * 60 + minutes).
+     d. Validate total_minutes is within allowed range (e.g. -23:59..+23:59 or whatever your domain requires).
+   - This avoids ever having a negative minutes_offset value to validate against 0..59.
+
+2. If you must validate parts separately, validate absolute minutes, not signed minutes
+   - Replace the current check at lines 400–401 with:
+     if abs(minutes_offset) < 0 or abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - Better: compute minutes = abs(minutes_offset) earlier and check 0 <= minutes <= 59.
+
+3. Normalize and validate the combined offset
+   - After computing total_minutes (see step 1.c), enforce a single range check such as:
+     if total_minutes < -1439 or total_minutes > 1439:
+         raise ValueError(f"Total offset out of range: {total_minutes}")
+   - This prevents contradictory sign/hour/minute combinations (like -0:15 vs +0:15).
+
+Minimal code example to replace the faulty region (pseudocode, applied around lines 396–405)
+- Before (problematic):
+  sign = ...
+  hours_offset = sign * int(hours_str)
+  minutes_offset = sign * int(minutes_str)   # leads to negative minutes_offset
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- After (fix):
+  sign = +1 if input startswith('+') else -1
+  hours = int(hours_str)
+  minutes = int(minutes_str)
+  if minutes < 0 or minutes > 59:
+      raise ValueError(f"Minutes out of range: {minutes}")
+  total_minutes = sign * (hours * 60 + minutes)
+  # then validate total_minutes as needed
+
+Summary
+- The error occurs because minutes_offset is negative (−15) and the code rejects negative minutes at lines 400–401. The root cause is incorrect sign handling when parsing the offset: the sign was applied in a way that left minutes negative. Fix by parsing hours and minutes as non-negative, then applying the sign to the combined offset (or validate abs(minutes) instead), and validate the normalized total offset.

@@ -1,0 +1,51 @@
+What happened (root cause)
+- The code adjusts upper first, then forces upper up to lower. That can make upper larger than the string length even though lower already lies beyond the end of the string.
+- When that happens the path that appends append_to_end runs, so the function returns the original string plus an "append" marker (or at least behaves as if truncation happened), instead of returning the original string unchanged.
+
+Where it occurs in your code
+- At these lines:
+  - if upper == -1 or upper > len(text):
+        upper = len(text)
+  - if upper < lower:
+        upper = lower
+- And later the code checks whether to append:
+  - if index == -1:
+        result = substring_java(text, 0, upper)
+        if upper != len(text):
+            result += StringUtils.default_string(append_to_end)
+        return result
+- substring_java uses Python slicing (returned by slice_forward: return s[start:end]), so slicing with an end beyond the string silently returns the full string — but the check upper != len(text) is already true when upper was set to lower > len(text), so the code appends.
+
+Why that is wrong
+- For the test case WordUtils.abbreviate("0123456789", 15, 20, None):
+  - len(text) = 10, lower = 15, upper initially 20.
+  - First branch sets upper = len(text) -> upper = 10.
+  - Then the second branch sets upper = lower -> upper = 15 (now > len(text)).
+  - substring_java(text, 0, 15) returns the full string ("0123456789"), but upper != len(text) is true (15 != 10), so append_to_end is added.
+  - The expected behavior (see Lang-45 and the test) is: if lower is beyond the string length, return the original string unchanged. The code instead treats it like truncation and appends.
+
+How to fix it (clear steps)
+Either of these two correct fixes will work; pick whichever matches intended semantics:
+
+1) Short-circuit when lower is beyond the string:
+   - Add a check immediately after the empty-string check:
+       if lower >= len(text):
+           return text
+   - This matches the Java behavior (if lower >= length -> return original) and prevents the subsequent upper adjustments and append logic from running.
+
+2) Adjust the ordering/logic of upper adjustments so upper never gets bumped beyond length in a way that triggers append incorrectly:
+   - Move the "if upper < lower" check before clamping upper down to len(text), then after that clamp upper to len(text) (or clamp first then special-case lower >= len(text) as option 1). But option (1) is simpler and clearer.
+
+Example patch (option 1):
+- Insert after:
+    if len(text) == 0:
+        return StringUtils.EMPTY
+  add:
+    if lower >= len(text):
+        return text
+
+Why this removes the failure
+- With that check, the test case lower=15 will immediately return "0123456789" before any upper modifications happen, matching the expected result and avoiding the wrong append behavior caused by setting upper to lower > len(text).
+
+Lines referenced
+- The problematic logic is the pair of lines that set upper and then reset it by lower (shown above) and the subsequent check if upper != len(text) that decides whether to append. The substring_java implementation (slice_forward: return s[start:end]) silently accepts end > len(s), so the append decision depends only on the numeric value of upper — which is why incorrectly increasing upper to lower causes the wrong branch to append.

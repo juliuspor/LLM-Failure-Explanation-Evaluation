@@ -1,0 +1,60 @@
+What happened (where it fails)
+- The code raises the TypeError at lines 346–351 because the local variable inferred_type equals object while expected_type is some other class. The if condition at line 346 is true, so the code raises with the message about casting an Object[] to the expected component type.
+
+Why it happened (root cause)
+- inferred_type became object because whatever logic computed inferred_type fell back to a generic object type when it could not determine a more specific element type from the list. Typical causes:
+  - The list contains elements of mixed types (e.g., [1, "a"]) so the inference routine yields object.
+  - The list contains only None or only values that the inference routine ignores, so it cannot infer a specific class and sets inferred_type = object.
+- expected_type is not object (for example, expected_type is int, String, Foo, etc.). The code treats inferred_type == object as an unrecoverable mismatch and raises.
+- The failure occurs exactly at line 346: the check is too blunt — it assumes inferred_type == object always means a real type mismatch even when the list elements might be acceptable after a different check (for example, ignoring None or checking instance compatibility with expected_type).
+
+Concrete reproduction example
+- If the caller passes value_list = [None, None] and expected_type = int, inferred_type will be object and the code will hit line 346 and raise the TypeError described at lines 347–351.
+- If the caller passes value_list = [1, "a"] and expected_type = int, inferred_type becomes object and the same raise happens.
+
+Exact fixes (step-by-step) — pick one depending on desired behavior
+
+Option A — Treat None as neutral when inferring (recommended if None should not force object)
+1. Change the inference routine so it ignores None elements when computing inferred_type.
+2. If after ignoring None the routine finds a single concrete type T, set inferred_type = T.
+3. Keep the current check at line 346 but it will no longer fire for lists like [1, None].
+Implementation hint:
+- Before comparing types, filter elements: non_none = [x for x in value_list if x is not None]. If non_none is empty, decide whether to accept expected_type or keep inferred_type = object.
+
+Option B — Accept compatible element instances rather than requiring exact matching to inferred_type
+1. Replace the strict inferred_type == object && expected_type != object test with an instance-level compatibility check:
+   - For each element in value_list, if element is not None and not isinstance(element, expected_type), then raise.
+2. This allows mixed data only if every non-None element is an instance of expected_type.
+
+Option C — Make the error message and behavior explicit for mixed/unknown lists
+1. If inferred_type == object and expected_type != object, include a clearer message and the exact offending elements.
+2. Or allow the caller to pass a flag to force-cast despite object inference.
+
+Exact code edits (examples)
+- To ignore None when inferring (pseudo-edit near the inference code that sets inferred_type):
+  inferred_values = [x for x in value_list if x is not None]
+  if inferred_values:
+      inferred_type = infer_type_from(inferred_values)  # existing logic but on filtered list
+  else:
+      inferred_type = object  # or set to expected_type if you want to accept empty lists
+
+- To check instance compatibility before raising (replace lines 346–351):
+  if inferred_type == object and expected_type != object:
+      # verify every non-None element is an instance of expected_type
+      for idx, el in enumerate(value_list):
+          if el is not None and not isinstance(el, expected_type):
+              raise TypeError(f"Element at index {idx} of type {type(el).__name__} "
+                              f"is not compatible with expected_type {expected_type.__name__}")
+      # if we get here, all non-None elements are compatible; do not raise
+
+Why these fixes solve it
+- Ignoring None avoids false negatives where the list contains valid values plus nulls.
+- Per-element instance checks avoid relying on a coarse inferred_type == object test; they allow lists that are actually compatible with expected_type even when inference returns object.
+- Adding clear error messages prevents guessing which element caused the failure.
+
+Where to change (line numbers)
+- Adjust the code that computes inferred_type (earlier than line 346) to ignore None or compute a common base class.
+- Replace or refine the check at line 346 so it does per-element compatibility checks rather than raising whenever inferred_type == object and expected_type != object.
+
+If you want, tell me:
+- the exact structure of value_list and expected_type in your failing case, and I will give the minimal code patch for this file (with the exact lines to change).

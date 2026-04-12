@@ -1,0 +1,52 @@
+What happened (what failed, where)
+- Failure occurs in ArrayUtils.add when calling ArrayUtils.add(None, None, expected_type=str).
+- The failing code is the slice you provided at lines 346–351:
+  - It checks: if inferred_type == object and expected_type != object: raise TypeError(...).
+- In this call:
+  - The input array is None and the element is None, so the code never discovers a concrete element type; inferred_type remains object.
+  - expected_type is str (the caller passed expected_type=str).
+  - The condition inferred_type == object and expected_type != object is true, so the code raises TypeError (pretending to be a Java ClassCastException).
+- Result: the test that expects result == [None] fails because a TypeError is raised at the indicated lines instead of returning a list containing None.
+
+Why this is wrong (root cause)
+- The code treats "no concrete type found" (inferred_type == object) and "caller asked for a concrete expected_type" as a fatal incompatibility, and raises an error (lines 346–351).
+- But when both the array and the element are None, there is nothing to infer. That situation should be considered compatible with any reference type (e.g., String[] in Java or a Python list holding None). Raising an error here is incorrect.
+- The logic conflates two different cases:
+  1. Two concrete types that conflict — should raise.
+  2. No concrete type discovered (only None values) while caller provided an expected_type — should accept and construct an array/list of the expected_type or, in Python, just return a list containing the element (None).
+- In short: inferred_type == object is not sufficient reason to throw when expected_type is provided; instead the code should adopt expected_type when no other type evidence exists.
+
+Concrete suggested fix (exact changes and steps)
+Replace the raise block at lines 346–351 with code that uses the caller's expected_type when no concrete type was inferred, and only raise when there is a true type conflict. Concretely:
+
+1. Find the block:
+ 346 |             if inferred_type == object and expected_type != object:
+ 347 |                 raise TypeError(
+ 348 |                     f"Cannot cast object list to {expected_type.__name__} list "
+ 349 |                     f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+ 350 |                     f"[Ljava.lang.{expected_type.__name__};)"
+ 351 |                 )
+
+2. Replace it with one of these options (pick the one that fits your design):
+
+Option A — prefer expected_type when no type inferred (simple, safe):
+ 346 |             if inferred_type == object and expected_type is not None and expected_type != object:
+ 347 |                 # No concrete type found, adopt caller's expected_type
+ 348 |                 inferred_type = expected_type
+
+Option B — explicit behavior for Python (lists are dynamic; just accept):
+ 346 |             if inferred_type == object:
+ 347 |                 # No concrete element type discovered. If caller supplied expected_type,
+ 348 |                 # use it; otherwise keep object. Do not raise for None-only input.
+ 349 |                 if expected_type is not None:
+ 350 |                     inferred_type = expected_type
+
+3. Ensure that raising still happens when there are two concrete conflicting types:
+- Elsewhere in the method you should still compare concrete element types discovered (not object) against expected_type and raise only if they are incompatible.
+
+Why this fix works
+- When both array and added element are None, inferred_type stays object; with the change the code adopts expected_type (str) instead of raising, so ArrayUtils.add(None, None, expected_type=str) returns a list compatible with the caller ([None]) instead of throwing.
+- When there really is a type conflict (for example you inferred int but expected_type is str), you can still raise, preserving type-safety logic.
+
+Additional notes
+- In Python lists are dynamically typed; you may prefer to avoid simulating Java array-type strictness and simply return a list with the element. If you must keep type checks for compatibility with a Java-like API, use the replacement logic above to only raise on genuine conflicting concrete types, not on "no type inferred" cases.

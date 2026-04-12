@@ -1,0 +1,60 @@
+What happened (root cause)
+- In ArrayUtils.add(arr, element, expected_type=str) your code chooses the array component type incorrectly when it must create a new array.
+- When arr is None (or when arr's component type is java.lang.Object) your implementation falls back to creating an Object[] (component type = Object). That yields an Object[] containing a None (or other objects).
+- The caller then expects a String[] (expected_type=str) and tries to treat/cast the returned array as String[]; at runtime the JVM rejects casting Object[] to String[] and you get:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+  This is the exact error shown in your test output.
+
+Where it occurs (what variables / methods)
+- Method: ArrayUtils.add(arr, element, expected_type=...)
+- Variables: arr (the input array), expected_type (the caller’s requested component type), component_type (the type your code decides to create), and new_array (the newly-allocated array you return).
+- Specific failure case in tests: test_add_null_to_null_with_expected_type passes arr=None and expected_type=str; your code computed component_type = Object (or left it unset) and created an Object[]; the caller expected a String[].
+
+Why that exact error appears
+- In Java/Jython interop, arrays carry their component type at runtime. An Object[] is not a String[] even if every element is null or a String at runtime. Casting between array types is checked and fails if the runtime component types differ.
+- Returning Object[] when caller required String[] causes the ClassCastException at the point the runtime or caller attempts to treat the result as String[].
+
+What to change (concrete actionable fixes)
+You must ensure the returned array has the requested component type whenever the caller requests one (or when arr is None and you can’t infer a more specific type). Concretely:
+
+1) When arr is None:
+   - If expected_type is provided, use expected_type as the component type for the new array.
+   - Otherwise use Object (or the element’s runtime type if element is non-null).
+
+2) When arr is not None:
+   - Use arr.getClass().getComponentType() (or equivalent) as the component type unless expected_type is provided and is more specific than Object — in that case prefer expected_type.
+
+3) Create the new array using the chosen component_type:
+   - In Java: java.lang.reflect.Array.newInstance(component_type, newLength)
+   - In Jython or mixed code: construct a Java array of the correct component_type instead of an Object[].
+
+4) Copy elements using the new array’s setter (java.lang.reflect.Array.set) or proper typed array assignments so the runtime type is correct.
+
+Example pseudo-patch (Java/Jython style)
+- Before (buggy)
+  component_type = (arr != None) ? arr.getClass().getComponentType() : Object.class;
+  new_array = new Object[newLength];    // <-- always Object[]
+
+- After (fixed)
+  if (arr != None) {
+      component_type = arr.getClass().getComponentType();
+  } else if (expected_type != None) {
+      component_type = expected_type;         // use requested type
+  } else if (element != None) {
+      component_type = element.getClass();
+  } else {
+      component_type = Object.class;
+  }
+  new_array = java.lang.reflect.Array.newInstance(component_type, newLength);
+
+Then copy old elements into new_array and set new_array[lastIndex] = element (use Array.set if necessary).
+
+Why this fix resolves the test
+- When arr=None and expected_type=str, component_type becomes java.lang.String, so Array.newInstance creates a String[]; returning a String[] satisfies the caller’s expectation and avoids the ClassCastException.
+
+Notes and pitfalls
+- If expected_type is provided but incompatible with existing arr component type (e.g., arr is Integer[] and expected_type is String), decide policy: either throw IllegalArgumentException or coerce by creating an array of the more general common supertype. Tests above expect the expected_type only for the null-arr case.
+- If element is None and arr is None and expected_type not provided, you must still pick a concrete component type; Object is reasonable, but callers expecting a more specific array should pass expected_type.
+
+Summary
+The test fails because ArrayUtils.add returns an Object[] when the caller expects a String[]. Fix by selecting the requested expected_type (when given) as the array component type when creating the new array (especially when arr is None), and allocate the array with that component type via java.lang.reflect.Array.newInstance so the returned array’s runtime type matches the caller’s expectation.

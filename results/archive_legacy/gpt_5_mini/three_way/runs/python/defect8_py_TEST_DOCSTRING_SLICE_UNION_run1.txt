@@ -1,0 +1,29 @@
+What happened (where and why)
+- Failure occurs inside LocaleUtils.to_locale, around the code shown in the slice (lines 237–247).
+- For input "fr__POSIX" the code does:
+  - length = len(locale_str) (line ~222)
+  - then unconditionally reads ch3 = locale_str[3] and ch4 = locale_str[4] (lines 237–238)
+  - it then validates those as uppercase letters (lines 239–240)
+- For "fr__POSIX", locale_str[3] is '_' (not an uppercase letter), so the check on line 239 fails and the method raises ValueError("Invalid locale format: fr__POSIX").
+- The root cause: the method never handles the "language__variant" case (empty country, double underscore). It assumes that if there is more than a language part then a two-letter country MUST be present at indices 3–4 and so it always validates indices 3 and 4 as uppercase letters before considering a variant. That assumption is wrong for inputs like "fr__POSIX".
+
+Why this is incorrect (concrete problems)
+- It treats position 3 and 4 as country letters without first checking whether position 3 might be an underscore indicating an empty country.
+- It indexes locale_str[3] and locale_str[4] without guarding that the input actually has a country part; that both causes wrong validation and is brittle for short inputs.
+- The bug occurs precisely at the lines you saw: ch3 = locale_str[3] (line 237), ch4 = locale_str[4] (line 238), and the uppercase check (line 239) which raises the ValueError.
+
+How to fix it (clear steps and exact place to change)
+1. Before reading ch3 and ch4 (i.e., before line 237), detect the empty-country case:
+   - If locale_str has an underscore at index 2 and another underscore at index 3 (locale_str[2] == '_' and locale_str[3] == '_'), then treat country = "" and variant = locale_str[4:].
+   - Validate nothing about country letters in that branch; just construct and return Locale(locale_str[0:2], "", locale_str[4:]).
+2. Only if that double-underscore case is not true, proceed to the existing logic that reads ch3 and ch4 and validates they are uppercase letters for a two-letter country.
+3. Also ensure you check length before accessing indices 3 or 4 to avoid IndexError for too-short inputs.
+
+Minimal example patch (conceptual, to be applied where lines 237–247 are):
+- Insert before ch3 = locale_str[3]:
+    if length >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+        # language__variant -> empty country
+        return Locale(locale_str[0:2], "", locale_str[4:])
+- Then keep the existing country-letter validation branch for the normal language_country and language_country_variant forms.
+
+This addresses exactly why "fr__POSIX" (and the other tests like "en__UNIX") failed: the code never checked for the double-underscore empty-country format and therefore rejected a perfectly valid input at the uppercase-letter check on line 239.

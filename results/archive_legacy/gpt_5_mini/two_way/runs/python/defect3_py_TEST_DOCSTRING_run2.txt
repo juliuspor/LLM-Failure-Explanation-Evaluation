@@ -1,0 +1,46 @@
+What happened
+- The tests fail because the translator code mishandles UTF-16 surrogate pairs when it advances the loop index. That leads to an IndexError or wrong output when a surrogate pair is followed by another character (your test input "\U0001F630A" — emoji then 'A').
+
+Where it occurs (methods & variables)
+- The bug is in the translate code path, specifically in CharSequenceTranslator.translate (the loop that walks the input) where the loop advances the index variable (commonly named i or index) after reading a code point.
+- The helpers involved are code_point_at(...) and to_utf16_code_units(...). code_point_at returns a Unicode code point for a surrogate pair, but the translate loop still advances the index by one code unit instead of by two.
+- In CsvEscaper.translate_string (the public test entrypoint) the translator calls CharSequenceTranslator.translate and the incorrect index advance triggers the failure you see in the test.
+
+Why it fails (root cause)
+- The translator treats the input as UTF-16 code units and reads a code point with code_point_at. When code_point_at consumes a surrogate pair it returns a single code point representing the pair. But after that, the translate loop increments the index by 1 (the size of one UTF-16 code unit) rather than by 2 (the size of the surrogate pair in UTF-16).
+- That means:
+  - If the surrogate pair is followed by another character, the loop can either:
+    - Re-read the low surrogate as if it were a separate code unit (wrong), or
+    - Advance beyond the string length (if logic tries to skip ahead later) and raise IndexError.
+- The failing test demonstrates exactly that: input_str = "\U0001F630A" is two UTF-16 code units for the emoji, then 'A'. After processing the emoji, the index should move two positions (past both UTF-16 code units) so the next iteration sees 'A'. Instead it advances incorrectly and the loop access goes wrong.
+
+Exactly where to change (concrete steps)
+1. In CharSequenceTranslator.translate, find the loop that reads a code point and then advances the index. It will look roughly like:
+   - codepoint = code_point_at(input_seq, index)
+   - ...handle codepoint...
+   - index += 1    # this is the bug when codepoint came from surrogate pair
+2. Replace the unconditional index += 1 with logic that advances by the number of UTF-16 code units consumed. Two possible specific fixes:
+   a) If code_point_at can tell you whether it consumed a surrogate pair, use that information:
+      - if consumed_surrogate_pair:
+            index += 2
+        else:
+            index += 1
+   b) Or detect surrogates yourself using the characters in input_seq:
+      - ch = input_seq[index]
+      - if is_high_surrogate(ch) and index + 1 < len(input_seq) and is_low_surrogate(input_seq[index + 1]):
+            # consume both UTF-16 units as one code point
+            index += 2
+        else:
+            index += 1
+   (is_high_surrogate and is_low_surrogate are simple numeric range checks on ord(ch) in 0xD800–0xDBFF and 0xDC00–0xDFFF.)
+3. Alternatively (and simpler in Python), iterate over Python code points (normal str iteration) instead of manual UTF-16 units. Python strings are sequences of Unicode code points; you can loop for ch in input_str and avoid surrogate handling entirely.
+
+Why these fixes work
+- Advancing by the actual number of UTF-16 code units consumed keeps the loop aligned with the remaining characters. The next loop iteration will see the next logical character ('A' in the failing test) instead of trying to read a stray surrogate or going out of bounds.
+
+Minimal tests to confirm the fix
+- Re-run the provided tests:
+  - "\U0001F630A" should now return the same string (no IndexError).
+  - Single emoji ("\U0001F600"), multiple emoji, emoji at end of string, mixed ASCII+emoji — all should be preserved.
+
+If you want, paste the specific translate loop (lines around the index increment) and I will show the exact line edits to make.

@@ -1,0 +1,22 @@
+The function fails because the code in hit01_timezone.for_offset_hours_minutes incorrectly handles the sign rules for hours and minutes and the zero-case mapping to UTC. Specifically:
+
+- Where it should treat (0, 0) as UTC (DateTimeZone.UTC), the implementation likely always constructs a new fixed-offset zone and returns an ID like "+00:00" instead of using the canonical DateTimeZone.UTC singleton. This makes the test test_zero_offset fail on identity/equality and get_id expectations (line: test_zero_offset, calls zone = DateTimeZone.for_offset_hours_minutes(0, 0), expects zone == DateTimeZone.UTC and get_id() == "UTC").
+
+- The code mixes sign handling for hours and minutes. The tests expect these rules (as exercised in test_negative_hours_negative_minutes and test_mixed_signs_invalid):
+  - When hours < 0, minutes should extend the negative magnitude regardless of minutes sign: for (-2, -15) and (-2, 15) the resulting offset must be -(2h + 15m) and the id "-02:15" (tests reference test_negative_hours_negative_minutes and the long docstring comments in test_mixed_signs_invalid). If the implementation simply multiplies hours by 3600000 and minutes by 60000 and adds them with their provided signs, (-2, 15) would produce -2h + 15m = -(7200000) + 900000 = -6300000 which is "-01:45", not "-02:15". That mismatch explains failing assertions in those tests.
+
+- Conversely, the implementation must raise ValueError for mixed-sign invalid inputs such as (2, -15) (test_mixed_signs_invalid). If the current code silently accepts minutes of opposite sign, the test expecting an exception will fail (line: with self.assertRaises(ValueError): DateTimeZone.for_offset_hours_minutes(2, -15)).
+
+- Range checks for hours and minutes must enforce hours in [-23, 23] and minutes in [-59, 59]. If the code only checks absolute minutes or fails to validate combinations (lines in test_out_of_range), tests for 24 hours or 60 minutes will fail.
+
+Where it occurred: inside hit01_timezone.for_offset_hours_minutes (referenced repeatedly in tests). Specific variables and methods involved: parameters hours_offset and minutes_offset passed to DateTimeZone.for_offset_hours_minutes; the function should compute total_millis = sign * (abs(hours)*3600000 + abs(minutes)*60000) using the hour sign, and return DateTimeZone.UTC when both are zero, otherwise return a fixed-offset DateTimeZone with id formatted "+HH:MM" or "-HH:MM". It must also raise ValueError for invalid mixed signs like (positive hour, negative minutes) and for out-of-range hour/minute values.
+
+Suggested concrete fixes (step list):
+1) Add explicit range checks: if not (-23 <= hours_offset <= 23): raise ValueError; if not (-59 <= minutes_offset <= 59): raise ValueError.
+2) Handle zero offset: if hours_offset == 0 and minutes_offset == 0: return DateTimeZone.UTC (ensures identity and id "UTC").
+3) Determine overall sign: if hours_offset < 0: sign = -1; elif hours_offset > 0: sign = +1; else: sign = -1 if minutes_offset < 0 else +1 for zero hours.
+4) Reject mixed-sign invalid case: if hours_offset > 0 and minutes_offset < 0: raise ValueError; if hours_offset < 0 and minutes_offset > 0: treat minutes as extending the negative magnitude per docstring (i.e., minutes_abs = abs(minutes_offset)).
+5) Compute total_millis = sign * (abs(hours_offset) * 3600000 + abs(minutes_offset) * 60000).
+6) Format id as "+HH:MM" or "-HH:MM" with two-digit hours and minutes (zero-padded). For zero offset use "UTC".
+
+This explains why tests fail and gives exact lines and variable names to inspect and change in hit01_timezone.for_offset_hours_minutes.

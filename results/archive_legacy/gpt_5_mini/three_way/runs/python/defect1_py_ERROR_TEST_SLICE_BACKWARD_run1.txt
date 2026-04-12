@@ -1,0 +1,63 @@
+What happened (where)
+- The test called DateTimeZone.for_offset_hours_minutes(...) with minutes = -15.
+- In hit01_timezone.py the code at lines 396–397 does this check:
+
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- That check raised ValueError: Minutes out of range: -15, which is the failure you saw.
+
+Why it happened (root cause)
+- The variable minutes_offset holds the minutes argument passed into for_offset_hours_minutes.
+- The condition minutes_offset < 0 incorrectly rejects any negative minutes outright.
+- But the tests (and the function docstring/expected behavior) allow negative minutes in some valid inputs (for example 0,-15 or -2,-15 or -23,-59). The intended range is minutes in [-59, +59], not only [0, 59].
+- Because the code uses minutes_offset < 0 rather than checking the lower bound -59, valid negative minute values like -15 are treated as out of range and cause the ValueError.
+
+Exactly where to look
+- File: hit01_timezone.py
+- Lines: 396–397 (the two-line range-check shown in your slice backward)
+
+Concrete fixes (step-by-step)
+1. Replace the incorrect check with a bounds check that allows negative minutes down to -59. For example:
+
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Additionally, enforce the intended sign/composition rules for hours vs minutes. The tests expect:
+   - (2, -15) should raise (positive hours with negative minutes invalid)
+   - (-2, 15) and (-2, -15) should both produce a negative offset (treated as -(2h + 15m))
+   - (0, -15) should be allowed (zero hours with negative minutes -> -00:15)
+
+   Implement explicit checks after the bounds check, for example:
+
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Minutes must not be negative when hours are positive")
+   if hours_offset < 0 and minutes_offset > 0:
+       # treat as extending the negative offset (or normalize to negative minutes)
+       minutes_offset = -minutes_offset
+
+   Or, alternatively, normalize sign by computing total minutes with sign logic:
+   total_minutes = hours_offset * 60 + (minutes_offset if hours_offset >= 0 else -abs(minutes_offset))
+   but be careful to preserve the documented behavior exactly.
+
+3. Run the test suite and adjust sign-normalization logic to match the docstring/expected IDs (e.g., for -2,15 produce -02:15).
+
+Minimal code patch (replace current range check):
+
+   # allow minutes in [-59..59]
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   # reject mixed-sign where hours positive but minutes negative
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("When hours is positive, minutes must be non-negative")
+
+   # normalize negative hours with positive minutes to negative minutes
+   if hours_offset < 0 and minutes_offset > 0:
+       minutes_offset = -minutes_offset
+
+Why this will fix the failing test
+- The test passed minutes = -15; the corrected bound check permits -15.
+- The additional sign handling enforces the intended combinations so other tests (e.g., (2,-15) raising) still behave as expected.
+
+If you want, I can draft a complete replacement of the function body showing exact normalization and id construction to match all tests.

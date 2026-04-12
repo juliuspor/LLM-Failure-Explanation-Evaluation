@@ -1,0 +1,57 @@
+What failed
+- The tests call DateTimeZone.for_offset_hours_minutes with negative minutes (e.g. (0, -15), (-2, -15)) and expect the method to accept them (and treat sign correctly).
+- The implementation currently rejects negative minute values unconditionally at lines 396–397:
+
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  That condition raises ValueError whenever minutes_offset is negative, so calls like for_offset_hours_minutes(0, -15) or for_offset_hours_minutes(-2, -15) fail there. The failure occurs inside DateTimeZone.for_offset_hours_minutes when it validates the minutes parameter (variable minutes_offset), not in the test code.
+
+Why it fails (root cause)
+- The code treats minutes_offset as valid only in [0, 59]. The tests (and the documented behavior you expect) allow minutes in the range -59..+59 and require special handling of sign combinations (e.g. negative hours + positive minutes should be treated as a negative total offset).
+- So the direct cause is the wrong validation range (minutes_offset < 0) in that if statement. Because minutes_offset is rejected before any sign-handling logic runs, several tests fail.
+
+Exactly where to change
+- In DateTimeZone.for_offset_hours_minutes, replace the check at lines 396–397 with a proper range test that allows negative minutes:
+  - Current lines:
+    396 |         if minutes_offset < 0 or minutes_offset > 59:
+    397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - Replace with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Other required sign-handling fixes (steps)
+1. After allowing minutes in [-59, 59], enforce valid sign combinations:
+   - If hours > 0 and minutes < 0: raise ValueError (mixed signs not allowed for positive hours).
+   - If hours < 0 and minutes > 0: convert minutes to negative so total offset is negative (or subtract minutes when computing total).
+   - If hours == 0, minutes can be positive or negative and the sign of minutes determines the sign of the offset.
+
+2. Compute total offset in milliseconds consistently:
+   - total_millis = hours * 3600000 + minutes * 60000
+   - Make sure minutes has the correct sign before computing total_millis (see step above).
+
+Concrete code sketch to implement (what to change and where)
+- Replace the two-line minutes range check with the range check allowing negatives, then add sign checks and compute millis. For example (pseudocode):
+
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+    # disallow mixed positive hours with negative minutes
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Mixed sign: positive hours with negative minutes")
+
+    # convert minutes to negative when hours negative and minutes positive
+    if hours_offset < 0 and minutes_offset > 0:
+        minutes_offset = -minutes_offset
+
+    total_millis = hours_offset * 3600000 + minutes_offset * 60000
+
+Why this fixes the failing tests
+- Tests that pass negative minutes (e.g. (0, -15), (-2, -15)) will no longer be rejected by the earlier range check.
+- Converting minutes when hours < 0 ensures (-2, 15) and (-2, -15) both produce a negative total offset -02:15 as your docstring/tests expect.
+- The explicit mixed-sign rejection keeps (2, -15) raising ValueError, as the tests expect.
+
+Summary
+- Root cause: wrong minutes validation at lines 396–397 (minutes < 0 rejected).
+- Fix: allow minutes in [-59, 59], then handle sign combinations (reject positive hours with negative minutes; make minutes negative when hours are negative and minutes positive), then compute total_millis as hours*3600000 + minutes*60000.
+- Change the two lines shown and add the sign-handling logic exactly where minutes are validated/used in DateTimeZone.for_offset_hours_minutes.

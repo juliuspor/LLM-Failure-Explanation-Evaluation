@@ -1,0 +1,54 @@
+What failed
+- The first failing assertion is in test_zero_offset():
+  self.assertEqual(zone, DateTimeZone.UTC)
+  That assertion fails even though the rest of the checks in that test (zone.get_id() == "UTC", zone.get_offset(0) == 0) pass.
+
+Why it fails (root cause)
+- The DateTimeZone.for_offset_hours_minutes(...) factory returns a new DateTimeZone instance representing UTC when called with (0, 0), instead of returning the predefined singleton DateTimeZone.UTC.
+- The test compares the two objects with assertEqual(zone, DateTimeZone.UTC). In the current implementation DateTimeZone does not implement equality by value (for example, comparing id or offset); Python falls back to identity comparison for objects. So zone and DateTimeZone.UTC are two distinct objects and the identity comparison fails even though their id and offset match.
+- In short: for_offset_hours_minutes(0, 0) constructs an equivalent object, but not the same singleton, and DateTimeZone has no __eq__ that would make them compare equal by content.
+
+Where it occurs in the code
+- In hit01_timezone.py inside DateTimeZone.for_offset_hours_minutes(...) (the factory function called by tests). After computing the total offset (hours + minutes → milliseconds) the code creates and returns a new DateTimeZone instance even when the offset is zero.
+- The symptom occurs at the assertEqual(zone, DateTimeZone.UTC) line in the test (test_zero_offset), but the root cause is the factory implementation described above.
+
+Two clear fixes (pick one)
+
+1) Preferred, minimal change — return the UTC singleton for zero offset
+- In DateTimeZone.for_offset_hours_minutes, after you compute the total offset (usually a variable like total_millis or offset_millis), add:
+
+    if offset_millis == 0:
+        return DateTimeZone.UTC
+
+- Place this check just before creating/returning a new DateTimeZone instance.
+- Why: it preserves the singleton semantics (DateTimeZone.UTC remains the single object representing UTC) and keeps tests expecting object-equality happy. This is the smallest change and matches typical library behavior.
+
+2) Alternative — implement value-based equality (less preferred here)
+- Implement DateTimeZone.__eq__(self, other) to compare meaningful fields (e.g., self.get_id() or self._offset_millis) so two different instances with same id/offset compare equal.
+- Also implement __hash__ if objects are to be hashable.
+- Example:
+
+    def __eq__(self, other):
+        if not isinstance(other, DateTimeZone):
+            return False
+        return self.get_id() == other.get_id()  # or compare offset
+
+- Why less preferred here: changing equality semantics has wider consequences (hashing, dictionary keys, ordering, and expectations about identity). Returning the UTC singleton is more targeted.
+
+Exact steps to implement fix #1
+1. Open hit01_timezone.py.
+2. Find DateTimeZone.for_offset_hours_minutes(...). After computing the offset in milliseconds (commonly named offset_millis, total_millis, or similar), insert:
+
+    if offset_millis == 0:
+        return DateTimeZone.UTC
+
+3. Keep the existing creation/return for non-zero offsets.
+4. Run the tests.
+
+Why this will make the test pass
+- test_zero_offset compares objects (zone == DateTimeZone.UTC). Returning the exact DateTimeZone.UTC object makes the identity comparison succeed. The other assertions (get_id and get_offset) remain valid.
+
+Extra note about other tests
+- The rest of your tests already check id and offset values and boundary/sign rules. Returning the singleton only when offset is exactly zero is safe and consistent with expectations; it won't change behavior for other offsets.
+
+If you want, paste the current body of for_offset_hours_minutes here and I’ll show exactly where to insert the check.

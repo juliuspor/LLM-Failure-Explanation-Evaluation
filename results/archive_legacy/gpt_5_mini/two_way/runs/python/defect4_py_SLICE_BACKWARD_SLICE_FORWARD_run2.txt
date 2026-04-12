@@ -1,0 +1,65 @@
+What happens
+- At line 340 the code checks self._min_start_index >= 0 and then loads min_start_period (line 341).
+- At line 342 it only sets min_start if min_start_period is a SimpleTimePeriod (lines 342–345).
+- At line 346 the code compares start < min_start, but if min_start_period was not a SimpleTimePeriod then min_start was never assigned. That raises an UnboundLocalError (variable referenced before assignment) at runtime.
+
+Where it occurs (exact lines)
+- min_start_period is assigned at line 341.
+- min_start is assigned only inside the isinstance branch at lines 342–345.
+- The comparison using min_start happens at line 346.
+- There is also an unconditional assignment to self._min_start_index at line 349 that looks wrong (see below).
+
+Why it fails (root cause)
+- The variable min_start can be undefined when the code reaches the comparison at line 346. The code assumes min_start was set, but it’s only set when min_start_period is a SimpleTimePeriod. For any other period type this leaves min_start unbound and causes an UnboundLocalError.
+- There is a second logic bug: line 349 sets self._min_start_index = index unconditionally right after the conditional that tries to set it only when start < min_start. That means the conditional at line 346 is effectively useless because line 349 will overwrite self._min_start_index regardless.
+
+Concrete fixes (step-by-step)
+1. Decide how to handle min_start_period values that are not SimpleTimePeriod:
+   - Either compute a min_start value for every possible period type, or
+   - Only perform the comparison when min_start_period is of a handled type and otherwise take a defined fallback action.
+
+2. Prevent the unbound variable error by ensuring min_start always exists before the comparison. Example option A (compare only when you have a valid min_start):
+   - Move the comparison inside the isinstance block, e.g.:
+     - if isinstance(min_start_period, SimpleTimePeriod):
+         min_start = ...
+         if start < min_start:
+             self._min_start_index = index
+     - else: do whatever is correct for other period types (no comparison or a different comparison).
+
+   This guarantees min_start is defined when used.
+
+3. Fix the unconditional overwrite at line 349. If the intent was to set _min_start_index either because there was no previous min or because start is smaller, change the code to use an else or adjust logic. Example option B (maintain previous intent):
+   - if self._min_start_index < 0:
+         self._min_start_index = index
+     else:
+         min_start_period = ...
+         if isinstance(min_start_period, SimpleTimePeriod):
+             min_start = ...
+             if start < min_start:
+                 self._min_start_index = index
+
+   This avoids always replacing the stored minimum index.
+
+4. Normalize how start/min_start are computed:
+   - The code shows two different ways of getting milliseconds (get_start_millis() vs int(get_start().timestamp()*1000)). Pick one approach for each period type and implement it consistently. If some period types expose get_start_millis(), call that; otherwise convert timestamp to millis but ensure the branch covers all cases that will be encountered.
+
+Minimal patch example (keeps original behavior for SimpleTimePeriod only):
+- Replace the block from line 340–349 with:
+
+  if self._min_start_index < 0:
+      self._min_start_index = index
+  else:
+      min_start_period = self.get_data_item(self._min_start_index).get_period()
+      if isinstance(min_start_period, SimpleTimePeriod):
+          min_start = min_start_period.get_start_millis()  # or use timestamp() * 1000 consistently
+          if start < min_start:
+              self._min_start_index = index
+      else:
+          # define intended behavior for non-SimpleTimePeriod types:
+          # either skip comparison or implement equivalent min extraction
+
+Why this patch fixes it
+- It guarantees min_start is defined before it’s used (no UnboundLocalError).
+- It prevents overwriting _min_start_index unconditionally, restoring the intended conditional update semantics.
+
+If you share what other period types can appear (what .get_period() can return), I can give a precise fix that covers those types and a one-line patch you can paste in.

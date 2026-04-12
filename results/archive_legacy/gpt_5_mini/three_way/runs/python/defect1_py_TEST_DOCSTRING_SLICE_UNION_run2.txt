@@ -1,0 +1,63 @@
+What failed
+- The tests fail because the function rejects any negative minutes before handling the sign combinations allowed by the docstring.
+- Exact location: the early range check at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This unconditionally forbids negative minute values, but the docstring and tests allow negative minutes when hours are zero or negative (examples: (0, -15), (-2, -15), and (-2, 15) should be handled as negative total offsets).
+
+Why that causes the failing tests
+- Tests that pass a negative minutes_offset (e.g. DateTimeZone.for_offset_hours_minutes(0, -15), (-2, -15), (-2, 15) etc.) hit the check at line 396 and get a ValueError immediately. The function never reaches the later logic (lines around 402–405) that tries to combine hours and minutes into a total offset. So any test expecting negative-minute behavior fails with the wrong error.
+
+Other suspicious code you pointed to
+- Lines 402 and 404:
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 404 |                 minutes_offset = hours_in_minutes + minutes_offset
+  These lines suggest the function is trying to form an offset in minutes by combining hours_in_minutes and minutes_offset, but because negative minutes are already banned at 396, those branches never get the intended inputs. Even if negative minutes were permitted, those expressions are fragile and easy to mis-handle signs — it's clearer and safer to explicitly compute total_minutes from hours and minutes following the sign rules in the docstring.
+
+What happened (concise root cause)
+- Root cause: the validation at line 396 is too strict (forbids minutes_offset < 0). This contradicts the documented allowed inputs and prevents correct negative-offset handling. The function therefore raises ValueError for legitimate inputs that should produce negative offsets.
+
+Concrete steps to fix (specific edits and exact logic)
+1. Change the minutes range check to allow negative minutes in range -59..+59:
+   - Replace the line 396 check with:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the “mixed sign” rule from the docstring:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (positive hours with negative minutes is invalid).
+   - All other sign combinations are valid (hours negative with positive or negative minutes, zero hours with positive/negative minutes).
+
+3. Compute total minutes explicitly and defensibly:
+   - Use this formula (pseudocode you can paste in):
+       if hours_offset < 0:
+           total_minutes = hours_offset * 60 - abs(minutes_offset)
+       else:
+           # covers hours_offset > 0 and hours_offset == 0
+           total_minutes = hours_offset * 60 + minutes_offset
+     Explanation:
+       - For hours < 0, the minutes extend the negative magnitude (per doc: (-2, 15) -> -02:15).
+       - For hours > 0, minutes must be >= 0 and simply add.
+       - For hours == 0, the minutes' sign determines the offset.
+
+4. Enforce the maximum magnitude after computing total_minutes:
+   - Check abs(total_minutes) <= 23 * 60 + 59 (or whatever the precise limit is in your code) and raise ValueError if exceeded (this matches the doc note and the existing later "Offset is too large" check around line 407).
+
+5. Convert minutes to millis and return:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Why these exact changes
+- They implement the docstring rules:
+  - minutes must be in -59..59 (line 396 change),
+  - positive hours cannot combine with negative minutes (explicit check),
+  - negative hours combine with minutes to produce a larger negative magnitude (explicit total_minutes logic),
+  - zero hours take minutes’ sign.
+- They remove the early blanket rejection of negative minutes that produced the failing ValueError.
+
+Where to change in file (line references)
+- Replace the check at line 396.
+- Add the mixed-sign validation right after the range check.
+- Replace the code branches around lines 402–405 with the explicit total_minutes calculation above.
+- Keep or reuse the later "Offset is too large" check (line ~407), but apply it to total_minutes converted to milliseconds.
+
+If you want, I can supply the exact patch (diff) showing these edits.

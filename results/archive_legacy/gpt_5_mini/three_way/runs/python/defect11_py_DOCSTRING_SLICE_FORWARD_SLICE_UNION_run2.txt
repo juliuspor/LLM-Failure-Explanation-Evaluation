@@ -1,0 +1,41 @@
+What happens
+- At line 56 you pick a random code point: ch = chr(start + _RANDOM.randrange(gap)).
+- At line 57 you only append ch when it matches the requested kind(s):
+  if (letters and ch.isalpha()) or (numbers and ch.isdigit()) or (not letters and not numbers):
+- If the numeric interval [start, end) (gap = end - start) contains no characters that satisfy those tests, the if at line 57 will never be true. The code that fills buffer (line 58) will never run, so the outer loop that generates characters will never make progress (in practice this manifests as an infinite loop or a function that never returns).
+
+Why that is the root cause
+- The code separates selecting a random code point (lines 49–56) from testing whether that point matches letters/numbers (line 57), but it never guarantees the chosen interval actually contains any valid letters or digits.
+- Example concrete failure: caller passes start=48, end=58 (the ASCII digits '0'–'9') but sets letters=True and numbers=False. gap > 0 so no ValueError is raised, but randrange will only pick digits and a digit never satisfies ch.isalpha(), so the if at line 57 is always false and buffer.append(ch) on line 58 is never reached.
+- This can also happen for other ranges (e.g., non-letter Unicode blocks), so the failure is deterministic whenever the requested character type(s) and the start/end range do not overlap.
+
+Where it occurs
+- The root mismatch occurs between:
+  - gap calculation and random selection: gap = end - start (line 49 and 56)
+  - the acceptance test: the if at line 57
+- The observable failure is that line 58 is never executed because the condition at line 57 never becomes true for the chosen range.
+
+How to fix it (explicit steps)
+1. Validate the input range before entering the loop:
+   - Build or test whether there exists at least one code point between start (inclusive) and end (exclusive) that satisfies the chosen masks (letters/numbers).
+   - If none exists, raise a ValueError describing the mismatch (for example: "no characters of requested type in given range").
+
+2. Or change selection strategy:
+   - If letters or numbers is requested, choose characters from a prefiltered candidate list instead of picking blindly from the numeric range. Example steps:
+     a. Create a list candidates = [chr(cp) for cp in range(start, end) if (letters and chr(cp).isalpha()) or (numbers and chr(cp).isdigit()) or (not letters and not numbers)].
+     b. If candidates is empty, raise ValueError.
+     c. Use _RANDOM.choice(candidates) (or pick by index) to choose each char and append it.
+
+3. Or adjust default range logic so it always targets a range known to contain requested types (for example ASCII letters when letters=True), but still validate the final intersection if caller supplied a custom start/end.
+
+Which variables/methods you must check/modify
+- start and end (input range)
+- letters and numbers (requested masks)
+- gap (end - start) — current code checks only gap <= 0; you must also check "no valid code points in range".
+- The acceptance test at line 57 and the place you select characters (line 56 / buffer.append at line 58).
+
+A minimal example check to add before the loop
+- Compute candidates_exists = any((letters and chr(cp).isalpha()) or (numbers and chr(cp).isdigit()) or (not letters and not numbers) for cp in range(start, end))
+- If not candidates_exists: raise ValueError("no characters of requested type in given start/end range")
+
+That will prevent the infinite loop and give a clear error explaining why the request cannot be satisfied.

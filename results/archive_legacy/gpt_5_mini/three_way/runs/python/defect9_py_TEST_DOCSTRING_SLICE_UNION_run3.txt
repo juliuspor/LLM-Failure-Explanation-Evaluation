@@ -1,0 +1,47 @@
+What happens
+- The routine tries to use len(...) and text.find(...) on elements of search_list and replacement_list before checking whether those elements are None.
+- As a result, when a replacement_list or search_list element is None you get a TypeError (len(None) or text.find(None, ...)), so the function crashes instead of ignoring that replacement.
+
+Where it occurs (line numbers refer to the slice you provided)
+1. Lines 81–85
+   - Code: greater = len(replacement_list[i]) - len(search_list[i])
+   - Problem: If replacement_list[i] or search_list[i] is None, len(...) raises TypeError right here. This happens before any "null-safety" checks, so the function crashes for inputs like replacement_list = [None].
+2. Lines 102–108
+   - Existing null-safety checks appear at 102–105:
+       no_more_matches_for_repl_index[i]
+       or search_list[i] is None
+       or len(search_list[i]) == 0
+       or replacement_list[i] is None
+     but these checks are used to skip candidates only inside the matching loop.
+   - Immediately after those checks, the code does:
+       temp_index = text.find(search_list[i], start)
+     If search_list[i] is None you again get a TypeError here. The logic is fragile because use of len(...) and find(...) happens in places that assume items are non-None.
+
+Why this is the root cause
+- The intention (per docstring and tests) is to ignore None entries in search_list/replacement_list. The code does have checks intended to skip None entries, but those checks come too late — after operations that require non-None strings (len(...) and text.find(...)). So the presence of None triggers an exception before the code ever reaches the skipping logic.
+
+Concrete example that fails
+- Call replace_each("aba", ["a"], [None]).
+- At line 82 the code executes len(replacement_list[0]) -> len(None) -> TypeError: object of type 'NoneType' has no len().
+
+How to fix (explicit steps)
+1. Protect any use of len(...) on list elements:
+   - At lines 81–85 compute greater only after verifying both replacement_list[i] and search_list[i] are not None and search_list[i] is not empty. For example:
+     if replacement_list[i] is not None and search_list[i] is not None and len(search_list[i]) > 0:
+         greater = len(replacement_list[i]) - len(search_list[i])
+         ...
+     else:
+         continue
+2. Avoid calling text.find(...) with None:
+   - Before temp_index = text.find(search_list[i], start) (line 108), ensure search_list[i] is a non-empty string:
+     if search_list[i] is None or len(search_list[i]) == 0:
+         no_more_matches_for_repl_index[i] = True
+         continue
+     temp_index = text.find(search_list[i], start)
+3. Keep the existing skip flags (no_more_matches_for_repl_index) but ensure checks that could raise (len or find) never run for None entries. That means reordering logic so the None/empty checks are always performed before any use of len(...) or text.find(...).
+
+Minimal change patch sketch
+- Replace the "greater = len(...)" block with one that first checks for None/empty.
+- Insert a guard before text.find(...) to skip or mark as done any search_list[i] that is None or empty.
+
+That will ensure None entries are ignored exactly as the tests and docstring expect, and will prevent the TypeError crashes.

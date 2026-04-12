@@ -1,0 +1,52 @@
+What happened (root cause)
+- The bug is a mismatch between what translate_codepoint(...) returns (the meaning of consumed) and how the loop advances pos after that. The code treats consumed as “how many codepoints the translator handled” but then advances pos in units of UTF‑16 code units using char_count(code_point_at(...)), which double‑counts when the translator already reported code units (or vice versa). That causes pos to move too far (skipping characters) or incorrectly (leading to wrong output or an infinite loop).
+
+Where it occurs (exact places)
+- The call that decides how far to advance: consumed = self.translate_codepoint(code_units, pos, out) (inside translate).
+- The advancement loop that follows:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The helper that reads a code point from UTF‑16 units is code_point_at(code_units, index) (slice shows its lines 38–44). code_point_at returns a single Unicode code point by looking at a high surrogate + low surrogate pair and returns either a full supplementary code point (taking two code units) or a single code unit value.
+
+Why that fails (concrete example)
+- Suppose at pos there is a supplementary character encoded as a surrogate pair (two UTF‑16 code units). If translate_codepoint consumes that pair and returns consumed = 2 (interpreting “consumed” as 2 code units), the for-loop will run twice:
+  - First iteration: code_point_at(code_units, pos) sees the surrogate pair and returns the full code point; char_count(...) returns 2; pos += 2 moves pos past the pair.
+  - Second iteration: pos now points after the pair; the loop runs again and advances further — so the net effect is pos advanced by 4 units, skipping the next character(s).
+- Or the inverse can happen: if translate_codepoint returns consumed = 1 (meaning one codepoint) but the loop uses char_count and sees a surrogate pair and adds 2, pos advances by 2 when the translator intended 1 unit — again inconsistent behavior.
+- In short: consumed’s unit (codepoints vs. UTF‑16 code units) does not match how pos is incremented using code_point_at + char_count. That mismatch corrupts the position handling and breaks translation.
+
+How to fix it (concrete steps)
+Pick one clear contract and implement it consistently. Two safe options:
+
+Option A — Make consumed represent UTF‑16 code units (simpler)
+1. Change the contract/documentation: translate_codepoint(...) must return the number of UTF‑16 code units it consumed (1 or 2).
+2. Replace the post‑consume loop with a single increment by consumed:
+   - Remove the for pt in range(consumed) loop.
+   - Do: pos += consumed
+3. Ensure all implementations of translate_codepoint(...) are updated to return code unit counts.
+
+Option B — Make consumed represent codepoints (current loop intent) and keep per‑codepoint logic
+1. Ensure translate_codepoint(...) returns the number of Unicode codepoints consumed (not code units).
+2. Keep the for pt in range(consumed) loop, but advance pos inside that loop using char_count(code_point_at(code_units, pos)) exactly once per codepoint — which is what the loop intends. (If implementations already return codepoint counts, no change to pos update is needed.)
+3. Verify all translate_codepoint implementations follow the new contract.
+
+Which to choose
+- If your translate_codepoint implementations already treat surrogate pairs as a single consumed value 2 (i.e., return code units), pick Option A and change the loop to pos += consumed.
+- If they were written to return counts in codepoints, pick Option B and update implementations that currently return code units.
+
+Minimal concrete code change for Option A (replace the loop)
+- Replace these lines:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with:
+    pos += consumed
+
+Verify
+- After making the change, run tests with:
+  - BMP characters (single code unit)
+  - Supplementary characters (surrogate pairs)
+  - Mixed strings
+- Confirm no characters are skipped and no infinite loops occur.
+
+Summary
+The failure is caused by a unit mismatch: consumed is interpreted inconsistently (codepoints vs. UTF‑16 code units). Fix by choosing one contract (preferably “consumed is code units”) and advancing pos by that many code units (pos += consumed) or by making all translators return codepoint counts and keeping the per‑codepoint advancement.

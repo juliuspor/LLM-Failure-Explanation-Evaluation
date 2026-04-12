@@ -1,0 +1,55 @@
+What fails
+- The calculation inside the try block (lines shown below) incorrectly combines hours and minutes when hours are negative. The code mutates minutes_offset and uses the sign of hours only:
+
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+
+- For input (-2, -15) you expect total minutes = -(2*60 + 15) = -135. The code computes:
+  hours_in_minutes = -120
+  minutes_offset = hours_in_minutes - (-15) = -120 + 15 = -105
+  so the result is -105 minutes (i.e. -01:45) instead of -135 minutes. This causes your test test_negative_hours_negative_minutes to fail.
+
+Why it happens (root cause)
+- The branch only tests the sign of hours (hours_in_minutes < 0) and then subtracts the supplied minutes_offset when hours are negative. That operation is only correct if the supplied minutes_offset is positive (e.g. (-2, 15) -> -120 - 15 = -135). It is wrong when minutes_offset is negative because subtracting a negative adds instead of making the magnitude larger.
+- In short: the code treats minutes_offset both as input minutes and as the accumulator, and uses the wrong sign logic when hours are negative and minutes are negative.
+
+Where it occurs
+- In the try block that starts with hours_in_minutes = hours_offset * 60 and the subsequent if hours_in_minutes < 0 branch. Those lines produce the incorrect total minutes value for negative hours paired with negative minutes.
+
+Concrete fix (step-by-step)
+1. Do not reuse minutes_offset as the accumulator. Introduce a new variable total_minutes.
+2. Decide sign rules explicitly:
+   - If hours_offset > 0 and minutes_offset < 0: this combination is invalid per your tests -> raise ValueError.
+   - If hours_offset < 0: treat the total as negative magnitude: total_minutes = hours_in_minutes - abs(minutes_offset).
+     This makes both (-2, 15) and (-2, -15) result in -135 minutes as your doc/tests expect.
+   - If hours_offset == 0: total_minutes = minutes_offset (allow positive or negative minutes).
+   - If hours_offset > 0: total_minutes = hours_in_minutes + minutes_offset (minutes_offset must be >= 0 because of the check above).
+
+3. Multiply total_minutes by MILLIS_PER_MINUTE and proceed.
+
+Example corrected snippet (replace the try-block body):
+    try:
+        hours_in_minutes = hours_offset * 60
+        # Mixed-sign validation: positive hours with negative minutes is invalid
+        if hours_offset > 0 and minutes_offset < 0:
+            raise ValueError("Positive hours with negative minutes is not allowed")
+        if hours_offset < 0:
+            total_minutes = hours_in_minutes - abs(minutes_offset)
+        else:
+            # hours_offset >= 0 covers hours == 0 and positive hours
+            total_minutes = hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Why this will pass your tests
+- For (-2, -15): hours_in_minutes = -120, total_minutes = -120 - 15 = -135 -> correct.
+- For (-2, 15): hours_in_minutes = -120, total_minutes = -120 - 15 = -135 -> matches doc/tests.
+- For (2, -15): hours_offset > 0 and minutes_offset < 0 triggers ValueError -> matches expected failure.
+- For (0, ±15) and (2, 0) etc., logic yields correct sums.
+
+Additional note
+- Keep validation for minutes range (-59..59) and hours range (-23..23) as you already do. Ensure you do not reassign the input minutes_offset before validation or use it as both input and accumulator.

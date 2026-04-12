@@ -1,0 +1,56 @@
+What happened (what failed)
+- The IndexError is raised in to_utf16_code_units (check at lines 35–36) because some code later calls into the UTF‑16 code units list with an index that is out of range.
+- The root mismatch is an index-space mixup: code is mixing two different indexing units (Python string code points vs. UTF‑16 code units) and advances the index using one unit-size while using it to access the other.
+
+Why it fails (root cause, where)
+- to_utf16_code_units builds a list named code_units (line 10) containing UTF‑16 code units. A single Unicode character outside the BMP (an emoji like \U0001F630) becomes two UTF‑16 code units in that list.
+- Elsewhere (in CsvEscaper.translate_string / CharSequenceTranslator.translate), the code iterates/advances an index based on Python string positions (one step per Python code point). But it then uses that same index to access code_units. After seeing a surrogate pair the translator advances the index by 1 (because Python counts the emoji as one character) while the corresponding position in code_units needs two steps. That leaves the index pointing past the end of code_units.
+- Concretely for your failing test input "\U0001F630A":
+  - Python string positions: [0]=emoji (one code point), [1]='A' (so len==2).
+  - UTF‑16 code_units list: emoji -> two units, then 'A' -> one unit (so len(code_units)==3).
+  - The translator logic advances an index in the Python/code-point space but then uses that same index to read code_units; after handling the emoji the index used against code_units is wrong and triggers the "String index out of range: 2" check at lines 35–36 (index 2 is outside the expected range for the code path that produced a shorter code_units or used a different indexing convention).
+- In short: the code advances the index in the wrong unit (code points) but accesses the data in UTF‑16 code units. That inconsistent indexing causes the out-of-range access.
+
+Exactly where to look
+- to_utf16_code_units (definition starts at line 10) — produces code_units list.
+- The bounds check raising the exception is at lines 35–36:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+- The translator method that iterates and advances the index (CsvEscaper.translate_string / CharSequenceTranslator.translate) is the caller that mixes the two index spaces. Look for code that:
+  - Converts string to UTF‑16 code units once,
+  - Then iterates the original Python string with an index variable and uses that same index to access code_units,
+  - Or increments index by 1 when it should increment by 2 to skip a surrogate pair in the code_units list.
+
+How to fix it (clear, ordered steps)
+1. Pick one indexing unit and use it consistently:
+   - Option A (recommended): Work entirely in Python code points (i.e., do not convert the string to UTF‑16). Operate on Python str characters; that avoids surrogate-pair bookkeeping entirely.
+   - Option B: If you need UTF‑16 code units, iterate over the code_units list itself and maintain a separate index for it. Do not reuse the Python-string index to access code_units.
+2. If you must convert to UTF‑16, introduce two indices:
+   - i_codepoint for iterating original Python characters (increments by 1 per character),
+   - i_unit for indexing code_units (increments by 1 per UTF‑16 unit; when you consume a surrogate pair you advance i_unit by 2).
+   - Always use i_unit when reading from code_units and advance i_unit according to how many code units were consumed.
+3. Alternatively, use a helper that maps codepoint indices to UTF‑16 unit offsets and always translate between the two before indexing code_units.
+4. Add unit tests that assert behavior for:
+   - emoji followed by another character (your failing test),
+   - single emoji,
+   - multiple emojis in a row,
+   - emoji at end of string,
+   so you ensure the index handling covers all cases.
+
+Minimal code change example (conceptual)
+- If current loop is:
+    for index in range(len(s)):            # Python code points
+        cu = code_units[index]             # WRONG: index is codepoint index
+  Change to:
+    i_unit = 0
+    while i_unit < len(code_units):
+        cu = code_units[i_unit]
+        # decide how many UTF-16 units this character used (1 or 2), then:
+        i_unit += unit_count
+
+Why this fix works
+- It removes the mismatch: the index used to access code_units is advanced in the same unit space as code_units are measured. That prevents accessing code_units with an index produced by Python code-point counting, eliminating the IndexError.
+
+If you want, I can:
+- Inspect your CsvEscaper.translate_string implementation and show the exact lines to change, or
+- Provide a concrete patch that uses code-point iteration only (simpler) and passes the provided tests.

@@ -1,0 +1,57 @@
+What happened (what the error message means)
+- The code raised ValueError: Minutes out of range: -15 because the variable minutes_offset contains -15 when the program reaches the validation that complains about an out-of-range minute value.
+- That negative minute value is not allowed by the later logic (the code expects minutes_offset to be a non‑negative number of minutes within a valid range before it converts to milliseconds).
+
+Where it happened (exact lines and names)
+- At line 402 the code assigns: minutes_offset = hours_in_minutes - minutes_offset
+- At line 404 it then assigns: minutes_offset = hours_in_minutes + minutes_offset
+- At line 405 it uses minutes_offset to compute offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- At line 408 it returns cls.for_offset_millis(offset)
+- The error originates because minutes_offset has an incorrect negative value (-15) by the time it is used at line 405.
+
+Why it happened (root cause)
+- The code overwrote minutes_offset twice in succession with two different formulas, which is logically wrong. Specifically:
+  - First (line 402) minutes_offset is set to hours_in_minutes - minutes_offset. That suggests the intent was to combine an hours part (hours_in_minutes) with a minutes part stored in minutes_offset, but this subtraction can produce a negative minutes_offset if minutes part > hours_in_minutes.
+  - Immediately afterward (line 404) minutes_offset is set again to hours_in_minutes + minutes_offset. Because minutes_offset was just changed by line 402, line 404 is adding hours_in_minutes to that already-modified value, producing the wrong result (and in your failing case, producing -15).
+- In short: line 402 mutates minutes_offset into an intermediate wrong value, and line 404 uses that wrong intermediate value instead of the original minute component. The two lines together do not compute the intended total minutes; they corrupt the minutes value and can produce negative minute totals such as -15.
+
+Concrete example (to show how -15 can appear)
+- Suppose hours_in_minutes = 0 (0 hours) and the parsed minute component was 15, initially stored in minutes_offset = 15.
+- Line 402: minutes_offset = hours_in_minutes - minutes_offset → minutes_offset = 0 - 15 = -15
+- Line 404: minutes_offset = hours_in_minutes + minutes_offset → minutes_offset = 0 + (-15) = -15
+- The code then multiplies -15 by millis-per-minute and later triggers the "Minutes out of range: -15" validation.
+
+Exactly what to change (step-by-step fixes)
+1. Preserve the original minute component in a separate variable instead of overwriting it before you finish computing the total:
+   - Introduce a variable name for the parsed minute part, e.g. parsed_minutes.
+2. Compute the total minute offset in one correct expression using the intended sign:
+   - If the intent is to combine hours and minutes of the same sign, use:
+     minutes_offset = hours_in_minutes + parsed_minutes
+   - If the intent is to apply minutes with opposite sign to hours (rare), use a clearly named sign variable and do:
+     minutes_offset = hours_in_minutes + sign * parsed_minutes
+3. Remove the redundant/misleading line 402 or change it so it does not destructively reuse minutes_offset.
+4. Validate parsed_minutes is in the range 0..59 before combining:
+   - if not (0 <= parsed_minutes <= 59): raise ValueError(f"Minutes out of range: {parsed_minutes}")
+5. After computing minutes_offset, keep the existing multiplication and return:
+   - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Suggested replacement code (pseudocode mapped to the lines)
+- Before (lines 402–405):
+  402 | minutes_offset = hours_in_minutes - minutes_offset
+  404 | minutes_offset = hours_in_minutes + minutes_offset
+  405 | offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- After (corrected):
+  402 | parsed_minutes = minutes_offset  # preserve parsed minute part
+  403 | if parsed_minutes < 0 or parsed_minutes >= 60:
+  404 |     raise ValueError(f"Minutes out of range: {parsed_minutes}")
+  405 | minutes_offset = hours_in_minutes + parsed_minutes
+  406 | offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Tests to add
+- Test with hours_in_minutes = 0, parsed_minutes = 15 → minutes_offset should be 15 (no error).
+- Test with hours_in_minutes = 60 (1 hour), parsed_minutes = 30 → minutes_offset should be 90.
+- Test with parsed_minutes = -1 and parsed_minutes = 60 → should raise ValueError with the parsed minute value reported (not a combined negative).
+
+Summary
+- The code fails because lines 402 and 404 mutate minutes_offset in the wrong order and thus compute a negative minute total (-15). Fix by preserving the parsed minute part in a separate variable, validate it (0..59), then compute minutes_offset once with the correct arithmetic before converting to milliseconds.

@@ -1,0 +1,64 @@
+What happened (where it fails)
+- At lines 449–451 you return self._max_middle_index from get_max_middle_index(), but nowhere in the shown slice is that value updated. Because the docstring says “Update the index values for the maximum and minimum bounds,” the caller expects the class to maintain (and change) _max_middle_index, yet get_max_middle_index only reads it (lines 449–451).
+- Practical failures you will see:
+  - AttributeError: If __init__ does not set self._max_middle_index, calling get_max_middle_index() at runtime will raise "AttributeError: 'X' object has no attribute '_max_middle_index'".
+  - Wrong result (stale/None): If __init__ sets self._max_middle_index = None or to a default but no code ever updates it, get_max_middle_index() will return None or a default that is not the actual max index, causing logic that relies on it to be incorrect.
+
+Why it happens (root cause)
+- The root cause is that there is no code that updates the instance variable self._max_middle_index (and likewise _min_middle_index if present). The getter at lines 449–451 is only a reader; the update responsibility must be implemented elsewhere but is missing or misnamed.
+- Common concrete mistakes that cause this:
+  - No assignment to self._max_middle_index in __init__ or in any update method.
+  - An update method exists but assigns to a local variable max_middle_index (no self.) so the instance variable never changes.
+  - The update method has a different name or signature than the caller expects, so it is never invoked.
+  - The variable is updated on a different object or in a different scope (shadowing).
+
+Where to look (exact places to check)
+1. __init__ of this class — verify there is an assignment like:
+   - self._max_middle_index = -1 (or None or 0 as appropriate)
+2. Any method that should change max/min bounds (names to search for in the class):
+   - methods named update_..., add_period, push_period, recalc_bounds, or any method that handles new periods
+   - ensure those methods assign to self._max_middle_index (not to a local variable max_middle_index).
+3. Call sites — check places that add or modify periods to ensure they call the update code after changing data.
+
+Concrete steps to fix (exact steps)
+1. Initialize the variable in __init__:
+   - Add: self._max_middle_index = -1 (or an appropriate sentinel) and self._min_middle_index = -1
+2. Ensure the update logic exists and updates the instance attribute:
+   - If you intend to update when adding a new period, in the add_period (or equivalent) method add code such as:
+     - if new_period.middle_ms > self._max_middle_ms: 
+         self._max_middle_ms = new_period.middle_ms
+         self._max_middle_index = index   # use self.
+     - (Do the same for min)
+   - Important: use self._max_middle_index, not max_middle_index (no leading self).
+3. If you have a separate update method, ensure it is called:
+   - If the method is named update_bounds(period, index) per your docstring, implement it:
+       def update_bounds(self, period, index):
+           if period.middle_ms > self._max_middle_ms:
+               self._max_middle_ms = period.middle_ms
+               self._max_middle_index = index
+           if period.middle_ms < self._min_middle_ms:
+               self._min_middle_ms = period.middle_ms
+               self._min_middle_index = index
+   - Then call self.update_bounds(period, index) wherever periods are added/changed.
+4. Add assertions or defensive checks:
+   - At the start of get_max_middle_index(), optionally assert self._max_middle_index is not None or -1, or raise a clear ValueError with message "max index not set" so failures point to the real cause.
+5. Search for accidental shadowing:
+   - Grep the class for assignments to _max_middle_index and verify every assignment uses self._max_middle_index. If you find plain “_max_middle_index = …” that creates a local/global, not the instance attribute.
+
+Example minimal code change (precise):
+- In __init__:
+    self._max_middle_index = -1
+    self._max_middle_ms = float("-inf")
+    self._min_middle_index = -1
+    self._min_middle_ms = float("inf")
+- In the method that processes a period (replace names with the real ones in your class):
+    if period.middle_ms > self._max_middle_ms:
+        self._max_middle_ms = period.middle_ms
+        self._max_middle_index = index
+
+Why these steps fix it
+- Initializing prevents AttributeError and provides a known sentinel.
+- Updating self._max_middle_index in the places that change data guarantees get_max_middle_index() returns a current, correct index rather than a stale default or None.
+- Using self._max_middle_index avoids accidental local variable shadowing.
+
+If you share the class __init__ and the methods that add or update periods (the code that should update the bounds), I can point to the exact line where the missing assignment or shadowing occurs and show the minimal patch.

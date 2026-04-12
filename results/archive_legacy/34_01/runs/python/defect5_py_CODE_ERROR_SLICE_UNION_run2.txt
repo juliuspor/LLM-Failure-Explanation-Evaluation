@@ -1,0 +1,42 @@
+What happened (root cause)
+- You meant inferred_type to be the element type (the T inside the list), but on line "inferred_type = type(array)" you are taking the Python type of the list object itself, not the element type.
+- type(array) returns something like <class 'list'> (a container type), not the element class (e.g. <class 'str'>). Passing that wrong type into ArrayUtils._copy_list_grow1 causes the copy/grow helper to allocate or treat the array as an Object[] (or otherwise produce a mismatched element-array type). That mismatch is what ultimately triggers the TypeError you see:
+  "Cannot cast object list to str list (ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;)"
+- The raise on lines 346–347 only fires when inferred_type == object and expected_type != object; but the real failure can occur earlier (or later) when the helper or JVM-level code expects element-type arrays. The immediate bug is the wrong inferred_type value.
+
+Where it occurs (specific lines / variables)
+- Line with inferred_type = type(array): this is the wrong value — it uses the list object type, not the element type.
+- Line with inferred_type = type(element) (elif element is not None) is correct in intent; it will be used only if array is None.
+- The code then calls new_list = ArrayUtils._copy_list_grow1(array, inferred_type) with that incorrect inferred_type.
+- The TypeError you saw comes from the mismatch created by passing the wrong inferred_type into the copy/grow helper and (later) trying to treat an Object[] as a String[] (or vice versa). The check at lines 346–347 is insufficient to catch the wrong-case because the wrong inferred_type can be something other than object.
+
+Why this leads to the ClassCastException message
+- The copy/grow helper allocates or returns an array typed for the inferred_type you supplied. If inferred_type doesn't represent the element type (for example you passed the list class or object), the internal representation becomes incompatible with expected_type (e.g. expected_type == str), so a cast fails when the code tries to treat the result as a str[] — producing the Java-style ClassCastException text in your TypeError.
+
+How to fix it (explicit steps)
+1. If array is not None and contains elements, derive the inferred_type from an element, not from the list:
+   - if array and len(array) > 0: inferred_type = type(array[0])
+   - else fall back to element or expected_type or object
+2. Prefer expected_type when it is provided and specific (non-object), because the caller has told you the intended element type:
+   - if expected_type is not None: use expected_type as inferred_type unless you can prove a more specific element type from array or element
+3. Only use type(array) if array is not a container of elements but an element itself (not applicable here).
+
+Concrete replacement (one safe approach)
+- Replace the initial inference block with something like:
+    if expected_type is not None and expected_type is not object:
+        inferred_type = expected_type
+    elif array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+- Then call ArrayUtils._copy_list_grow1(array, inferred_type) and keep the existing final check (adjusted if you prefer to raise earlier).
+
+Why this fix works
+- It ensures inferred_type actually represents the element class (e.g. str), so the copy/grow helper and any downstream casts will create/expect compatible array types and you will not get the Object[] vs String[] ClassCastException.
+
+Summary
+- Bug: using type(array) returns the list class, not the contained element type, so downstream code allocates/uses the wrong array element type and a cast fails.
+- Fix: infer element type from array[0], from element, or from expected_type (in that priority), instead of using type(array).

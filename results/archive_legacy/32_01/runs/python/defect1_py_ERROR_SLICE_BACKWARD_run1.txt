@@ -1,0 +1,52 @@
+What happened (root cause)
+- At lines 400–401 your code checks minutes_offset and raises ValueError when minutes_offset < 0 or > 59:
+  - 400 |         if minutes_offset < 0 or minutes_offset > 59:
+  - 401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The error shows minutes_offset was -15. The check treats any negative minutes as invalid, so the check raised ValueError immediately.
+- Why minutes_offset became negative: something upstream produced a negative remainder for the minute component (for example you computed minutes_offset from a signed total-minute offset or from a subtraction that yields a negative remainder). The check assumes minutes_offset is always 0–59 but the actual calling code provided -15.
+
+Where it happened
+- The exception is raised at line 401, in the code that validates minutes_offset (lines 400–401). The input that reached this validator was -15.
+
+How to fix it (concrete options, with exact steps)
+Pick one of these fixes depending on intended behavior:
+
+1) Normalize a signed total-minute offset to hours and positive minutes (recommended when you accept negative hour+minute offsets, like timezones)
+- Replace the current input handling so you compute hours and minutes from a single signed total_minutes value, e.g.:
+  - total_minutes = <your input signed minutes>  # e.g. -75
+  - hours, minutes = divmod(abs(total_minutes), 60)
+  - sign = -1 if total_minutes < 0 else 1
+  - hours *= sign
+  - minutes *= sign? No — keep minutes non-negative and apply sign to hours when formatting
+- Updated pseudocode you can insert before the check:
+  - total_minutes = minutes_offset  # if this variable is actually total minutes
+  - sign = -1 if total_minutes < 0 else 1
+  - h, m = divmod(abs(total_minutes), 60)
+  - hours_offset = sign * h
+  - minutes_offset = m
+- This produces minutes_offset in 0..59 and preserves a negative offset overall, so the existing check will no longer reject -15.
+
+2) Allow negative minute values (only if your logic intends to store negative minutes)
+- If your design expects minutes_offset to be in -59..59, change the validation at lines 400–401 to:
+  - if minutes_offset < -59 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Steps:
+  1. Edit line 400 to the new condition.
+  2. Ensure downstream code correctly interprets negative minutes (e.g., -15 minutes in combination with hours).
+
+3) Validate the caller / input earlier (if callers pass a signed total accidentally)
+- If callers should pass separate hour and minute components, add an explicit assertion or conversion where the value originates so callers provide minutes in 0..59.
+- Steps:
+  1. Find caller that passes -15 (search for places creating minutes_offset).
+  2. Convert total-minute inputs to (hours, minutes) using divmod before constructing minutes_offset.
+  3. Add a unit test to confirm passing -15 gets converted rather than reaching the validator.
+
+Minimal example to normalize total minutes to hours/minutes (drop into your function before the current check):
+- total_minutes = minutes_offset  # if that's really total
+- sign = -1 if total_minutes < 0 else 1
+- hours_offset, minutes_offset = divmod(abs(total_minutes), 60)
+- hours_offset *= sign
+- # now minutes_offset is 0..59 and will pass the existing check
+
+Summary
+- The code fails because minutes_offset was -15 and the validator at lines 400–401 rejects negative minute values. Fix by either normalizing a signed total-minute input into a non-negative minute component (recommended), expanding the allowed range to -59..59, or correcting the caller to supply the expected 0–59 minutes. Choose the approach that matches your intended design and apply the concrete code changes above.

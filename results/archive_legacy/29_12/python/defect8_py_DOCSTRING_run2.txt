@@ -1,0 +1,90 @@
+I can’t tell the exact failing line without seeing your to_locale implementation, but based on your docstring and the common mistakes when strictly validating locale strings the failure is almost certainly in the parsing/validation branch of to_locale where you split the input and check lengths/case. Below I explain the root cause possibilities that match the behavior you described, show the precise place the bug usually happens (inside to_locale where the input is split and each part validated), and give concrete, minimal fixes and tests you should run so you can see and verify the exact failure.
+
+What goes wrong (root causes)
+- Splitting and validating parts: most implementations do something like parts = locale_str.split('_') and then validate language, country, and variant. The bug is usually that an empty or missing part causes your later checks to fail unexpectedly:
+  - Example: locale_str = "en" → parts = ["en"] → code expects parts[1] to exist and raises an IndexError (or you treat missing country as invalid).
+  - Example: locale_str = "en__POSIX" (an empty country) → parts = ["en", "", "POSIX"] → you then call .isupper() on "" or check length == 2 and fail.
+- Using .islower()/.isupper() or .isalpha() on empty strings: these methods return False for "", so a check like if not country.isupper(): raise ValueError will reject the valid empty-country case if your function is supposed to accept "en_" or you intended to treat missing country as "". (Your docstring expects "en_GB" or "en" and says country must be uppercase — an empty country is allowed only when you have variant? The ambiguity causes logic errors.)
+- Incorrect length checks: code that insists the country part length must be exactly 2 for every two-part input will reject valid inputs that have language only. Conversely, code that assumes three parts whenever there are two underscores will mis-handle variants.
+- Not trimming whitespace: leading/trailing spaces in locale_str (e.g. " en_GB ") will fail case checks.
+- Wrong separator acceptance: the docstring requires '_', but if the code accepts '-' or uses regex that permits both, you may get inconsistent behavior.
+- Variant handling and JDK differences: if your code uppercases variant or relies on JDK behavior, that can produce surprising mismatches — but that’s secondary to parsing bugs.
+
+Where it occurs (the exact place to inspect)
+- Inside LocaleUtils.to_locale (the method named in your docstring), in the block that:
+  1) splits the input (locale_str.split('_') or a regex),
+  2) accesses parts[0], parts[1], parts[2],
+  3) checks case and length, e.g. language.islower(), country.isupper(), len(country) == 2, etc.
+- That validation branch is the precise location to inspect for:
+  - index access without checking parts length,
+  - .islower()/.isupper() calls on empty strings,
+  - incorrect assumptions about which parts may be absent.
+
+Concrete examples that show the failure
+- Input: "en" — expected: Locale("en", "") — common failure: IndexError or ValueError because code expects parts[1].
+- Input: "en_GB" — expected: Locale("en", "GB") — common failure: ValueError if you accidentally call islower() on "GB" or apply a wrong length check.
+- Input: "en_GB_xxx" — expected: Locale("en", "GB", "xxx") — common failure: your variant check uppercases or rejects lowercase variant or mis-parses when country is empty.
+
+Steps to reproduce quickly
+1. Call LocaleUtils.to_locale(None) — should return None (per docstring). If it throws, check early None guard.
+2. Call LocaleUtils.to_locale("en") — if you get an IndexError or ValueError, the split/part-access is wrong.
+3. Call LocaleUtils.to_locale("en_GB") — if you get ValueError complaining about case or length, the case/length checks are too strict or applied to wrong part.
+4. Call LocaleUtils.to_locale("en__POSIX") — if you get ValueError or unexpected IndexError, the code doesn’t handle empty country strings correctly.
+
+Minimal fixes (specific steps you can apply inside to_locale)
+1. Early None and trim:
+   - If locale_str is None: return None.
+   - locale_str = locale_str.strip() before parsing.
+2. Split safely and branch on length:
+   - parts = locale_str.split('_')
+   - if len(parts) == 1:
+       language = parts[0]
+       country = ""
+       variant = ""
+     elif len(parts) == 2:
+       language, country = parts
+       variant = ""
+     else:
+       language, country, variant = parts[0], parts[1], "_".join(parts[2:])  # allow underscores in variant
+   - This avoids IndexError and supports variants that may contain underscores.
+3. Validate each piece only when present:
+   - if not language or len(language) not in (2,3) or not language.isalpha() or not language.islower(): raise ValueError("invalid language")
+   - if country:
+       if len(country) != 2 or not country.isalpha() or not country.isupper(): raise ValueError("invalid country")
+   - if variant:
+       if not variant.isalnum(): raise ValueError("invalid variant")  # or a looser rule; don’t force case
+   - Note: call .isalpha()/.islower() only on non-empty strings.
+4. Construct and return the Locale(language, country, variant) according to your environment.
+
+Example validation code (pseudo/Python-like) you can drop into to_locale
+- (I won’t assume your language/line numbers; put this into the existing to_locale where you parse)
+  if locale_str is None:
+      return None
+  locale_str = locale_str.strip()
+  parts = locale_str.split('_')
+  if len(parts) == 0:
+      raise ValueError("empty locale")
+  language = parts[0]
+  country = ""
+  variant = ""
+  if len(parts) >= 2:
+      country = parts[1]
+  if len(parts) >= 3:
+      variant = "_".join(parts[2:])
+  if not (1 <= len(language) <= 3) or not language.isalpha() or not language.islower():
+      raise ValueError("language must be 1-3 lowercase letters")
+  if country and (len(country) != 2 or not country.isalpha() or not country.isupper()):
+      raise ValueError("country must be 2 uppercase letters if present")
+  # variant: accept any non-empty string; don't force case
+  return Locale(language, country, variant)
+
+How to verify the fix
+- Add these unit tests:
+  - assert to_locale(None) is None
+  - assert to_locale("en").language == "en" and to_locale("en").country == ""
+  - assert to_locale("en_GB").country == "GB"
+  - assert to_locale("en_GB_xxx").variant == "xxx"
+  - assert to_locale("en__POSIX").country == "" and to_locale("en__POSIX").variant == "POSIX"
+- Run them and see whether any assertion fails; the failing test will point to the exact line in to_locale to inspect.
+
+If you paste the to_locale implementation here I will point to the exact line numbers and show a patch with the minimal diff to fix it.

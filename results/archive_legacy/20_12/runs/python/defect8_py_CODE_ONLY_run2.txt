@@ -1,0 +1,52 @@
+What happened
+- The failing input is "fr__POSIX".
+- LocaleUtils.to_locale raised ValueError("Invalid locale format: fr__POSIX").
+- The failure occurs in LocaleUtils.to_locale, during the checks after computing length (around the block starting at: if length != 2 and length != 5 and length < 7: … and the subsequent checks).
+
+Why it failed (root cause)
+- The code enforces a strict format: it only accepts strings of length 2 (language), length 5 (language + '_' + country), or length >= 7 but only when the pattern is language(2) + '_' + country(2) + '_' + variant. The initial length check is:
+  if length != 2 and length != 5 and length < 7:
+      raise ValueError(...)
+  For "fr__POSIX", length == 9, so it passes that first test.
+- Next the code checks the first two characters are lowercase letters (ch0, ch1). For "fr__POSIX" that passes.
+- For length != 2 the code then requires locale_str[2] == '_'. For "fr__POSIX" locale_str[2] is '_' — that passes.
+- Then the code unconditionally reads ch3 = locale_str[3] and ch4 = locale_str[4] and requires both be uppercase A–Z (this is the country code check):
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(...)
+  For "fr__POSIX", ch3 == '_' and ch4 == 'P', so ch3 is not an uppercase letter. That triggers the ValueError.
+- In short: the method assumes that after "fr_" there must be a two-letter uppercase country code. But the input "fr__POSIX" uses an empty country (two consecutive underscores) with a variant "POSIX" — a valid Java Locale form. The code does not accept an empty country in the three-part form and therefore fails at the country-letter check (the check of ch3 and ch4), raising the ValueError.
+
+Where in the code it happens
+- LocaleUtils.to_locale:
+  - initial checks: lines checking length and language (the first few ifs).
+  - failure occurs at the block beginning "else:" after length == 2 branch, specifically:
+    if locale_str[2] != '_': ...         # passes
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+  This is where "fr__POSIX" is rejected because ch3 == '_' is not between 'A' and 'Z'.
+
+How to fix it (concrete steps)
+1. Allow an empty country when parsing the variant form. Specifically, after confirming locale_str[2] == '_', treat the two characters at positions 3 and 4 as either:
+   - two uppercase letters (country), OR
+   - both underscores (empty country) indicating the variant starts at position 5 (or pos 6 depending on indexing).
+2. Update parsing logic to accept "language + '_' + '_' + variant" as valid and extract language and variant accordingly.
+
+Minimal code change (exact location)
+- Replace the strict country-letter check block (the ch3/ch4 checks and subsequent branches) with logic that detects an empty country and handles it. For example:
+  - After checking locale_str[2] == '_':
+      ch3 = locale_str[3]
+      ch4 = locale_str[4]
+      if ch3 == '_' and ch4 != '_':
+          # handle case like "fr__POSIX" (empty country, variant starts at index 3 or 5 depending on intended positions)
+      elif ch3 >= 'A' and ch3 <= 'Z' and ch4 >= 'A' and ch4 <= 'Z':
+          # handle country present (existing code path)
+      else:
+          raise ValueError(...)
+  - Then, when length >= 7 and an empty country is detected, verify the next separator and slice the variant correctly (e.g., Locale(locale_str[0:2], "", locale_str[3+? :])).
+
+Note about expected result
+- The test expects LocaleUtils.to_locale("fr__POSIX") to return Locale('fr', '', 'POSIX'). The current parser cannot produce that because it insists on a two-letter country at positions 3–4. Allowing empty country handling (two underscores) will let the method produce the expected Locale('fr', '', 'POSIX').
+
+If you want, I can provide the exact replacement code for the parsing block (lines around the ch3/ch4 checks and the final return) so the method accepts "fr__POSIX" and similar empty-country variant forms.

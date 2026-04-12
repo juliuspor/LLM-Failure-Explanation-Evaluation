@@ -1,0 +1,42 @@
+What happened (where it failed)
+- The exception originates inside the method that builds a zone offset from hours and minutes (the method that ends with "return cls.for_offset_millis(offset)"). The error message "Minutes out of range: -15" is raised after the code tries to combine hours and minutes into a single minute count. The relevant lines are 406–412 in your slice:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+  - 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - 411–412: exception path / return cls.for_offset_millis(offset)
+
+Why it failed (root cause)
+- A negative minute value (minutes = -15) reached the code path that combines hours and minutes. The code assumes minutes_offset is always a non-negative 0..59 value and combines it with hours_in_minutes by either subtracting or adding, but the logic that decides whether to subtract or add is wrong or missing. Because minutes_offset is already negative, the subtraction/ addition produces a total minute count that is invalid and stays negative where it shouldn’t be — triggering the "Minutes out of range: -15" validation later (the code expects minute-part in 0..59, not -15).
+- In plain terms: the minute field was allowed to be negative (for example input "-0:15" or minutes parsed as -15), but the method never normalized or validated that minute before using it. The combination logic uses hours_in_minutes - minutes_offset or + minutes_offset incorrectly when minutes_offset is negative, producing a negative minute-part and causing the explicit validation to fail.
+
+Exactly where to change (concrete steps)
+1. Validate the minute input immediately after parsing, before combining with hours:
+   - Ensure minutes is in the range 0..59 (or in 0..59 and a separate sign is tracked). Reject raw negative minute values as invalid, or normalize their sign relative to the hour sign.
+2. Normalize combining logic so sign is unambiguous:
+   - If the parsed minute token included a sign, make the sign carry to the total offset consistently.
+   - Common correct algorithm:
+     - Let sign = sign_of(hours) if hours != 0 else sign_of(original_minutes_token) (so "-0:15" becomes negative).
+     - let abs_minutes = abs(parsed_minutes)
+     - if abs_minutes < 0 or abs_minutes >= 60: raise ValueError("Minutes out of range: %d" % parsed_minutes)
+     - total_minutes = abs(hours) * 60 + abs_minutes
+     - if sign < 0: total_minutes = -total_minutes
+3. Replace the lines that combine hours and minutes with the normalized logic. Concretely, change lines 406–408 to something like:
+   - determine sign (as above)
+   - abs_minutes = abs(minutes_offset)
+   - if abs_minutes >= 60: raise ValueError("Minutes out of range: %d" % minutes_offset)
+   - minutes_offset = abs(hours) * 60 + abs_minutes
+   - if sign < 0: minutes_offset = -minutes_offset
+4. Then keep line 409 as-is to convert minutes to milliseconds:
+   - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Minimal test cases to verify fix
+- Positive hours and minutes: 2:30 -> +150 minutes
+- Negative hours, positive minutes: -2:30 -> -150 minutes
+- Zero hour, negative minutes: -0:15 -> -15 minutes (should be allowed if input implies negative offset)
+- Reject bad minute values: 0:60 or 0:-15 (if your design forbids signed minute token when hour is zero, decide and test accordingly)
+
+Why this fix works
+- It ensures minutes are treated as an absolute 0..59 quantity and the sign is applied at the combined-minute level. That prevents negative minute parts like -15 from being passed into validation or multiplication, and eliminates the inconsistent subtraction/addition that produced the "Minutes out of range: -15" error.
+
+If you want, paste the full method and I will produce a concrete patch for lines 400–420 (or the equivalent region) showing the exact replacement code.

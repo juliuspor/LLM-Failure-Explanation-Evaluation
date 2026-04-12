@@ -1,0 +1,48 @@
+What happened
+- The test calls LocaleUtils.to_locale('fr__POSIX'). That string is a legal locale meaning: language = "fr", empty country = "", variant = "POSIX".
+- The method rejects it during its strict validation and raises ValueError instead of returning Locale('fr', '', 'POSIX').
+
+Why it failed (root cause)
+- In LocaleUtils.to_locale the code validates the country field with a rule like "if country part is present it must be length 2 and uppercase".
+- When given 'fr__POSIX' the string splits into three parts: ['fr', '', 'POSIX']. The country part is the empty string.
+- The current validation treats an empty country as an invalid country (checks len(country) != 2 or checks isupper() on a non-existent character) and raises ValueError.
+- In short: the validator does not accept an empty country explicitly, yet two underscores are a valid way to indicate an empty country and a non-empty variant.
+
+Where exactly (what method / check)
+- The failure happens inside LocaleUtils.to_locale in the branch that validates the country component after splitting on '_' (the "country validation" block).
+- That block currently implements a strict "must be exactly 2 uppercase letters when present" check and does not allow the empty string when the variant is supplied (the case of 'fr__POSIX').
+
+Concrete fixes (step-by-step)
+Option A — minimal conditional change (recommended)
+1. Locate the country validation in LocaleUtils.to_locale (the code that runs after splitting the input on '_' and checks the middle part).
+2. Replace the existing check (pseudo-code):
+   if len(country) != 2 or not country.isupper():
+       raise ValueError("Invalid country")
+   with this:
+   if country != '' and (len(country) != 2 or not country.isupper()):
+       raise ValueError("Invalid country")
+3. This change keeps strictness for real country codes but allows the empty country when a variant follows.
+
+Option B — use a regex to validate full string (one expression)
+1. Replace the manual checks with a single pattern that permits an empty country only when the second underscore is present, for example:
+   pattern = r'^[a-z]{2}(?:_[A-Z]{2}(?:_.+)?|__.+)?$'
+2. If re.match(pattern, locale_str) is false -> raise ValueError.
+3. This explicitly permits:
+   - "xx"
+   - "xx_YY"
+   - "xx_YY_variant"
+   - "xx__variant"
+   and rejects invalid forms.
+
+How to verify
+- Add/modify unit tests:
+  - assert LocaleUtils.to_locale('fr__POSIX') == Locale('fr', '', 'POSIX')
+  - assert LocaleUtils.to_locale('en') == Locale('en', '')
+  - assert LocaleUtils.to_locale('en_GB') == Locale('en', 'GB')
+  - assert LocaleUtils.to_locale('en_GB_xxx') == Locale('en', 'GB', 'xxx')
+  - Keep existing negative tests (bad language/country lengths, wrong cases, wrong separators).
+
+Why this solution is safe
+- It preserves the existing strictness (language lowercase, country uppercase if present, underscore separators) but correctly allows the well-known pattern of an empty country indicated by two underscores before a variant.
+
+If you want, paste the current validation snippet from LocaleUtils.to_locale and I will show the exact line(s) to change.

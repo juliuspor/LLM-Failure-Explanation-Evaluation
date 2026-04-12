@@ -1,0 +1,44 @@
+What happened (symptom)
+- The test expects get_max_middle_index() to return 1 after the four add(...) calls, but it returns the wrong index. The failing value comes from the attribute _max_middle_index (see get_max_middle_index at lines 449–451), so that attribute is out of sync with the actual stored periods.
+
+Why it happened (root cause)
+- When you insert a new TimePeriodValue into the internal list, the code that maintains _max_middle_index does not adjust _max_middle_index for index shifts caused by insertion.
+- Concretely: suppose _max_middle_index currently points to the period with the largest middle time. If you then insert a new element at an index less than or equal to _max_middle_index, every existing index at or after the insertion point is shifted up by 1. The code doesn’t increment _max_middle_index in that case, so _max_middle_index continues to point to the old numeric index (now pointing to the wrong element).
+- The problem occurs inside the add(...) method (the place where elements are inserted). get_max_middle_index() (lines 449–451) only returns the stored attribute _max_middle_index; it never recomputes or corrects it.
+
+Where this happens in your test
+- Execution order in your test:
+  1. add(SimpleTimePeriod(0,100), 1.0) — sets up initial entries and a current _max_middle_index.
+  2. add(SimpleTimePeriod(100,200), 2.0) — possibly updates _max_middle_index to the new element.
+  3. add(SimpleTimePeriod(0,50), 3.0) — this inserts at an index before existing elements; the code does not adjust _max_middle_index for the shifted indices.
+  4. add(SimpleTimePeriod(50,100), 4.0) — same issue for this insertion.
+- After these insertions, the stored _max_middle_index value refers to an index that no longer points at the period with the maximum middle time, so get_max_middle_index() returns the wrong index.
+
+How to fix it (concrete steps)
+Option A — adjust _max_middle_index on insert/remove:
+1. In the add(...) method, after determining the insertion index (call it insert_index), add logic:
+   - if self._max_middle_index >= 0 and insert_index <= self._max_middle_index:
+       self._max_middle_index += 1
+2. Similarly, in remove(...) (or anywhere you delete entries), if remove_index < self._max_middle_index:
+       self._max_middle_index -= 1
+   If you remove the element at _max_middle_index, you must recompute the max index (see Option B).
+3. When replacing an element (if add replaces an existing period rather than inserting), treat it appropriately: if you replace at index == _max_middle_index, you may need to re-evaluate whether that element remains the max.
+
+Option B — compute lazily / recompute safely:
+- Make get_max_middle_index() recompute the index from the actual list when _max_middle_index is invalid or after structural changes. Example approach:
+  - Keep a boolean flag _max_middle_index_valid.
+  - On any insert/remove that can change ordering, set _max_middle_index_valid = False.
+  - In get_max_middle_index(), if not valid, iterate the current periods, find the true maximum middle and set _max_middle_index and _max_middle_index_valid = True, then return the value.
+- This is safer and avoids hard-to-get corner cases.
+
+Why these fixes work
+- Option A keeps an O(1) update to the cached index by accounting for index shifts.
+- Option B avoids bugs from index shifts entirely by deriving the index from the actual data whenever needed.
+
+Where to change (file/locations to search)
+- The add(...) method (the insertion code path) — add the index-shift update or invalidate the cached index.
+- Any remove/clear/replace methods — ensure they also update/ invalidate _max_middle_index.
+- get_max_middle_index() (lines 449–451) — either leave as-is if you maintain the cache correctly, or change it to recompute when the cache is invalid.
+
+Summary
+- The failure is due to keeping a cached index (_max_middle_index) that isn’t updated when inserts shift list indices. Fix by updating _max_middle_index on insert/remove or by invalidating and recomputing the cache in get_max_middle_index().

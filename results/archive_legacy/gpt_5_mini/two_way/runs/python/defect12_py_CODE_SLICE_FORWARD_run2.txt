@@ -1,0 +1,65 @@
+I can’t say exactly what runtime exception you saw without the stack trace or an example call, but the code contains one clear logic bug and a couple of likely causes of crashes — I’ll call out the exact lines to check, explain what goes wrong there, and show how to reproduce/fix each problem.
+
+What to check first (give me these if you want a precise root-cause):
+- the exception message and stack trace you saw (paste it).
+- the concrete argument values you passed for text, lower, upper, append_to_end.
+
+Problems and where they occur (line numbers refer to your snippet):
+
+1) Logical bug that produces wrong output (line ~15 and line ~26)
+- Where: the branch beginning at
+    if index > upper:
+        return substring_java(text, 0, upper) + StringUtils.default_string(append_to_end)
+  (and compare with the earlier index == -1 branch starting at line ~11)
+- What happens: when index > upper but upper == len(text), this branch will still append append_to_end even though the substring is the whole remaining text. In the index == -1 branch you explicitly avoid appending when upper == len(text):
+    if index == -1:
+        result = substring_java(text, 0, upper)
+        if upper != len(text):
+            result += StringUtils.default_string(append_to_end)
+        return result
+  In the index > upper branch you do not check upper != len(text), so you'll append append_to_end when you shouldn't. This is a correctness bug (wrong output), not a crash.
+- Fix (exact steps):
+  - Change the index > upper branch to behave like the index == -1 branch:
+      if index > upper:
+          if upper == len(text):
+              return substring_java(text, 0, upper)
+          return substring_java(text, 0, upper) + StringUtils.default_string(append_to_end)
+
+2) Potential crash or TypeError if substring_java or index_of signatures/misuse differ from expectations (lines ~9 and ~34)
+- Where:
+  - Call to StringUtils.index_of(text, " ", lower) (line ~9).
+  - substring_java(text, 0, upper) returns s[start:end] (slice_forward shows "return s[start:end]" at line 34).
+- Why this can crash:
+  a) If your StringUtils.index_of implementation does not accept a start index as the third argument (different signature), passing lower as third argument can raise TypeError or behave incorrectly. Confirm the index_of signature in your StringUtils: it must be index_of(text, substring, start). If it is index_of(text, substring) only, you passed an int where the method expects something else.
+  b) If lower or upper can be None or non-integers when passed to substring_java, Python slicing s[start:end] will raise TypeError (“slice indices must be integers or None or have an __index__ method”). Check the types of lower and upper at the call sites.
+  c) If lower is negative and your code expects Java-style behavior, negative indices in Python slices are allowed but produce different results (they count from the end). That can produce incorrect results or surprising behavior.
+- How to check and fix (exact steps):
+  - Print or log the types and values before the calls:
+      print("text:", text, "len:", len(text) if text is not None else None)
+      print("lower:", lower, "upper:", upper, "index:", index)
+  - Confirm StringUtils.index_of signature and semantics in your codebase. If it does not accept a start param, call it correctly or use text.find(" ", lower).
+  - Ensure lower and upper are ints and not None. If they can be None, coerce/validate:
+      if lower is None: lower = 0
+      if upper is None: upper = -1  # or appropriate default
+  - If you must preserve Java semantics for negative/too-large indices, clamp them explicitly before slicing:
+      if upper == -1 or upper > len(text):
+          upper = len(text)
+      if upper < 0: upper = 0
+      if lower < 0: lower = 0
+
+3) Off-by-one / semantics difference between Java substring and Python slice (line 34)
+- Where: substring_java uses s[start:end] (slice_forward shows that).
+- Why it matters: Java substring(start, end) and Python s[start:end] are both end-exclusive, so they match — but if substring_java attempted to emulate Java and you sometimes pass end==len(text)+1 (a bug elsewhere), Python would not raise but would silently return the whole string, hiding the bug. Conversely, if other code expects inclusive end indices, you’ll get off-by-one errors.
+- How to check/fix:
+  - Make sure all callers pass end as an exclusive index. If the rest of the codebase uses inclusive end indices, convert them before calling substring_java:
+      python_end = inclusive_end + 1
+
+Summary of immediate actionable steps
+1. Reproduce the failure and paste the stack trace + the actual argument values (text, lower, upper, append_to_end). I need that to point to the exact exception.
+2. Fix the correctness bug at the "index > upper" branch by not appending append_to_end when upper == len(text) (see exact code change above).
+3. Confirm StringUtils.index_of signature and that you pass lower as an int start index correctly.
+4. Add defensive checks and logging:
+   - Validate lower and upper are ints and clamp them to [0, len(text)] before any call to index_of or substring_java.
+   - Log index returned by index_of to see whether it is -1 or unexpected.
+
+If you paste the stack trace and a failing example (the call and parameter values), I’ll point to the single line that threw and give the minimal patch to fix it.

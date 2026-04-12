@@ -1,0 +1,72 @@
+What happened (root cause)
+- At line 336 the code does "inferred_type = type(array)". That takes the Python type of the array object (i.e. list), not the element type inside the list. So if array is a list of strings, inferred_type becomes list, not str. This is the wrong thing to compare against expected_type or to use for element checks.
+- When both array and element are None the code falls through to the else at line 340 and sets inferred_type = object. Immediately after (line 346) it checks:
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+  That raises a TypeError when the caller passed an explicit expected_type (for example expected_type=str) even though the correct behavior is to accept expected_type and return a one-element list [None]. In short: the code treats "no information available" (inferred_type == object) as a type mismatch when expected_type is provided, rather than treating expected_type as the intended type.
+
+Where it happens (specific lines / names)
+- Line 336: inferred_type = type(array) — wrong because type(array) is the list class, not the element class.
+- Lines 337–340: element and fallback logic leads to inferred_type = object when both array and element are None.
+- Line 346: the guard "if inferred_type == object and expected_type != object: raise TypeError" causes the failure for the test case ArrayUtils.add(None, None, expected_type=str).
+
+Why that causes the failing test
+- Test: ArrayUtils.add(None, None, expected_type=str) expects [None].
+- Because array and element are None, inferred_type becomes object.
+- Because expected_type is str (not object), line 346 raises TypeError instead of returning [None]. The code never uses the explicit expected_type to accept the None element.
+
+What to change (concrete steps)
+1. Compute element type correctly:
+   - Replace the "inferred_type = type(array)" line with logic that gets the element type from the array contents (not the list object). For example:
+     - If array is not None and len(array) > 0: inferred_type = type(array[0])
+     - Elif element is not None: inferred_type = type(element)
+     - Else inferred_type = object
+   This fixes the bug where a list's class was confused with its element type.
+
+2. Respect expected_type when provided:
+   - Do not raise TypeError just because inferred_type == object while expected_type is provided.
+   - Instead, if expected_type is given, treat expected_type as the desired element type. Only raise TypeError if there is a concrete mismatch:
+     - If element is not None and expected_type is not object and not isinstance(element, expected_type): raise TypeError
+     - If array is not None and has elements and expected_type is not object and not all(isinstance(x, expected_type) for x in array): raise TypeError
+   - Allow None values to be added regardless of expected_type (None has no runtime type), so adding None with an expected_type should be allowed and the resulting list should be of that expected_type.
+
+3. Replace/remove the problematic guard:
+   - Remove the current line 346 check:
+       if inferred_type == object and expected_type != object:
+           raise TypeError
+     and implement the compatibility checks outlined above instead.
+
+Suggested replacement pseudocode for the whole inference block (replace lines 335–347):
+
+    if expected_type is not None:
+        desired_type = expected_type
+    else:
+        desired_type = None
+
+    if array is not None and len(array) > 0:
+        inferred_element_type = type(array[0])
+    elif element is not None:
+        inferred_element_type = type(element)
+    else:
+        inferred_element_type = object
+
+    # Decide effective type to enforce
+    if desired_type is not None:
+        effective_type = desired_type
+    else:
+        effective_type = inferred_element_type
+
+    # Validate concrete mismatches (but allow None)
+    if element is not None and effective_type is not object and not isinstance(element, effective_type):
+        raise TypeError("element type mismatch")
+    if array is not None and effective_type is not object:
+        for x in array:
+            if x is not None and not isinstance(x, effective_type):
+                raise TypeError("array element type mismatch")
+
+Why this fix meets expectations
+- It uses element types rather than the list object's type.
+- It respects an explicit expected_type when supplied (so add(None, None, expected_type=str) will succeed).
+- It permits adding None values while still enforcing type checks for non-None values.
+
+If you want, I can produce a concrete patch/diff that replaces the problematic lines with the exact code above.

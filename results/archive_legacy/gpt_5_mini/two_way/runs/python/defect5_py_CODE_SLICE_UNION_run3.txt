@@ -1,0 +1,52 @@
+What went wrong (short): you use type(array) on line 336 to decide the element/component type. type(array) returns the list object’s class (e.g. <class 'list'>), not the class of the elements inside the list. That wrong value is then passed to ArrayUtils._copy_list_grow1 and later used in the type checks on lines 346–347, so the routine gets the wrong "component type" and the logic that should detect an object-component list never runs. The result is a class/type mismatch that causes the operation to fail.
+
+Where it happens (specific lines and variables)
+- Line 336: inferred_type = type(array) — this sets inferred_type to the list’s class (e.g. list), not the element type.
+- Line 340: inferred_type = object — used only when both array and element are None.
+- Line 346–347: the check if inferred_type == object and expected_type != object will not trigger when inferred_type is a list class; that hides the intended error condition.
+- Line 344: new_list = ArrayUtils._copy_list_grow1(array, inferred_type) receives the wrong inferred_type and thus produces a list/array with the wrong component/type behavior.
+- Line 345: new_list[len(new_list) - 1] = element may then raise a runtime error (or later type-based behavior is incorrect) because the component type used when growing/copying was wrong.
+
+Why this causes a failure (root cause, in plain terms)
+- The code needs the element/component type of the list so it can create a new list/array of the correct element type. But it asks for the type of the list itself (type(array)) instead of the type of the elements. Passing the list class into _copy_list_grow1 means the produced array/list has an incorrect component type metadata, so inserting element or subsequent type checks break. Also the later check that should raise a clear TypeError when you tried to cast a generic object list into a more specific typed list (lines 346–347) won’t run because inferred_type is not object but list, so the illegal cast is not detected at the right time.
+
+Concrete examples of what goes wrong
+- If array is a list and elements are ints:
+  - type(array) == list, not int. inferred_type becomes list.
+  - _copy_list_grow1(array, list) is called instead of _copy_list_grow1(array, int).
+  - Setting the new element can fail or lead to subtle type-mismatch behavior downstream.
+- If array is None and element is provided, inferred_type = type(element) is correct; that branch is okay.
+- If array is an empty list, you can't get an element type from array[0], so the function must fall back to expected_type or object — your current code picks type(array) (list), which is wrong.
+
+How to fix it (step-by-step, exact changes)
+1. Decide what "inferred_type" must represent: the element/component type (e.g. int) — not the list class.
+2. Replace the type(array) usage with logic that inspects array contents (when available) or uses expected_type when array is empty or None. Concrete replacement:
+
+   - If array is not None and len(array) > 0:
+       inferred_type = type(array[0])
+   - Elif element is not None:
+       inferred_type = type(element)
+   - Elif expected_type is not None:
+       inferred_type = expected_type
+   - Else:
+       inferred_type = object
+
+3. Keep the existing cast-check logic, but compare against object correctly (inferred_type is an element type, so inferred_type == object will be true only when you actually fell back to object).
+
+Minimal corrected code sketch (replace lines 335–341):
+
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+4. Ensure ArrayUtils._copy_list_grow1 expects an element type and will behave with the chosen inferred_type. If _copy_list_grow1 requires a class name or a specific form, pass that exactly (e.g. expected_type or inferred_type.__name__), not the list class.
+
+Why this fix works
+- Now inferred_type actually describes the element type when available, so _copy_list_grow1 creates a new list/array with the correct component type. The cast-check at lines 346–347 will correctly detect when you only had object as a fallback and expected_type is more specific, so you’ll raise a clear TypeError as intended.
+
+If you want, I can provide a full patched version of the function adapted to your ArrayUtils._copy_list_grow1 signature.

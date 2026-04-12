@@ -1,0 +1,59 @@
+What happens
+- Where it fails: the IndexError is raised from code_point_at at the start of that function (line 35 in the slice): it checks index against len(code_units) and raises "String index out of range: {index}" when index is past the end.
+- Why it fails: the loop that advances pos after translate_codepoint sometimes advances pos too far (or tries to read past the end) because it misinterprets what translate_codepoint returns.
+
+Concrete variables and lines
+- In translate (top of your snippet): pos is the current index into code_units, length = len(code_units).
+- You call consumed = self.translate_codepoint(code_units, pos, out).
+- If consumed > 0 you run:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  (this loop is where the bug manifests)
+- code_point_at (lines 35–44 in the slice) reads code_units[index] and, if a high surrogate is followed by a low surrogate, returns a single Unicode codepoint. It also raises IndexError if index >= len(code_units).
+
+Root cause (clear, exact)
+- The code treats consumed as "number of codepoints handled", and therefore iterates that many times calling code_point_at at the current pos to decide how many code units to step.
+- But translate_codepoint actually returns the number of code units it consumed (or at least the contract is inconsistent). If translate_codepoint returns 2 for a surrogate pair (two code units consumed), the for-loop runs twice. On the first iteration you do:
+    pos += char_count(code_point_at(code_units, pos)) 
+  which reads the high surrogate and the low surrogate (valid) and advances pos by 2.
+  On the second iteration the loop tries to read code_point_at(code_units, pos) where pos is now past the low surrogate (pos has already moved past the pair). That makes code_point_at check index >= len(code_units) and raise IndexError.
+- In short: you're double-counting or iterating the wrong number of times because consumed's meaning (codepoints vs code units) doesn't match how the pos-update loop uses it.
+
+What happened (one-sentence): translate_codepoint returned a count in one unit (code units) but the loop treated that count as a number of codepoint iterations and called code_point_at repeatedly, which caused reads past the end of code_units and an IndexError (line 35–44, code_point_at).
+
+How to fix it (concrete steps)
+Pick one consistent contract and implement it exactly. Two safe fixes:
+
+Option A — Make translate_codepoint return "number of codepoints consumed" (surrogate pair counts as 1)
+1. Change translate_codepoint so that when it consumes a surrogate pair it returns 1 (not 2).
+2. Then the existing for pt in range(consumed): pos += char_count(code_point_at(code_units, pos)) is correct — it will iterate once for the pair and pos += 2 on that one iteration.
+
+Option B — Treat consumed as "number of code units consumed" (surrogate pair counts as 2) and advance pos directly
+1. Keep translate_codepoint returning count of code units consumed (1 or 2).
+2. Replace the loop with a single pos increment that uses consumed directly:
+     pos += consumed
+   (or, for clarity, pos = pos + consumed)
+   Do not call code_point_at inside the loop. This avoids reading code_units while updating pos.
+
+Option C — If translate_codepoint already returned "codepoints" but you want simpler code, compute the number of code units advanced from each codepoint deterministically:
+1. If consumed means codepoints, keep the loop but ensure char_count uses a codepoint value that you know is safe to read (i.e., call code_point_at only when index < len(code_units)). However, this is just a variant of Option A and unnecessary if you can control translate_codepoint.
+
+Which to choose
+- If translate_codepoint's natural behavior is "I consumed these code units", use Option B and change the loop to pos += consumed (simpler and fewer reads).
+- If its natural behavior is "I handled N Unicode codepoints", use Option A and fix translate_codepoint to return the number of codepoints.
+
+Exact code edits (examples)
+- Option B (simplest change in translate):
+  Replace the for-loop block
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with
+    pos += consumed
+
+- Option A (change translate_codepoint):
+  Ensure translate_codepoint returns 1 when it handled a surrogate pair instead of returning 2. No change to translate's loop.
+
+Why these fixes work
+- They make the meaning of consumed consistent with how you update pos. That prevents the second loop iteration from trying to read code_point_at at an index that has already been moved past the valid range, eliminating the IndexError at code_point_at (lines 35–44).
+
+If you want, tell me what translate_codepoint currently returns for a surrogate pair (1 or 2) and I will give the exact single-line change to apply.

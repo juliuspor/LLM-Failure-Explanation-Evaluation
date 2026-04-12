@@ -1,0 +1,62 @@
+What happened
+- The test calls cc.add_number(-0.0) and expects cc.get_code() to return the string '-0.0'.
+- The assertion failed because cc.get_code() returned '0' (a positive-looking zero) instead of '-0.0'.
+
+Root cause (exact place to look)
+- The bug is in MockCodeConsumer.add_number, specifically on the line that converts the passed float to a string and appends it to the internal buffer (for example a variable named self._parts, self._buffer, or self._code).
+- That conversion is using a formatting path that collapses negative zero to the plain "0" (examples that do that: int(value), "{:g}".format(value), format(value, 'g'), or any formatter that trims sign for zero). Those formatters treat -0.0 and 0.0 as identical and produce "0" (or "0.0") rather than preserving the negative sign.
+
+Why negative zero was lost
+- IEEE-754 floating-point has a distinct negative zero value. Python's float preserves the sign internally, so -0.0 is a float that will stringify as '-0.0' with some conversions (repr(-0.0) and str(-0.0) preserve the negative sign).
+- But certain formatting options (notably the general format 'g' and some custom logic that coerces to int) normalize -0.0 to 0 because they consider sign irrelevant for a zero value. If add_number uses one of those, the negative sign is dropped and you get "0" in the buffer, which makes the test fail.
+
+How to find the exact line
+1. Open MockCodeConsumer.add_number. Find the line that turns the incoming number into a string. It will look like one of:
+   - self._parts.append(str(value))
+   - self._buffer += "{:g}".format(value)
+   - s = format(value, 'g')
+   - self._code.append(int(value)) or s = str(int(value))
+2. That line is where -0.0 is turned into "0". That's the line to change.
+
+Concrete fixes (pick one)
+
+A) Preserve the sign using repr() or str()
+- Replace the formatter that drops the sign with repr(value) or str(value). Example patch:
+  - Old (problem):
+    s = "{:g}".format(value)
+  - New (fix):
+    s = repr(value)   # repr(-0.0) -> '-0.0'
+  or
+    s = str(value)    # str(-0.0) -> '-0.0' in current CPython
+
+B) Explicitly handle negative zero
+- If you must use a specific numeric format but still preserve -0.0, detect negative zero and emit '-0.0' explicitly:
+  - import math
+  - if value == 0.0 and math.copysign(1.0, value) < 0:
+        s = '-0.0'
+    else:
+        s = format(value, 'g')   # or whatever format you need
+
+C) Use math.copysign/struct to detect sign without relying on formatting
+- Example:
+  - import math
+  - sign_is_negative = (value == 0.0 and math.copysign(1.0, value) < 0)
+  - s = ('-' if sign_is_negative else '') + format(abs(value), 'g')
+
+Recommended change
+- If you only need a faithful textual representation, switch to repr(value) in add_number. It is the simplest and preserves '-0.0' without extra logic:
+  - Locate the stringification line in MockCodeConsumer.add_number and change it to:
+      s = repr(value)
+      self._parts.append(s)    # or whatever appending the code uses
+- If your code must use a specific numeric formatting (for example fixed precision), add the negative-zero check using math.copysign as shown above.
+
+Add a unit test to prevent regressions
+- Add a test that calls add_number(-0.0) and asserts get_code() contains '-0.0':
+  - cc = MockCodeConsumer()
+    cc.add_number(-0.0)
+    assert cc.get_code() == '-0.0'
+- Also test add_number(0.0) == '0.0' (or whatever canonical form you expect) to ensure you don't flip-sign all zeros.
+
+Summary
+- The failure occurs because MockCodeConsumer.add_number converts -0.0 to a string using a formatter that drops the negative sign (e.g. "{:g}".format, int conversion, or similar).
+- Fix it by switching to repr(value) or adding an explicit negative-zero detection using math.copysign, and add tests for -0.0 and 0.0 to prevent future regressions.

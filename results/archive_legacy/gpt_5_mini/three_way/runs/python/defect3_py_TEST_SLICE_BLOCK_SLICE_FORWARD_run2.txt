@@ -1,0 +1,45 @@
+What happened (what failed)
+- The IndexError is raised by the check at lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  This means translate_string called code_point_at with index equal to or greater than len(code_units).
+
+Why it happened (root cause)
+- code_point_at (lines 38–44) correctly detects a UTF‑16 surrogate pair by inspecting code_units[index] (named high) and, if present, code_units[index + 1] (named low), and returns the combined code point.
+- translate_string (in CsvEscaper) is iterating over code_units by an index variable but advances that index incorrectly when it encounters a surrogate pair.
+  - After code_point_at returns a supplementary code point (i.e. came from a surrogate pair), translate_string should consume two UTF‑16 code units and therefore advance index by 2.
+  - The buggy implementation advances the index by the wrong amount (typically by 1, or applies a second incorrect advance), so the next loop either:
+    - calls code_point_at with index pointing at the low surrogate (producing incorrect behavior), or
+    - advances beyond the end of code_units and calls code_point_at with index == len(code_units), producing the IndexError you see at lines 35–36.
+- The failing test input "\U0001F630A" is exactly the situation that exposes this: one surrogate pair followed by another character. The loop mis-advances when handling the surrogate pair and ends up calling code_point_at out-of-range.
+
+Where it occurs (file/variables/lines)
+- Method: CsvEscaper.translate_string — the index update inside the main loop.
+- Function: code_point_at (lines 35–44 in your slice) raises the IndexError when called with index >= len(code_units).
+- Variables: index (the loop pointer), code_units (the UTF‑16 code unit list/sequence), high and low (inside code_point_at).
+
+Concrete fixes (step-by-step)
+1. Make translate_string consume the correct number of UTF‑16 code units for each character:
+   - After calling code_point_at(index, code_units), decide how many code units were consumed: if the returned code point is > 0xFFFF then it was a surrogate pair and you must increment index by 2; otherwise increment by 1.
+   - Option A (minimal change): change the loop that increments index. For example:
+     - cp = code_point_at(index, code_units)
+     - if cp > 0xFFFF:
+         index += 2
+       else:
+         index += 1
+   - Option B (clearer): change code_point_at to also return the number of code units consumed, e.g. return (code_point, consumed). Then in translate_string do:
+     - cp, consumed = code_point_at(index, code_units)
+     - index += consumed
+
+2. Ensure translate_string is iterating over UTF‑16 code units (the same representation code_point_at expects):
+   - If you use to_utf16_code_units(codepoint_string) to get code_units, ensure every place translate_string reads from that same list. Mixing Python str indexing (which is code points on some builds) with explicit UTF‑16 units will confuse indexes.
+
+3. Add defensive checks/logging while fixing:
+   - Before calling code_point_at, you can ensure index < len(code_units). Avoid double-advancing the index, e.g. by only modifying index in one place (the end of the loop) rather than in multiple places.
+
+Why these steps fix it
+- They guarantee translate_string and code_point_at agree on how many code units correspond to the item they just processed. That prevents calling code_point_at with an index past the end of code_units and prevents treating a low surrogate as a new character.
+
+Summary
+- Root cause: translate_string advances index incorrectly for surrogate pairs, leading to code_point_at being called with index >= len(code_units) and raising the IndexError at lines 35–36.
+- Fix: make translate_string consume 2 code units when code_point_at returns a supplementary code point (or have code_point_at return a consume-count) and ensure translate_string and code_point_at use the same UTF‑16 code_units sequence.

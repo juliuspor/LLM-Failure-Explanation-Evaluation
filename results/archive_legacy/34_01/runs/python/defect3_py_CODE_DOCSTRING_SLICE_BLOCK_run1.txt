@@ -1,0 +1,65 @@
+What happened (what fails)
+- The code raises IndexError from code_point_at(...) when pos becomes equal to length (out of range). That happens inside these lines:
+
+  while pos < length:
+      consumed = self.translate_codepoint(code_units, pos, out)
+      ...
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+- The slice check you gave shows code_point_at raises when index >= len(code_units) (lines 35–36 in your slice block). So the failing call is code_point_at(code_units, pos) when pos == length.
+
+Why it fails (root cause)
+- translate_codepoint(...) returns a number "consumed" (apparently the number of codepoints it handled), but the loop that advances pos assumes there are that many codepoints left and blindly calls code_point_at for each iteration.
+- The loop doesn't check pos against length before calling code_point_at. If the translator consumed one or more codepoints that include the final code unit(s), the loop can reach an iteration where pos == length and still call code_point_at, which triggers IndexError.
+- Concretely: while pos < length encloses the translate_codepoint call, but after translate_codepoint returns a positive consumed value you may advance pos multiple times in the for-loop. During those iterations pos can reach length — and the next call to code_point_at(code_units, pos) tries to read past the end.
+
+Where it happens (specific variables & line)
+- In the for pt in range(consumed): loop you call code_point_at(code_units, pos). If pos >= length, code_point_at raises IndexError (slice lines 35–36).
+- The variables involved: pos, length, consumed, code_units, and the call to code_point_at(...) on the right-hand side of pos += char_count(...).
+
+Concrete fixes (step-by-step, pick one)
+
+Option A — stop calling code_point_at past end (minimal change)
+1. Replace the for-loop with a loop that checks bounds before calling code_point_at:
+
+   pt = 0
+   while pt < consumed and pos < length:
+       cp = code_point_at(code_units, pos)
+       pos += char_count(cp)
+       pt += 1
+
+2. If reaching pos == length before finishing consumed should be an error in your protocol, raise a clear exception (e.g. ValueError("translate_codepoint claimed to consume more codepoints than remain at pos {pos}")).
+
+Why: this prevents code_point_at from being called with pos == length.
+
+Option B — have translate_codepoint return number of code units consumed (recommended if possible)
+1. Change translate_codepoint to return the count of code units (1 or 2 per codepoint) it consumed, not the number of codepoints.
+2. After consumed = self.translate_codepoint(...), do pos += consumed directly (no inner loop and no extra calls to code_point_at).
+
+Why: it avoids re-inspecting the input and matches how you actually need to advance pos (in code units).
+
+Option C — compute advancement from code_units without code_point_at
+1. If you must keep consumed as number of codepoints, advance pos by inspecting code_units for surrogates directly:
+
+   def char_units_at(code_units, idx):
+       if idx + 1 < length and is_high_surrogate(code_units[idx]) and is_low_surrogate(code_units[idx+1]):
+           return 2
+       return 1
+
+   for pt in range(consumed):
+       if pos >= length:
+           raise ValueError("translate_codepoint claimed too many codepoints at pos {}".format(pos))
+       pos += char_units_at(code_units, pos)
+
+2. Add a clear error if you detect translate_codepoint asked to consume more codepoints than remain.
+
+Why: this avoids calling code_point_at which enforces the index check you hit.
+
+Which fix to choose
+- If you control translate_codepoint, Option B is the cleanest: translators should tell you how many code units they consumed so the outer algorithm doesn’t need to re-parse.
+- If you can’t change translate_codepoint, use Option A or C and add an explicit check that translate_codepoint did not claim to consume more codepoints than remain, raising a clear error if it did.
+
+Summary
+- Root cause: the for pt in range(consumed) loop calls code_point_at without checking pos < length, allowing an out-of-range access (IndexError).
+- Fix by either: (1) checking bounds inside the loop, (2) making translate_codepoint return code-unit count and increment pos by that, or (3) compute char unit lengths directly without calling code_point_at. Include an explicit error if translate_codepoint claims to consume more codepoints than remain.

@@ -1,0 +1,45 @@
+What fails
+- At line 337 you set inferred_type = type(array). That makes inferred_type the Python type of the list object (usually <class 'list'>), not the type of the list elements. Later code (ArrayUtils._copy_list_grow1 and the type checks) expects a component/element type, not the container type.
+- As a concrete consequence:
+  - ArrayUtils._copy_list_grow1 receives a wrong type (the list class) and will create a new list with the wrong “component” type or otherwise behave incorrectly.
+  - The check at line 346 (if inferred_type == object ...) will never behave correctly when the array is non-empty, because inferred_type will be something like <class 'list'> rather than the element type. That can let invalid casts slip through or raise unexpectedly later.
+- The root cause occurs at the branch starting at line 337 (the array-not-None branch): you examined the container instead of its elements.
+
+Where it happens (exact lines)
+- Line 337: inferred_type = type(array) — wrong value (type of the list, not type of elements).
+- Line 340: inferred_type = object — this is the fallback when both array and element are None; that branch is fine.
+- Line 346–347: the TypeError logic is based on inferred_type being the element type, but inferred_type will be list (or another container type) for non-None arrays, so the check is meaningless.
+
+Why that causes failures
+- The function promises the new list’s component type matches the original list or the element. Passing the container’s type breaks that assumption and causes downstream routines or type checks to see mismatched types and fail (either immediately or later when the list is used).
+- If the original array is empty, even using array[0] naïvely would fail; but currently you use the wrong type in all non-None-array cases.
+
+How to fix (clear, actionable steps)
+1. When array is not None, determine the element/component type, not the list type. Typical choices:
+   - If array is non-empty, use the type of its first element: inferred_type = type(array[0]).
+   - If array is empty, prefer expected_type (if provided) or fall back to type(element) (if element is not None) or object.
+2. Keep your existing element-based fallback for when array is None.
+3. Use identity or direct comparison for the object sentinel if you prefer clarity (inferred_type is object).
+4. Ensure you handle element == None properly: if the element is None and array is None or empty and expected_type is provided, use expected_type.
+
+Minimal patch (replace the whole inference block with this logic):
+    if array is not None:
+        if len(array) > 0 and array[0] is not None:
+            inferred_type = type(array[0])
+        elif expected_type is not None:
+            inferred_type = expected_type
+        elif element is not None:
+            inferred_type = type(element)
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Notes and edge cases
+- If your list can contain mixed types, choosing type(array[0]) is a heuristic; you might instead want to compute a common base type or prefer expected_type when available.
+- If array is empty and expected_type is provided, use expected_type to avoid unknown-component-type behavior.
+- Make sure ArrayUtils._copy_list_grow1 expects an element type (not a container type) — that is how the rest of the code is written.
+
+This explains the exact root cause (type(array) used instead of element/component type), where it occurs (line 337) and the precise changes to make.

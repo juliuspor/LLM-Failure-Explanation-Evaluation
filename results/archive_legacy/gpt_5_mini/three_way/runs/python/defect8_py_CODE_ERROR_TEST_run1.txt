@@ -1,0 +1,55 @@
+What happened (where it fails)
+- Input: "fr__POSIX" (locale_str).
+- The code reaches the block that handles the 3+ character forms (else branch after length==2).
+- It checks locale_str[2] == '_' (passes because position 2 is underscore).
+- Then it does:
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(...)
+- For "fr__POSIX", ch3 == '_' and ch4 == 'P'. The check expects two uppercase letters for the country, so ch3 ('_') fails the check and you get ValueError: Invalid locale format: fr__POSIX.
+
+Why this happens (root cause)
+1. The function assumes that after the first underscore (at index 2) there must always be a two-letter uppercase country code (positions 3 and 4). It does not allow an empty country (i.e., a double underscore) followed by a variant.
+2. The code therefore rejects valid Java-style locales that use language__variant (empty country), e.g. "fr__POSIX".
+3. Additionally, the initial length check is awkward (if length != 2 and length != 5 and length < 7) and does not clearly express the accepted forms; this makes reasoning about allowed inputs harder and can hide the intended cases.
+
+Exactly where to change (what to change)
+- Replace the strict country-letter validation (the ch3/ch4 check) with logic that allows an empty country when a second underscore follows the first underscore.
+- Handle two cases after verifying locale_str[2] == '_':
+  - If locale_str[3] == '_': country is "" and variant is locale_str[4:].
+  - Else: require two uppercase letters at positions 3 and 4; if length == 5 return language+country; otherwise require another '_' at position 5 and variant = locale_str[6:].
+
+Concrete corrected logic (pseudocode / patch)
+Replace the section after verifying locale_str[2] == '_' with:
+
+    # after already checked locale_str[2] == '_'
+    if locale_str[3] == '_':
+        # empty country, variant starts at position 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    else:
+        # non-empty country: must be two uppercase letters
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        if length == 5:
+            return Locale(locale_str[0:2], locale_str[3:5])
+        else:
+            if locale_str[5] != '_':
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Also consider simplifying or clarifying the initial length check to reflect accepted formats:
+- Accept at minimum length 2.
+- For language_country accept length 5.
+- For language_country_variant accept length >=7.
+- For language__variant accept length >=4 (language + "__" + variant of at least 1 char). Example condition:
+
+    if length < 2:
+        raise ValueError(...)
+    # then handle formats explicitly as above
+
+Summary
+- The failing line is the check that treats positions 3 and 4 as always uppercase letters (ch3/ch4). That rejects the language__variant form where position 3 is '_' (empty country).
+- Fix by detecting locale_str[3] == '_' and treating country as the empty string and the variant as locale_str[4:], and keep the existing validation for the non-empty country case.

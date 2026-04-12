@@ -1,0 +1,57 @@
+What happens
+- The code raises ValueError at the minutes check (lines 396–397):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why it fails (root cause)
+- The code assumes minutes_offset is always non‑negative (0..59) but also wants to support negative total offsets (for example: -1 hour and 30 minutes -> total -1:30).
+- Callers sometimes pass a negative minutes_offset to indicate the minutes part should be negative (e.g. hours_offset = -1, minutes_offset = -30). That immediately fails the minutes range check because minutes_offset < 0.
+- The subsequent sign handling that combines hours_in_minutes and minutes_offset (lines after the try) is fragile and confusing because it reuses the minutes_offset variable for a different meaning (first an input field, later the computed total minutes). But the immediate error is the too‑strict minutes validation on line 396–397.
+
+Where it occurs
+- The failure occurs in this function, at lines 396–397 (the minutes validation). It happens before the sign combination code runs.
+
+How to fix it (concrete steps)
+1. Decide and document the intended API: do you want callers to pass minutes as a non‑negative part (0..59) and the sign comes only from hours_offset, or do you want to accept signed minutes?
+2. Make the minutes validation match that decision:
+   - If you want unsigned minutes (recommended): require 0..59 and accept negative total by applying the sign of hours_offset when combining.
+   - If you want signed minutes: allow minutes_offset in -59..59 and use its sign when combining; disallow minutes_offset whose absolute value is > 59.
+
+3. Avoid reusing the input variable for a computed value; compute a new variable total_minutes for clarity.
+
+Fixed example (unsigned minutes, sign from hours_offset)
+- Validation: require 0 <= minutes_offset <= 59 (keep current check).
+- Combine into total_minutes like:
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+
+Fixed example (allow signed minutes)
+- Change validation to:
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Combine like:
+    total_minutes = hours_in_minutes + minutes_offset
+  (because minutes_offset already carries the sign)
+
+4. Use a new variable name for the computed minutes to avoid confusion:
+   total_minutes = ...
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Minimal concrete patch (unsigned minutes, preserve current API but avoid reusing minutes_offset)
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this patch fixes it
+- It keeps the existing 0..59 minutes contract, applies the sign of hours_offset when computing the final offset, and avoids overwriting the input minutes_offset which caused confusion.
+
+Summary
+- The immediate failure is caused by rejecting negative minutes at lines 396–397. Decide whether minutes should be signed or not, then validate and combine consistently, and use a separate variable (e.g. total_minutes) for the computed value to avoid confusion.

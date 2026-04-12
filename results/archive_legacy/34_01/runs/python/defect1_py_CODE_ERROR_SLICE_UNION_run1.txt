@@ -1,0 +1,62 @@
+What happened (where it failed)
+- The function raised ValueError at line 396:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  Error: "Minutes out of range: -15"
+
+- That means the caller passed minutes_offset = -15. The check rejects any negative minutes immediately, so the method never reaches the later code that combines hours and minutes.
+
+Why it failed (root cause)
+- The code is inconsistent about the sign of minutes_offset:
+  - Lines 396–397 enforce that minutes_offset must be between 0 and 59 (no negatives allowed).
+  - Later (lines 402–404) the code treats minutes_offset as the "minutes part" and tries to combine it with the hours sign:
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+    That logic expects minutes_offset to be a non-negative minute component when hours_offset is negative (it subtracts minutes when hours are negative). It does not expect callers to pass a negative minutes_offset.
+- The immediate ValueError shows the caller passed a negative minutes_offset (for example hours_offset = -1, minutes_offset = -15). Because the pre-check forbids negative minutes, the function fails before the combination logic. In short: caller used a different sign convention (negative minutes) than the function’s validation expects.
+
+Where in the code to look
+- Validation (rejects negative minutes): lines 396–397.
+- Combination logic (assumes minutes is non-negative): lines 402–404.
+- Variable reuse: minutes_offset is reused for the combined total minutes at line 402–404 which makes reasoning harder and contributed to the confusion.
+
+Concrete fixes (pick one; exact code changes shown)
+
+Option A — Require callers pass minutes as a non-negative 0..59 (minimal change)
+- Document the API: minutes_offset must be 0..59 and sign comes from hours_offset.
+- No change to validation. Fix callers to pass (-1, 15) rather than (-1, -15).
+
+Option B — Accept negative minute input (change validation + combine simply)
+- Allow minutes_offset to be negative and compute total minutes directly:
+  Replace the validation and combine with:
+
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    total_minutes = hours_offset * 60 + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+  This accepts callers passing (-1, -15) and also (1,15). It makes intent explicit and avoids the confusing branch that subtracts minutes.
+
+Option C — Keep minutes non-negative but fix combination and variable naming
+- Keep the validation as-is (minutes 0..59). Combine using a new variable so intent is clear:
+
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+- Then update callers to never pass negative minutes (same as Option A).
+
+Which to choose
+- If existing callers sometimes pass a negative minutes value (like -15), choose Option B so the API is forgiving and consistent.
+- If you prefer the API that minutes are always non-negative, choose Option C and fix callers to pass the minutes absolute value.
+
+Summary
+- Root cause: mismatch between validation (forbids negative minutes) and the caller’s usage (passed -15) / ambiguous sign handling. The validation at line 396 rejects negative minutes and causes the ValueError; the later logic expects the minute component to already be non-negative. Fix by either changing validation and combine logic (Option B) or standardizing the API and callers so minutes are always non-negative (Option C).

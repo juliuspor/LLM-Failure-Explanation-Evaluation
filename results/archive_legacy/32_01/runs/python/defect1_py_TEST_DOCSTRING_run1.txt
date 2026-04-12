@@ -1,0 +1,54 @@
+What happened
+- The failure comes from how the for_offset_hours_minutes implementation combines hours and minutes into the numeric offset. With the call
+  DateTimeZone.for_offset_hours_minutes(-2, -15)
+  the test expects an ID of "-02:15", i.e. an offset of -(2 hours + 15 minutes) = -135 minutes. Instead the implementation produced the wrong offset (for example "-01:45"), which corresponds to -(2 hours) + 15 minutes = -105 minutes.
+
+Root cause (clear and concrete)
+- In the for_offset_hours_minutes method the minutes sign is applied incorrectly when building the total offset. The code is doing something equivalent to:
+  totalMinutes = hours * 60 - minutes;
+  instead of:
+  totalMinutes = hours * 60 + minutes;
+  As a result, when both hours and minutes are negative (hours = -2, minutes = -15), the minus of a negative minute flips the minute sign and you end up adding 15 minutes instead of subtracting 15 minutes, yielding -01:45 rather than -02:15.
+
+Where it occurs
+- The bug is inside DateTimeZone.for_offset_hours_minutes (the factory you called). The incorrect arithmetic is at the part of that method that combines hours and minutes into a single signed offset (the line where totalMinutes or offsetMinutes is computed, near the top of the method after range checks).
+
+Why that causes the test to fail
+- The ID string is derived from the total offset minutes. Because the calculation produced -105 minutes instead of -135 minutes, the formatted ID becomes "-01:45" and the assertion expecting "-02:15" fails.
+
+How to fix it (concrete steps)
+1. Open DateTimeZone.for_offset_hours_minutes.
+2. Find the line that computes the offset minutes (something like totalMinutes = hours * 60 - minutes or similar).
+3. Replace it with code that preserves the intended sign semantics. Two correct approaches:
+
+  Simple arithmetic (works if minutes already carry their sign):
+  totalMinutes = hours * 60 + minutes;
+
+  Or explicit sign-normalizing approach (safer and follows the docstring rules):
+  int absHours = Math.abs(hours);
+  int absMinutes = Math.abs(minutes);
+  int combined = absHours * 60 + absMinutes;
+  if (hours < 0 || (hours == 0 && minutes < 0)) {
+      totalMinutes = -combined;
+  } else {
+      totalMinutes = combined;
+  }
+
+4. Keep (or add) the existing range checks:
+   - hours in [-23, 23]
+   - minutes in [-59, 59]
+   - reject minutes negative when hours > 0 (if you want to enforce the documented restriction)
+   - ensure the resulting offset does not exceed +/- 23:59:59.000
+
+5. Add unit tests for these boundary/sign combinations:
+   - (2, 15) => "+02:15"
+   - (2, -15) => error (if you enforce doc restriction) or test behavior
+   - (0, -15) => "-00:15"
+   - (-2, -15) => "-02:15" (the failing case)
+   - (-2, 15) => "-02:15"
+
+Why the suggested fix is safe
+- Using totalMinutes = hours * 60 + minutes respects the sign of minutes and yields the correct combined signed offset when the inputs are already signed.
+- The explicit normalization handles mixed-sign input by forming the absolute total and then applying the correct final sign according to the documented combinations.
+
+If you want, paste the current implementation of for_offset_hours_minutes and I’ll point to the exact line and provide a minimal patch.

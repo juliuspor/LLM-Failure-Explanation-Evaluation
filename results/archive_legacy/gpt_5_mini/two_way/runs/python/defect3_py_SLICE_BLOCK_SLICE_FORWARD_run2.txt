@@ -1,0 +1,58 @@
+What happened (where it fails)
+- The IndexError is raised at line 35:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+- That means some caller passed index == len(code_units) (or index < 0). The code assumes `index` is an existing code unit index, but callers sometimes call this routine with `index == len(code_units)` (the string end). The check `index >= len(code_units)` rejects that and raises the exception.
+
+Why this is the root cause (why it happens)
+- slice_forward (lines 38–44) expects to read `high = code_units[index]` and possibly `code_units[index + 1]`.
+- The caller that invoked this function passed an index equal to len(code_units) — i.e. one past the last element — which is out of range for `code_units[index]`. The guard on lines 35–36 correctly detects that and raises the IndexError.
+- In short: the function requires a valid index of an existing code unit, but the rest of the code sometimes calls it with an index equal to the string length (one-past-end). The mismatch between caller expectations and the precondition on `index` is the bug.
+
+How to fix it (explicit steps you can apply)
+You must choose either (A) make callers never call with index == len(code_units), or (B) make this function accept the call pattern and handle index == len appropriately. Pick one of the two solutions below.
+
+A — Fix the caller(s) (recommended if caller intended to supply a valid code unit index)
+1. Find the call site(s) that pass `index` to this function. Search for call sites that may pass `len(code_units)` or compute an index from a slice boundary.
+2. Before calling, ensure the caller only calls with 0 <= index < len(code_units). If the index can be the string end, guard or adjust it:
+   - If the caller was trying to read the prior code unit, pass `index - 1` instead.
+   - If the caller should not call at end, add a check:
+     if index >= len(code_units):
+         handle end-of-string case (do not call this function)
+3. Run tests to verify no code path passes `len(code_units)` anymore.
+
+B — Make the function tolerate index == len(code_units) (if callers expect that)
+1. Change the guard at line 35 to allow one-past-end if you want to treat that as a valid “empty” position:
+   Replace:
+     if index < 0 or index >= len(code_units):
+         raise IndexError(f"String index out of range: {index}")
+   With (example — allow index == len):
+     if index < 0 or index > len(code_units):
+         raise IndexError(f"String index out of range: {index}")
+2. Add explicit handling in slice_forward for the `index == len(code_units)` case before reading `high`:
+   Insert after the guard:
+     if index == len(code_units):
+         return <appropriate value or sentinel>   # decide how you want to represent end-of-string
+   You must decide what this function should return at end-of-string (e.g., None, -1, raise a different error, or a special code point). Implement that choice consistently and update callers.
+3. Update callers and tests to rely on the documented behavior (what you return at end-of-string).
+
+Which to choose
+- If this function was designed to read an actual code unit at `index`, then callers should not pass `len(code_units)` — fix the callers (A).
+- If many callers deliberately call this at slice boundaries to detect pairs at the end, then change the function to handle `index == len(code_units)` and return an agreed sentinel (B).
+
+Concrete minimal code change (if you choose to reject one-past-end by caller)
+- No code change here; instead change the caller(s) so that they call with index-1 or guard before calling. This is the safest because it preserves the current function precondition.
+
+Concrete minimal code change (if you choose to accept one-past-end in this function)
+- Replace the guard and add an early return. Example:
+  35 |     if index < 0 or index > len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  37 |     if index == len(code_units):
+  38 |         return None   # or another sentinel your codebase expects
+  39 |     high = code_units[index]
+  ... (rest unchanged)
+
+Be explicit about the sentinel you choose and update all callers to handle it.
+
+Summary in one sentence
+The function raises IndexError because callers sometimes pass index == len(code_units) (one past the last code unit) even though the function requires 0 <= index < len(code_units); fix either the callers (stop passing len) or the function (accept index == len and handle it explicitly).

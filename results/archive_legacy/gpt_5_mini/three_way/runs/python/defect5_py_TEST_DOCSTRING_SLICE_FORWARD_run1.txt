@@ -1,0 +1,51 @@
+Short answer: two places in ArrayUtils disagree with these tests.
+
+1) Root cause for the LANG-35-style failure (failing test: test_add_null_to_null_with_expected_type)
+- What the test does: calls ArrayUtils.add(None, None, expected_type=str).
+- What the implementation likely does: when array is None it infers the element component type from element (element is None), so it falls back to a generic/object type. Concretely it probably does something like:
+  - if array is None:
+      component_type = type(element) if element is not None else object
+      new = create_array(component_type, 1)
+      new[0] = element
+      return new
+- Why that fails in the original Java scenario (and why the test exists): the caller expects a String[] (expected_type=str) but the method returned an Object[] because element was None and the code ignored expected_type. In Java that causes ClassCastException; in this test the intent is to ensure ArrayUtils respects expected_type when element is None.
+- Where it happens: inside ArrayUtils.add, in the branch that handles array is None and uses element to decide component type. The bug is "ignoring the expected_type parameter when element is None".
+
+Fix (explicit steps)
+- In ArrayUtils.add(array, element, expected_type=None) change the None-array branch:
+  - If array is None:
+      - If expected_type is not None: use expected_type as the component type.
+      - Else if element is not None: infer component_type = type(element).
+      - Else (both array and element are None and no expected_type): fall back to object.
+  - Construct the new list/array using that chosen component_type.
+- Also add explicit type-checking when expected_type is provided: if element is not None and not isinstance(element, expected_type) raise TypeError.
+
+2) Secondary failure likely to show up in tests for add_at_index (failing test: test_add_at_index_invalid_raises)
+- What the test does: expects IndexError for two invalid indices:
+    ArrayUtils.add_at_index(arr, 10, 99) and ArrayUtils.add_at_index(arr, -1, 99)
+- Why it fails in Python implementations that follow list semantics:
+  - Python lists accept negative indices (e.g., -1 means last element). If add_at_index simply delegates to Python list.insert or uses negative indices without rejecting them, the call with index -1 will succeed instead of raising IndexError. The test explicitly wants negative indices to be treated as invalid.
+- Where it happens: inside ArrayUtils.add_at_index, before performing the insertion, there is no explicit check rejecting negative indices or indices > len(array). The code probably does something like:
+    arr_copy = list(array)
+    arr_copy.insert(index, element)
+    return arr_copy
+  which will accept negative indices and silently succeed.
+
+Fix (explicit steps)
+- In ArrayUtils.add_at_index(array, index, element):
+  - If array is None:
+      - Accept only index == 0; otherwise raise IndexError.
+  - If index < 0 or index > len(array): raise IndexError (note: index == len(array) is allowed for append at end).
+  - After those checks, perform the copy-and-insert and return the new list.
+
+Summary (what to change, referenced to names/places)
+- In ArrayUtils.add:
+  - Change the None-array handling to prefer expected_type over element when element is None:
+    component_type = expected_type if expected_type is not None else (type(element) if element is not None else object)
+  - Enforce expected_type when provided (raise TypeError for mismatch).
+- In ArrayUtils.add_at_index:
+  - Add bounds checks:
+    if array is None and index != 0: raise IndexError
+    if array is not None and (index < 0 or index > len(array)): raise IndexError
+
+Those two fixes address the explicit failures: the LANG-35 null/null/expected_type path, and the test that expects IndexError for negative indices.

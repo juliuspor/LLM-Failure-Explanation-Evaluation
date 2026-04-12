@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The failure occurs inside DateTimeZone.for_offset_hours_minutes at the minutes check (lines 400–401):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That ValueError is being raised because the minutes_offset parameter passed into for_offset_hours_minutes is outside the allowed 0..59 range.
+
+Why it happens (root cause)
+- The method expects minutes_offset to be in the range 0..59 (the validation at lines 400–401 enforces that).
+- Some callers pass a negative minutes_offset (for example to indicate a -5:30 offset they pass hours_offset = -5, minutes_offset = -30). Because of the check at lines 400–401 the method rejects that input immediately and raises the ValueError.
+- The code then attempts to combine hours and minutes into a total offset by reusing and mutating the minutes_offset variable:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic assumes minutes_offset is a non-negative absolute minute amount and that the sign is carried only in hours_offset. If callers pass a signed minutes_offset, the earlier range check causes the failure.
+
+Why this is confusing
+- The method both validates minutes_offset as non-negative (0..59) and then reassigns minutes_offset to mean "total minutes", which is a different value with a different valid range. Reusing the same variable name makes intent unclear and contributes to misuses by callers.
+- There is a mismatch between how some callers provide input (signed minutes) and what the method accepts (unsigned minutes with sign only on hours).
+
+Concrete fixes (clear steps)
+1. Decide the API contract (pick one):
+   - Option A (current contract): minutes_offset must be 0..59 and sign is carried only by hours_offset.
+   - Option B (alternate contract): allow minutes_offset to be signed (−59..59) and determine total sign from sign of hours and/or minutes.
+
+2. If you keep Option A (recommended minimal change):
+   - Document the contract clearly.
+   - Stop reusing the minutes_offset variable for total minutes; use a new variable total_minutes for clarity:
+       total_minutes = hours_offset * 60
+       if total_minutes < 0:
+           total_minutes -= minutes_offset
+       else:
+           total_minutes += minutes_offset
+   - Then compute offset from total_minutes. This prevents confusion between validated input and computed value.
+
+3. If you want Option B (accept signed minutes), change the validation and logic:
+   - Replace the validation at lines 400–401 with something allowing signed minutes:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+   - Compute total minutes consistently (for example, interpret sign of hours if hours != 0, else use sign of minutes):
+       total_minutes = hours_offset * 60 + minutes_offset
+   - Add tests for cases like (-5, -30), (-5, 30), (5, -30), (0, -30) to document exact behaviour.
+
+Short summary
+- The failure occurs because the method requires minutes_offset be between 0 and 59 (line 400–401) but callers sometimes pass a negative minutes_offset. The code also reuses minutes_offset for the computed total minutes, which mixes responsibilities and causes confusion. Fix by clarifying API (and documenting it), stop reusing the variable, or accept signed minutes and adjust validation/combination logic accordingly.

@@ -1,0 +1,52 @@
+What happened (where it failed)
+- The test calls LocaleUtils.to_locale('fr__POSIX').
+- In to_locale (starting at line 193) the code computes length = len(locale_str) (line 227) and then uses an incorrect conditional at line 236:
+  - if length == 2:
+      ch3 = locale_str[3]    (line 242)
+      ch4 = locale_str[4]    (line 243)
+      ...
+- That conditional is wrong: if length == 2, indexing locale_str[3] and locale_str[4] is out of bounds. Depending on input this leads to an IndexError when those lines run, or the condition itself is the wrong one for the branch the method intends to handle (country code/variant parsing). For your test specifically the code path is wrong for the "language + empty country + variant" form ('fr__POSIX') — the method never properly recognizes the double-underscore empty country + variant pattern.
+
+Why it failed (root cause)
+- The code uses the condition if length == 2 but then immediately indexes characters at positions 3 and 4. That is logically inconsistent: you must check that the string is long enough before reading those indices.
+- The method appears intended to validate a two-letter country code at positions 3 and 4, but the guard is wrong. Also the code does not handle the "language + empty country + variant" syntax (double underscore followed by variant), which is exactly the format of 'fr__POSIX'. So either:
+  - the conditional should allow longer strings (so indexing is safe), or
+  - there should be a separate branch that detects a double underscore at positions 2 and 3 and extracts the variant from the remainder.
+
+Exactly where to change it (concrete steps)
+1. At line 236 replace the incorrect guard:
+   - Current: if length == 2:
+   - Fix: ensure you only index positions 3 and 4 when the string is long enough, e.g. if length >= 5:
+     - This prevents IndexError when reading locale_str[3] and locale_str[4].
+
+2. Add explicit handling for empty country + variant (the 'fr__POSIX' case):
+   - Before attempting to read country letters, check for the double-underscore at indices 2 and 3:
+     - If locale_str[2] == '_' and locale_str[3] == '_', set country = '' and variant = locale_str[4:], then return Locale(language, '', variant).
+   - This must be done before the branch that expects a non-empty country code.
+
+3. Keep the existing uppercase validation but only after confirming the indices exist:
+   - After the new length check (length >= 5) and after verifying locale_str[2] == '_' and not a double-underscore, validate ch3 and ch4 are 'A'..'Z' (lines 242–245).
+
+Minimal example of the logic to implement (pseudocode)
+- compute length
+- if length >= 2:
+    language = locale_str[0:2]
+- if length >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+    variant = locale_str[4:]   # handles 'fr__POSIX'
+    return Locale(language, '', variant)
+- if length >= 5 and locale_str[2] == '_':
+    ch3 = locale_str[3]; ch4 = locale_str[4]
+    validate ch3 and ch4 are uppercase letters
+    country = locale_str[3:5]
+    if length > 5 and locale_str[5] == '_':
+        variant = locale_str[6:]
+    return Locale(language, country, variant)
+
+Why this fixes it
+- It avoids indexing past the string end (no IndexError).
+- It explicitly recognizes the double-underscore pattern that means an empty country and a variant, which is exactly what 'fr__POSIX' uses.
+- It keeps the existing validation for a non-empty country code in the correct place.
+
+Summary
+- Root cause: wrong conditional (if length == 2) combined with unsafe indexing at lines 242–243 and no handling of the double-underscore empty-country + variant pattern.
+- Fix: change the length guard to require sufficient length (line 236), add a branch to detect locale_str[2:4] == '__' and extract the variant, and only then validate and index ch3/ch4.

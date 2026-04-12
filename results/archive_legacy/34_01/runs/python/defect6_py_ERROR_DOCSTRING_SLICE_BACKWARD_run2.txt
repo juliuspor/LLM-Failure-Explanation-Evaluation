@@ -1,0 +1,49 @@
+What happened (short)
+- The test expected a negative zero value (the float with a negative sign bit, displayed as -0.0).
+- The code path starting at add(self, newcode) (line 126) calls self.append(newcode) (line 138).
+- Inside append the value’s sign was lost (it was coerced or normalized to plain 0), so the stored value is 0.0 (positive zero) and the assertion fails with "Expected -0.0, got 0".
+
+Why this happens (root cause)
+- Negative zero is a distinct IEEE-754 float bit pattern; Python treats -0.0 == 0.0 as True, but their representations differ (repr/printing may show -0.0, and low-level tests may check the sign bit).
+- The sign was discarded inside append. Typical ways that loses the negative-zero sign:
+  - converting the float to an int (int(-0.0) -> 0),
+  - formatting/parsing via string-to-number flows that normalize the sign,
+  - explicitly taking an absolute value (abs, math.fabs) or otherwise applying an operation that clears the sign bit,
+  - or storing the value into a data type that does not preserve sign (e.g., an integer field, or JSON encoder that writes "0" without sign).
+- The failure location is append(newcode) called from add (lines you gave). The variable involved is newcode: it arrives to add, then append is called with newcode; append then alters/normalizes newcode before storing.
+
+Exactly where to look
+- Line 126: def add(self, newcode): — this method receives newcode and calls append.
+- Line 138: self.append(newcode) — follow into the append method implementation. Inspect every conversion/assignment inside append that touches newcode (or the local name used there). Look for int(...), round(..., 0), abs(...), json/dict serialization, str(...) followed by float(...), or any place where you copy the value to a container that expects ints.
+
+Concrete fixes (step-by-step)
+1. Open the append method implementation (the method called at line 138).
+2. Find any conversion that could remove the sign bit. Common offenders:
+   - int(x) or long(x)
+   - abs(x) or math.fabs(x)
+   - rounding that yields an integer (round(x) then int)
+   - serialization/deserialization via strings that drop the negative sign for zero
+   - storing into an integer-only structure or schema
+3. If you need to keep the value as a float (including its sign):
+   - Ensure you do not convert to int. Keep the float: store newcode as-is.
+   - If you must coerce types, use float(newcode) rather than int(newcode). float(-0.0) remains -0.0.
+4. If the code legitimately intends to normalize zero to positive zero, decide whether the test should be changed. If the test must ensure the sign bit specifically, change append to preserve sign:
+   - If you need to ensure a signed zero when creating zeros, use math.copysign(0.0, x) to explicitly preserve sign: preserved = math.copysign(0.0, newcode)
+   - If you need to compare in tests, compare bit patterns instead of numeric equality: import struct; struct.pack('!d', value) to check sign bit.
+5. Add a unit test covering negative zero explicitly:
+   - Assert that append stores the sign bit when expected. Example comparison (in test):
+       import struct
+       assert struct.pack('!d', stored_value) == struct.pack('!d', -0.0)
+   - Or adjust expected value if the code should normalize zeros.
+
+Minimal code changes examples
+- If you find int(newcode) in append, change:
+    stored = int(newcode)
+  to:
+    stored = float(newcode)    # preserves -0.0
+- If you find abs(newcode), remove it or replace with logic that preserves sign when you want it:
+    stored = math.copysign(abs(newcode), newcode)  # keeps sign for zero if needed
+
+Summary
+- Root cause: append (called from add at line 138) normalizes/coerces newcode in a way that loses the negative-zero sign bit, so the test sees 0 instead of -0.0.
+- Fix by locating the conversion in append, stopping the conversion that removes sign (e.g., remove int(), abs(), or unwanted formatting), or explicitly preserve the sign with math.copysign if negative zero must be kept. Also update/add tests to compare bit patterns if the sign bit matters.

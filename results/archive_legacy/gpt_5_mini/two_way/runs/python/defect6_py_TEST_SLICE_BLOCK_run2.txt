@@ -1,0 +1,41 @@
+What happened (where)
+- The failure happens in the branch starting at line 176 of the slice block:
+  - Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - If that branch is taken, the code treats x as an integer, sets value = int(x) (line 177) and eventually calls self.add(str(value)) at line 192.
+- For x = -0.0 the condition x == int(x) is true (because -0.0 == 0), so the code enters the integer branch. Converting to int with value = int(x) turns -0.0 into 0, losing the negative sign bit. As a result self.add(str(value)) writes "0" instead of the required "-0.0".
+- The else branch (lines 193–194) would call self.add(str(x)), which would preserve "-0.0", but that branch is not reached because -0.0 satisfies the integer test at line 176.
+
+Why it fails (root cause)
+- The root cause is relying on numeric equality (x == int(x)) and an int conversion to decide formatting. That comparison treats -0.0 as equal to 0, and int(x) discards the sign bit, so the negative zero is lost before any sign-preserving formatting can run.
+- In other words: the code tests whether x is an integer first (line 176), then uses int(x) (line 177) to format. For the special IEEE-754 negative zero this path erases the sign and produces "0" instead of "-0.0".
+
+Exactly where to change and how (concrete steps)
+1. Detect negative zero before converting to int. Call the negative-zero test before line 176 and immediately format it specially. Example check (use your existing utility if available):
+   - if CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+         return
+   Place this before line 176 so negative-zero never reaches the integer branch.
+2. If you don't have is_negative_zero, use math.copysign or another sign-bit test:
+   - if x == 0.0 and math.copysign(1.0, x) < 0.0:
+         self.add("-0.0")
+         return
+3. Keep the rest of the integer formatting logic unchanged. Doing this ensures that:
+   - Negative zero is formatted as "-0.0".
+   - Other integers still go through the existing integer branch and produce "0", "42", "-42", etc.
+
+Minimal concrete patch (insert before line 176)
+- Insert:
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+  Or:
+    if x == 0.0 and math.copysign(1.0, x) < 0.0:
+        self.add("-0.0")
+        return
+
+Why this fixes it
+- It prevents -0.0 from entering the integer branch that calls int(x) (which discards the sign). The special-case preserves the negative sign and the decimal point required by the tests, and it does so before any integer conversion that would lose the sign bit.
+
+Notes
+- Do not try to detect negative zero by x < 0 or x != 0 — those will not work because -0.0 compares equal to 0.0 and is not less-than 0.
+- The rest of the code (mantissa/exp logic lines 180–191, and str(x) fallback at line 194) can remain as-is once negative zero is handled first.

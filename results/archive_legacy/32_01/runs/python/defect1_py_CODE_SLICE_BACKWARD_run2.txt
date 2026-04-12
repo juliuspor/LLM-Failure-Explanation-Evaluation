@@ -1,0 +1,56 @@
+What actually fails
+- The method DateTimeZone.for_offset_hours_minutes (lines shown around 400) rejects any negative minutes because of this check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  (this is at/around line 400)
+
+- If a caller passes a negative minutes_offset (for example hours_offset = -1, minutes_offset = -30), the code hits that check and raises ValueError immediately. That is the root cause of the failure you're seeing.
+
+Why it fails (root cause)
+- The API as implemented requires minutes_offset to be in the range 0..59 always. Negative minute values are not accepted.
+- Some callers expect to express a negative offset entirely with minutes (e.g. hours = 0, minutes = -30) or to pass minutes with the same sign as hours (e.g. hours = -1, minutes = -30). Those calls will be rejected by the minutes range check.
+- The code later uses the hours sign to decide whether to add or subtract minutes:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic assumes minutes_offset is non-negative, so the initial validation enforces that assumption. If a caller violates that assumption (passes a negative minutes_offset), the method fails at the validation line.
+
+Where it occurs
+- The failure occurs at the minutes validation in for_offset_hours_minutes (around line 400 in your slice). The exception raised is ValueError("Minutes out of range: ...").
+
+How to fix it (clear steps)
+Choose one of two fixes depending on intended API semantics:
+
+1) Keep the current API (minutes must be 0..59) and fix callers
+   - Update callers so minutes_offset is always non-negative and its sign is carried in hours_offset.
+   - Examples:
+     - For -1 hour 30 minutes, pass hours_offset = -1, minutes_offset = 30
+     - For -30 minutes only, pass hours_offset = 0, minutes_offset = 30 and indicate sign elsewhere (or pass hours_offset = -0? — better: add a separate parameter or helper)
+   - No code change in for_offset_hours_minutes needed.
+
+2) Accept signed minutes in the method (change validation and combination logic)
+   - Change the validation to allow minutes_offset in range -59..59.
+   - Require that minutes_offset has the same sign as hours_offset (or treat hours=0 as sign carrier):
+       - If hours_offset > 0: minutes_offset must be 0..59
+       - If hours_offset < 0: minutes_offset must be -59..0
+       - If hours_offset == 0: minutes_offset may be -59..59 (use its sign)
+   - Then compute total minutes consistently, e.g.:
+       total_minutes = hours_offset * 60 + minutes_offset
+   - Use FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE) as before.
+   - Example change (pseudocode):
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+       if (hours_offset > 0 and minutes_offset < 0) or (hours_offset < 0 and minutes_offset > 0):
+           raise ValueError("Minutes sign must match hours sign")
+       total_minutes = hours_offset * 60 + minutes_offset
+       offset = FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE)
+
+Which to choose
+- If your public API was intended to accept signed minutes, implement fix (2).
+- If the API contract is "minutes are always 0..59 and sign is in hours", then the failure indicates buggy caller code; fix the callers as in (1).
+
+Concrete places to change
+- The failing validation is at the minutes check in for_offset_hours_minutes (line ~400).
+- If changing the method, update the validation there and replace the later block that mutates minutes_offset with the simpler total_minutes calculation shown above.

@@ -1,0 +1,40 @@
+What happened (what you saw)
+- The test called cc.add_number(-0.0) expecting the consumer to emit the string '-0.0'.
+- The actual code produced '0' (the minus sign was lost).
+
+Where it happened (which code and lines)
+- The symptom appears while calling MockCodeConsumer.add(newcode) (slice shown). Relevant lines:
+  - Line 129–133: we check newcode length and set c = newcode[0]
+  - Lines 133–136: a conditional decides whether to append a separating space
+  - Line 138: self.append(newcode) writes the token into the consumer
+
+Why it happened (root cause)
+- add_number() is delivering the negative number in two pieces (a '-' token and a '0.0' token) rather than as one string "-0.0". Because add() treats tokens separately, the minus and the digits are appended in separate calls.
+- The conditional at lines 133–136 is intended to decide whether to insert a space between tokens. Its current logic causes the minus token and the numeric token to be combined or separated in the wrong way, which lets the minus sign be dropped when the second piece (the digits) is appended.
+  - Concretely: one call appended just '-' (previous token), then a second call appended '0.0' (newcode). Because the code that formats or normalizes those tokens elsewhere canonicalized the numeric piece to '0' (dropping the negative sign when the float value is -0.0), the final result lost the sign.
+- In short: the negative zero never stayed attached to the numeric characters in a single newcode string, and the logic that splits/joins tokens plus the numeric formatter produced '0' instead of '-0.0'.
+
+Why the minus sign was lost instead of producing '-0.0'
+- Floating negative zero exists (Python str(-0.0) is '-0.0'), but if code splits the minus into its own token then downstream formatting/normalization of the numeric token can canonicalize its absolute value and produce '0' (no sign). The sign is only preserved when the minus is part of the same string as the numeric characters or the code specially preserves sign for zero values.
+- The shown add() method never repairs that split: it simply appends tokens and only inserts a space when certain word-character conditions are met, so the separated '-' ended up not being preserved in the joined output.
+
+Concrete steps to fix (explicit, testable)
+1. Stop splitting a numeric literal into two tokens in add_number().
+   - Ensure add_number() passes a single string like "-0.0" to cc.add() instead of first calling add("-") and then add("0.0").
+   - Test: after change, cc.add_number(-0.0) should call add("-0.0") exactly once.
+2. Or, if splitting tokens is needed for other reasons, preserve sign when formatting the numeric piece:
+   - When formatting the numeric token, detect negative zero and keep its sign. Example: if value == 0.0 and math.copysign(1.0, value) < 0.0 then format as "-0.0" (or propagate the '-' from the separate token).
+   - Implement math.copysign or value != value checks as needed to detect negative zero reliably.
+3. As a defensive improvement in add():
+   - Avoid losing sign when previous token is exactly '-' and the new token is a numeric literal. Concretely, before inserting a space or appending, check:
+     - if self.get_last_char() == '-' and newcode and newcode[0].isdigit():
+         - do not insert a separating space and treat '-' and newcode as part of the same literal (or merge them into one token).
+   - This prevents accidental splitting from discarding the minus.
+4. Add tests:
+   - The failing test you have: cc.add_number(-0.0); assert get_code() == '-0.0'
+   - Additional cases: cc.add_number(-1.5), cc.add_number(-0.0) when previous token exists, and when negative-zero is produced by operations.
+
+Minimal immediate change I recommend
+- Fix add_number() to send the full string "-0.0" in one call. That is the least invasive and directly addresses the failing test.
+
+If you want, paste add_number() and append() (or get_code()) and I will give an exact patch to make add_number() emit a single token and/or preserve negative zero during formatting.

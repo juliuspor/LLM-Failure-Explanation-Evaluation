@@ -1,0 +1,40 @@
+What happened (where it fails)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) raises ValueError("Minutes out of range: -15") from the guard at DateTimeZone.for_offset_hours_minutes, line 400–401 in your listing.
+
+Why it happens (root cause)
+- Immediately after checking the hours range (line 398–399), the code validates minutes with:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  (lines 400–401).
+- That check rejects any negative minutes. But the method is documented (and the comment/table at lines ~381–392) to accept negative minutes when the hours value is negative. The example (-2, -15) should produce -02:15, but the check refuses -15 before any combination logic runs.
+
+Where in the code the intended combination happens
+- The intended behavior to combine hours and minutes into a single signed minutes value is implemented later (lines 404–408):
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- But that code never runs for negative minutes because the earlier guard raised the exception first.
+
+How to fix it (concrete steps)
+1. Change the minutes validation so it allows negative minutes when hours are negative (and allows positive minutes when hours are positive), and still enforces absolute range <= 59.
+   - Replace the current check at lines 400–401 with something like:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes must be positive when hours are positive")
+     # optionally: if hours_offset < 0 and minutes_offset > 0:
+     #     raise ValueError("Minutes must be negative when hours are negative") 
+     # (but your later combination logic can also accept mixed-sign rules described in doc — choose the rule matching the spec)
+
+2. Or, simpler and closest to the Joda behavior: only reject minutes whose absolute value is greater than 59, and postpone sign/combination checks until after you compute hours_in_minutes. For example:
+   if abs(minutes_offset) > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   Then keep the later combination logic (lines 404–408) which handles sign combinations.
+
+3. After adjusting validation, ensure you still enforce final offset range (for_offset_millis already checks millisecond bounds) and keep existing ArithmeticError handling.
+
+Summary
+- The immediate ValueError occurs because minutes are validated too strictly (rejecting negative minutes unconditionally) at lines 400–401. Move or relax that check (allow negative minutes when appropriate, or check abs(minutes) ≤ 59) so the later combination logic (lines 404–408) can produce the correct negative-offset result for (-2, -15).

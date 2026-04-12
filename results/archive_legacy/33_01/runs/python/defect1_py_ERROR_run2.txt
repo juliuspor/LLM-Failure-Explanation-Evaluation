@@ -1,0 +1,76 @@
+I can’t point to the exact line in your program because you didn’t paste the code or the full stack trace. Please paste the small code snippet that causes the error and the stack trace (the lines under the error). With that I’ll point to the exact file and line and give a line-by-line fix.
+
+Meanwhile, here is a concrete, non‑vague explanation of the most common root cause for the error message "ValueError: Minutes out of range: -15", and exact debugging and fix steps you can apply now.
+
+What happened (root cause)
+- Some API in your code was asked to create or parse a time/offset value with a minutes component of -15. The API validates minutes must be in 0..59 (or -59..59 for some APIs) and raised the ValueError. Typical method calls that raise this message are:
+  - Python: datetime.time(hour, minute, ...) if minute is negative
+  - Python: datetime.timedelta or constructing a timezone with minutes out of valid range
+  - Java/Joda/Android: LocalTime.of(hour, minute), ZoneOffset.ofHoursMinutes(hours, minutes), or similar
+- The negative -15 came from a variable in your code (common names: minute, minutes, offset_minutes, tz_minutes, parsed_minute, sign * minutes, remainder) or from a parse result (e.g., parsing a string like "12:-15" or splitting a timezone like "+02:-15").
+
+Where it likely occurred (how to find it)
+1. Look at the stack trace printed with the error. The top-most frame from your code (not library frames) shows the file name and line number where you passed the invalid minutes. Example stack trace line:
+   - MyClass.py:42 in build_time -> calls datetime.time(hour, minute)
+   - or MyClass.java:87 in parseZone -> calls ZoneOffset.ofHoursMinutes(h, m)
+2. Search your codebase for usages of these methods: LocalTime.of, datetime.time, ZoneOffset.ofHoursMinutes, ZoneOffset.ofTotalSeconds, datetime.timedelta with minutes, or any code that constructs an offset/time from separate hour and minute variables.
+3. Inspect the variable that gets passed as the minute: common names minute, minutes, offsetMinutes, tzMinutes, parsedMinute.
+
+Why that variable became -15
+- You probably computed minutes by subtracting two times, using modulo incorrectly, or split a signed offset incorrectly. Example mistakes:
+  - You took a signed offset string "+02:-15" (or parsed sign separately) and left the sign on both hour and minute, producing hour = +2 but minute = -15.
+  - You computed minutes with: minutes = (total_minutes % 60) and total_minutes was negative, producing a negative remainder in some languages.
+  - You intended to normalize negative offsets but only adjusted hours and not minutes.
+
+Exactly how to reproduce-check and fix (step-by-step)
+1. Reproduce: add a quick assertion right before the failing call to see the values:
+   - Python example:
+     minute_value = minutes  # variable used in datetime.time(...)
+     assert 0 <= minute_value <= 59, f"minute out of range: {minute_value}"
+   - Java example:
+     int minuteValue = minutes;
+     if (minuteValue < 0 || minuteValue > 59) throw new IllegalArgumentException("minute out of range: " + minuteValue);
+   Run to confirm the offending value is -15 and see the call site file/line.
+
+2. Inspect how that variable is computed. Typical fixes:
+   - If parsing a signed offset like "+02:15" or "-02:15":
+     - Parse sign once, parse hour and minute as absolute integers, then apply sign to the total offset or to hours only according to the API.
+     - Example (Python):
+       sign = -1 if s[0] == '-' else 1
+       hours = int(s[1:3])
+       minutes = int(s[4:6])
+       total_minutes = sign * (hours * 60 + minutes)
+       # Use total_minutes to build a timezone or use timezone offset constructors that accept total seconds
+   - If using ZoneOffset.ofHoursMinutes(hours, minutes) (Java):
+     - Ensure minutes is non-negative (0..59) and pass sign only on the hour or compute with ZoneOffset.ofTotalSeconds(sign * (hours * 3600 + minutes * 60)).
+     - Example fix:
+       int sign = (offsetString.startsWith("-")) ? -1 : 1;
+       int h = Math.abs(parsedHour);
+       int m = Math.abs(parsedMinute);
+       ZoneOffset.ofHoursMinutes(sign * h, m);
+   - If computing from total minutes that can be negative:
+     - Normalize minutes in a 0..59 range and adjust hours:
+       total = -15  # example
+       hours = Math.floorDiv(total, 60)   # handles negatives properly in some languages
+       minutes = Math.abs(total - hours * 60)
+       # then pass hours and minutes (minutes now 0..59)
+   - Alternatively, use constructors that accept a signed total (e.g., ZoneOffset.ofTotalSeconds(total_minutes*60)) to avoid splitting into negative minute parts.
+
+3. Minimal concrete code examples (replace your variable names):
+   - Python parsing signed offset (safe):
+     s = "+02:15"  # or "-02:15"
+     sign = -1 if s[0] == '-' else 1
+     hh = int(s[1:3])
+     mm = int(s[4:6])
+     total_seconds = sign * (hh * 3600 + mm * 60)
+     tz = datetime.timezone(datetime.timedelta(seconds=total_seconds))
+   - Java ZoneOffset fix:
+     String s = "+02:15";
+     boolean negative = s.charAt(0) == '-';
+     int hh = Integer.parseInt(s.substring(1,3));
+     int mm = Integer.parseInt(s.substring(4,6));
+     ZoneOffset offset = ZoneOffset.ofTotalSeconds((negative ? -1 : 1) * (hh * 3600 + mm * 60));
+
+4. Unit test: add tests for negative and positive offsets and for edge cases like 0, 59, -15 to ensure your parsing always produces minute in 0..59 when calling APIs that require that.
+
+If you paste your snippet and the full stack trace, I will point to the exact file and line number (e.g., MyClass.py:42 or MyClass.java:87), name the exact variable (e.g., minutes or offsetMinutes) that held -15, and produce the precise fix to change in that line.

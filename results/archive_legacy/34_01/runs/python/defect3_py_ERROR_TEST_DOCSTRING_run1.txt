@@ -1,0 +1,67 @@
+What happened (what failed)
+- The exception IndexError: String index out of range: 2 was raised inside CsvEscaper.translate_string when the method tried to read a character past the end of input_seq.
+- The failing test passes a single Unicode character '\U0001F630' (GRIMACING FACE). On many Python builds that character is represented as two UTF-16 surrogate code units, so len(input_seq) == 2 and the valid indexes are 0 and 1. The code tried to read input_seq[2], which does not exist, causing the IndexError.
+
+Where it happened (variables & location)
+- Method: CsvEscaper.translate_string
+- Variables: input_seq, i (the index), next_ch (or similar), out
+- The failure occurs at the code that does an unguarded lookahead like input_seq[i+1] or input_seq[i+2]. Concretely the code path is:
+  - read ch = input_seq[i]
+  - then immediately do something like next_ch = input_seq[i+1] and/or next_next_ch = input_seq[i+2] without checking i+1 < len(input_seq) and i+2 < len(input_seq)
+- In your test, with input_seq == '\U0001F630' the loop reaches i == 0, sees a code unit that requires looking ahead, and then tries to access index 2 — out of range — producing the shown IndexError.
+
+Why it happened (root cause)
+- The algorithm assumes it can safely look ahead a fixed number of positions from the current index (for example to parse escapes or combine surrogate pairs) but does not check that those positions exist.
+- When the input includes an astral-code-point character (represented as a surrogate pair on some builds) or ends with a code unit that requires lookahead, the necessary lookahead indexes can be beyond len(input_seq)-1. The code does not guard against that, so it sometimes reads index 2 when only 0 and 1 exist.
+
+Exact effect in your test
+- input_seq is the single character '\U0001F630'. On the running build it is length 2 (surrogate pair). The code attempts to read input_seq[2] and crashes with IndexError: String index out of range: 2.
+
+Concrete fixes (clear steps you can apply)
+1. Prevent out-of-bounds lookahead: always check bounds before accessing input_seq[i+1] or input_seq[i+2].
+   - Replace unguarded accesses with guarded code, e.g.:
+     - if i+1 >= len(input_seq): raise ValueError("Incomplete escape at end of input_seq") or handle as appropriate.
+     - if i+2 >= len(input_seq): raise ValueError("Incomplete sequence at end of input_seq") or handle accordingly.
+   - This avoids IndexError and gives a clear error message for incomplete input.
+
+2. Prefer iterating by Unicode code points, not by raw code units:
+   - Use "for ch in input_seq" to iterate characters (Python str iterates by code points, so '\U0001F630' is one ch on wide builds and may still be two on narrow builds). To be robust across builds, convert to actual code points before indexing:
+     - Use list(input_seq) or better: work with ord(ch) for each ch, or use .encode('utf-32-le')/decode appropriately if you must manipulate code points by index.
+   - If you must handle surrogate pairs explicitly, detect high surrogates and ensure a corresponding low surrogate exists before reading the next index:
+     - high = ord(input_seq[i]); if 0xD800 <= high <= 0xDBFF:
+         if i+1 >= len(input_seq): raise ValueError("Unpaired high surrogate at end of input_seq")
+         low = ord(input_seq[i+1]); if not (0xDC00 <= low <= 0xDFFF): raise ValueError("Invalid surrogate pair")
+         combine = ((high - 0xD800) << 10) + (low - 0xDC00) + 0x10000
+         i += 2
+       else:
+         i += 1
+
+3. Add unit tests for edge cases:
+   - Test with a single astral character '\U0001F630' (as you have).
+   - Test with a string that ends with a single backslash or incomplete escape, and with an unpaired surrogate (if you expect those inputs).
+   - Confirm behavior on both narrow and wide Python builds if your environment must support both.
+
+Minimal patch example (conceptual)
+- Current (problematic) fragment:
+  i = 0
+  while i < len(input_seq):
+      ch = input_seq[i]
+      if ch == '\\':
+          a = input_seq[i+1]    # <-- crash if at end
+          b = input_seq[i+2]    # <-- crash if near end
+- Fixed fragment:
+  i = 0
+  while i < len(input_seq):
+      ch = input_seq[i]
+      if ch == '\\':
+          if i+1 >= len(input_seq):
+              raise ValueError("Incomplete escape at end of input_seq")
+          a = input_seq[i+1]
+          if need_second_lookahead and i+2 >= len(input_seq):
+              raise ValueError("Incomplete escape at end of input_seq")
+          b = input_seq[i+2] if need_second_lookahead else None
+
+Why this will stop the crash
+- Checking i+1 and i+2 before accessing prevents attempts to read beyond the last valid index. If the input truly lacks required characters, you now get an explicit ValueError with a clear message instead of an IndexError that strings "out of range" and leaves the caller guessing.
+
+If you want, paste the specific lines around the loop in CsvEscaper.translate_string and I will show an exact patch modifying those lines.

@@ -1,0 +1,54 @@
+What happened (what failed)
+- The ValueError "Minutes out of range: -15" was raised by this guard at line 400–401:
+  - Line 400: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 401:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The code reached that check with minutes_offset == -15, so the check correctly rejected it. The real problem is that minutes_offset should have been normalized before this check, not rejected immediately.
+
+Why it happened (root cause)
+- The code validates minutes_offset for being in 0..59 before it performs the normalization steps at lines 406–409. Those later lines are clearly intended to turn a negative-minute value into a positive offset within the hour:
+  - Line 406:     minutes_offset = hours_in_minutes - minutes_offset
+  - Line 408:     minutes_offset = hours_in_minutes + minutes_offset
+  - Line 409:     offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Because the validation runs too early, a valid logical input that uses a negative minutes component (for example, an input representing an offset like -0:15 or a negative hour with positive minutes) gets rejected before those normalization lines can convert it into an acceptable minute count. In short: the order of operations is wrong — you check minutes before you finish computing/normalizing minutes.
+
+Where it occurred (exact places to look)
+- The rejection occurs at lines 400–401.
+- The normalization logic that would make minutes_offset acceptable occurs at lines 406–409.
+- The offending flow is therefore: validate (line 400) → fail → never reach normalization (lines 406–409).
+
+Concrete fixes (step-by-step)
+1. Move the minutes range check so it runs after normalization:
+   - Delay the check at lines 400–401 until after lines 406–409 have executed, then validate that the normalized minutes_offset is in 0..59.
+   - This keeps the intent of rejecting out-of-range minute values but allows legitimate negative-minute inputs to be normalized first.
+
+2. Or explicitly normalize minutes before validation:
+   - Compute a normalized minutes_offset variable (e.g., normalized_minutes = minutes_offset; if normalized_minutes < 0: normalized_minutes += hours_in_minutes; …) and then run the check against normalized_minutes.
+   - Replace uses of minutes_offset in subsequent code with normalized_minutes.
+
+3. Add unit tests for boundary and negative cases:
+   - Test inputs such as (-0, 15), (0, -15), (-1, 15), (1, -15) or full offset strings that can produce negative minute components.
+   - Confirm that valid offsets normalize without raising and that truly invalid minute values (e.g., -60, 60, 75) raise ValueError.
+
+Example concrete code change sketch
+- Current order (simplified):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+  if some_negative_case:
+      minutes_offset = hours_in_minutes - minutes_offset
+  ...
+- Revised order:
+  if some_negative_case:
+      minutes_offset = hours_in_minutes - minutes_offset
+  ...
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+
+Why this fix works
+- It lets the intended normalization logic (lines 406–409) convert negative-minute inputs into the canonical 0..59 range first, then perform a final sanity check. That matches the apparent design in the code: normalize, then validate.
+
+What to check after fixing
+- Run the new unit tests to ensure no regression.
+- Confirm no other code relies on the old early-check behavior.
+- Verify that FieldUtils.safe_multiply and final for_offset_millis (line 412 and onward) receive correctly normalized values.
+
+This explains the failure, points to the exact lines involved (400–401 vs 406–409), identifies the root cause (validation before normalization), and gives concrete code-change steps and tests to fix it.

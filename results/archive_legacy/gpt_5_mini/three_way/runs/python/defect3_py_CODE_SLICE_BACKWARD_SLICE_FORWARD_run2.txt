@@ -1,0 +1,63 @@
+What happened (where it fails)
+- The crash comes from the loop that runs when translate_codepoint(...) returns a positive consumed value:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- The exception originates in code_point_at(...), which raises IndexError("String index out of range: {index}") when you call it with index >= len(code_units). The slice shows that happens at line 36 in your code_point_at implementation.
+
+Why it fails (root cause)
+- translate_codepoint(...) returns the number of codepoints consumed (variable consumed).
+- The code then runs consumed iterations and, on each iteration, calls code_point_at(code_units, pos). But pos is being incremented inside the loop and can reach len(code_units) before the loop finishes.
+- When pos becomes equal to len(code_units), the next call to code_point_at(code_units, pos) is out of bounds and throws IndexError.
+- In short: the loop assumes there are always at least consumed codepoints remaining at the start of the loop, but pos is advanced inside the loop and can pass the end — so a subsequent code_point_at call is made with an invalid index.
+
+Concrete example that triggers it
+- Suppose length = 5 code units, pos = 4 (last unit), and translate_codepoint returns consumed = 2 (it claims it consumed two codepoints starting at pos).
+- The for-loop will try two iterations:
+  - Iteration 1: code_point_at(code_units, 4) is OK -> char_count returns 1 or 2; pos increases.
+  - Iteration 2: pos is now >= 5, so code_point_at(code_units, pos) raises IndexError.
+
+Exactly where to look
+- The failing block starts at the line "for pt in range(consumed):" in translate(...).
+- The exception is raised inside code_point_at at its bounds check (the slice shows the raise at line 36).
+
+Precise fixes (ordered, actionable)
+Pick one of these, depending on your desired contract for translate_codepoint:
+
+1) If translate_codepoint returns the number of codepoints consumed (keep current contract), change the loop to guard against reading past the end:
+   - Replace
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+     with
+       for _ in range(consumed):
+           if pos >= length:
+               break
+           pos += char_count(code_point_at(code_units, pos))
+   - Why: avoid calling code_point_at when pos is already at/after length.
+
+2) If translate_codepoint should instead return the number of UTF-16 code units consumed (preferable for a function working on code units), change translate_codepoint's contract and callers:
+   - Have translate_codepoint return consumed_units (1 or 2 per codepoint).
+   - Replace the whole for-loop with a single pos increment:
+       pos += consumed_units
+   - Why: you avoid per-codepoint index checks and the mismatch between codepoints and code units.
+
+3) Validate translator outputs before consuming:
+   - Immediately after consumed = self.translate_codepoint(...):
+       if consumed < 0:
+           raise ValueError("translate_codepoint returned negative")
+       # compute remaining_codepoints = count_codepoints_from(pos, length)
+       if consumed > remaining_codepoints:
+           raise ValueError("translate_codepoint claimed to consume more codepoints than remain")
+   - Why: defensive check will point the bug to the translator implementation if it returns an impossible value.
+
+Which one to do
+- If translate_codepoint is intended to report codepoints consumed, implement fix (1) or add the validation in (3).
+- If it was meant to report code units consumed, switch to (2) and update translate_codepoint accordingly.
+
+Minimal change I recommend
+- Add the boundary check inside the for-loop (fix 1). It's the smallest change and prevents the IndexError immediately while keeping the current contract. Example change:
+   for _ in range(consumed):
+       if pos >= length:
+           break
+       pos += char_count(code_point_at(code_units, pos))
+
+This addresses the crash, and you should then decide if you also want stronger validation (fix 3) to detect misbehaving translators.

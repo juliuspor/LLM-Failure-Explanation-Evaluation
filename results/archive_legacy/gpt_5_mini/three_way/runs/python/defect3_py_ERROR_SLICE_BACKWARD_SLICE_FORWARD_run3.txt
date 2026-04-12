@@ -1,0 +1,57 @@
+What happened (where it failed)
+- The IndexError is raised at line 35 inside to_utf16_code_units(), specifically by this check:
+  if index < 0 or index >= len(code_units):
+    raise IndexError(f"String index out of range: {index}")
+- The caller passed index == 2, but len(code_units) is 2 or less, so index >= len(code_units) evaluates true and the function raises "String index out of range: 2".
+- The code that follows (lines 38–44) expects index to point to a UTF-16 code unit: it loads code_units[index] into high and possibly reads code_units[index+1] for a low surrogate. But the function never reaches that because the earlier bounds check failed.
+
+Why this happened (root cause)
+- There is a mismatch between the index the caller provided and the actual length/contents of code_units.
+  - Either the caller computed index using the Python string indices (code points) while this function expects an index into the UTF-16 code_units list, or
+  - to_utf16_code_units() produced fewer code units than the caller expected (for example, it appended scalar code points instead of two UTF-16 surrogate code units for code points above U+FFFF).
+- Concretely: calling the function with index == 2 assumes there is a third UTF-16 code unit (code_units[2]). But code_units has length 2 (valid indices 0 and 1) so the bounds check at line 35 correctly throws IndexError.
+
+How to reproduce quickly
+- Use a string containing characters that map to surrogate pairs (e.g., emoji). If your caller computed index by iterating Python str characters (each character is a Unicode code point), that index does not necessarily match the number of UTF-16 code units. Example:
+  s = "A😊"  # 'A' -> 1 code unit, '😊' -> 2 UTF-16 code units
+  If caller uses index = 2 (the third character position in some logic), code_units will have length 3? No — if to_utf16_code_units built wrong, or if caller assumes different indexing, you get the mismatch and IndexError.
+
+Exact places to inspect in your code
+1. Line 10: the implementation of to_utf16_code_units(s). Verify it actually appends two code units for characters > U+FFFF (surrogate pairs). If it appends a single integer representing the scalar value instead of two 16-bit units, len(code_units) will be smaller than expected.
+2. The call site that passes index into this function. Confirm whether that index is:
+   - an index into the original Python string (code point index), or
+   - an index into the UTF-16 code_units list (UTF-16 code unit index).
+   If it is the Python string index, it will not always match the UTF-16 index when surrogate pairs exist.
+3. Lines 38–44: this code assumes code_units[index] exists and optionally code_units[index+1] exists for a high surrogate. That assumption is only safe if line 35’s bounds check used the correct length and the caller supplied the correct kind of index.
+
+Concrete fixes (step-by-step)
+Pick the one that fits your intention:
+
+A) If the function should accept a Python string index (code point index)
+- Convert the string index to a UTF-16 code-unit index before calling this function, or change this function to operate on the string directly.
+- Example steps:
+  1. Remove the external assumption about UTF-16 indices.
+  2. Iterate over the string s up to the requested code-point index and count how many UTF-16 code units that many code points consume (1 for BMP code points, 2 for supplementary), then use that code-unit index.
+  3. Or implement a new helper get_code_point_at(s, code_point_index) that works on Python string indices and returns the code point.
+
+B) If the function should accept a UTF-16 code-unit index (keep current contract)
+- Ensure the caller passes a UTF-16 code-unit index, not a Python string index.
+- Verify to_utf16_code_units(s) actually builds code_units correctly:
+  1. For each code point in s:
+     - If code point <= 0xFFFF: append that value as one 16-bit unit.
+     - If code point > 0xFFFF: compute high and low surrogate and append both 16-bit values (so len(code_units) increases by 2).
+  2. After building code_units, the bounds check at line 35 will be correct and the subsequent surrogate handling (lines 38–44) will work.
+
+C) Make the bounds check clearer and safe
+- If you expect to possibly read code_units[index+1], change the check or add a second check before reading index+1:
+  - Keep the current check for index itself (line 35).
+  - Before reading low = code_units[index + 1], ensure index + 1 < len(code_units) (line 39 already checks that in your snippet, but confirm it's evaluated only after the first check).
+- But note: this only prevents IndexError; it does not fix a logical mismatch between the meaning of index and the actual contents of code_units.
+
+Which change I recommend
+- First confirm what the caller intends: is index a code-point index or a UTF-16 code-unit index?
+- If callers are using Python string indices (most likely), change the code to accept code-point indices (operate directly on the Python string) or add a documented conversion step. This avoids subtle bugs when surrogate pairs are present.
+- Also inspect to_utf16_code_units at line 10 to ensure it appends surrogate pairs as two 16-bit code units for characters outside the BMP.
+
+Summary
+- The IndexError at line 35 means index==2 but len(code_units) <= 2. The root cause is an index/representation mismatch: the index passed does not match the number of UTF-16 code units in code_units because either the caller used Python string indices or to_utf16_code_units did not create the expected two-unit surrogate entries. Fix by aligning the index semantics (convert indices or change the function) and ensuring to_utf16_code_units appends surrogate pairs correctly.

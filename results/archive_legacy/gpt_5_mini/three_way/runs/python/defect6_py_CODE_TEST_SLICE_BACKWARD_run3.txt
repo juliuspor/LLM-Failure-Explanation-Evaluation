@@ -1,0 +1,51 @@
+What happened (where it fails)
+- The failure happens at the if on line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- For x == -0.0, Python treats -0.0 == 0.0, so x == int(x) is True. The code enters the "integer" branch and runs:
+    value = int(x)    # value becomes 0 (sign lost)
+    ...
+    self.add(str(value))  # adds "0"
+- Because the sign was lost when converting to int, the method outputs "0" instead of "-0.0". The test expects "-0.0" to preserve the negative-zero sign.
+
+Why this happens (root cause)
+- The root cause is that negative zero compares equal to positive zero (x == 0.0) but carries a negative sign bit. Converting to int (int(-0.0)) yields 0 and loses the sign bit. The code never checks for negative zero before converting to int, so it prints a plain "0".
+
+Exactly where to change (what lines/variables)
+- Before the integer-handling branch at line 176, you must detect negative zero and handle it specially. The relevant variables/methods:
+  - x (the input float)
+  - self.add(...) (used to append output)
+  - the integer branch starting at line 176
+
+Concrete fixes (step-by-step)
+1. Add a utility to detect negative zero (exact code you can copy). Two safe options:
+
+Option A (using math.copysign):
+    @staticmethod
+    def is_negative_zero(x: float) -> bool:
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+Option B (using struct to inspect sign bit):
+    import struct
+    @staticmethod
+    def is_negative_zero(x: float) -> bool:
+        return x == 0.0 and (struct.unpack('!Q', struct.pack('!d', x))[0] >> 63) == 1
+
+2. At the top of add_number (before the integer branch at line 176), add a guard:
+
+    if self.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+This ensures negative zero is printed as "-0.0" and you never lose the sign by converting to int.
+
+Why this fix works
+- It checks sign before any conversion that would drop it. math.copysign inspects the stored sign bit so it distinguishes -0.0 from 0.0 even though they compare equal. Returning immediately avoids the integer branch and preserves expected output.
+
+Notes and tests
+- This change will make test_negative_zero pass.
+- Positive zero (0.0) still prints through the existing integer branch and yields "0".
+- Other behavior (space insertion using get_last_char and the code that handles negative numbers after a minus) remains unchanged.
+
+Summary
+- Root cause: int(x) on -0.0 becomes 0 and loses the negative sign because the code checks x == int(x) before checking for negative zero.
+- Fix: detect negative zero first (e.g. is_negative_zero using math.copysign), add "-0.0" and return before doing int(x).

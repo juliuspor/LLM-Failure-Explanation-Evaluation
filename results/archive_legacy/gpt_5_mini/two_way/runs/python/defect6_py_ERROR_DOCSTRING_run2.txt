@@ -1,0 +1,55 @@
+I can’t point to the exact line in your program until you paste the test and the code it calls, but I can explain precisely why the test message “Expected -0.0, got 0” happens, where to look, and exactly how to fix it. I’ll also give step-by-step diagnostics you can run that will pinpoint the failure in one command.
+
+What happened (root cause, simply)
+- Your test expected a negative zero value (the IEEE-754 bit pattern for −0.0), but the code returned a positive zero value (the bit pattern for +0.0). Those two zeros compare as numerically equal (0.0 == -0.0 is true), but they have different sign bits and different bit patterns, and some assertions/tests report the sign difference. The code that produced the result lost the negative sign, so actual ended up as +0.0 instead of −0.0.
+
+Where this typically happens (exact operations that remove the sign of zero)
+Check the code that builds the value assigned to the variable your test calls actual (or whatever variable name you use). The sign can be lost by any of these specific methods/operations:
+- Using Math.abs(x) or Math.max(x, 0) or Math.min(x, 0) — these produce +0.0 for zero results.
+- Multiplying or dividing by a zero: e.g., x * 0.0 or x / Infinity can yield +0.0 instead of preserving a negative sign depending on operand sign.
+- Converting to an integer type (int/long) and back, or formatting/parsing strings in some code paths, which canonicalize to +0.0.
+- Using an API that canonicalizes or normalizes zeros (some libraries or serialization code).
+- Using Double.valueOf(-0.0) vs some code that re-creates the value as 0.0 literal.
+- Relying on numeric comparison or arithmetic that discards the sign (for example, if you compute sign separately and then reapply incorrectly).
+
+Exact places to inspect in your code (what to look for)
+- The line where you assign the value used as actual — e.g., actual = computeValue(...); or double actual = someMethod(...); — open that method and find the expression that produces the final zero.
+- Any call chains that use Math.abs, Math.max, formatting/parsing, conversions to integer types, or library calls that might copy/normalize zeros.
+- Any code that uses copySign, signum, or negation operators: check whether the negation was applied before or after an operation that removes the sign.
+
+How to prove the problem (run these checks — one-liners you can add to the test)
+1) Print the raw bit patterns for expected and actual to confirm sign-bit difference:
+- Java:
+  - System.out.println(Long.toHexString(Double.doubleToLongBits(expected)));
+  - System.out.println(Long.toHexString(Double.doubleToLongBits(actual)));
+- Python (float):
+  - import struct; print(hex(struct.unpack('<Q', struct.pack('<d', expected))[0]))
+2) Or add an assertion that compares bits instead of numeric value:
+- Java: assertEquals(Double.doubleToLongBits(expected), Double.doubleToLongBits(actual));
+If the two bit patterns differ but numeric equality holds, you’ll see the sign-bit difference.
+
+Concrete fixes (pick one according to intent)
+- If you intended to preserve negative zero:
+  - Find the operation that produced zero and stop using functions that normalize sign (e.g., remove Math.abs or reorder so negation happens after normalization).
+  - Explicitly set the sign using Math.copySign(0.0, -1.0) or Math.copySign(value, -1.0) where appropriate.
+  - In Java, you can write double negZero = -0.0; or double preserved = Math.copySign(0.0, computedSign);
+- If the sign of zero should not matter for your test:
+  - Change the test to not require signed-zero equality. For example:
+    - Use assertEquals(expected, actual, delta) for doubles (JUnit) so the test checks numeric equality only.
+    - Or compare using Double.compare(expected, actual) == 0 (note: Double.compare treats -0.0 != +0.0 — so instead use numeric tolerance).
+    - Or explicitly canonicalize both sides to +0.0 before comparing: expected = Math.abs(expected); actual = Math.abs(actual).
+- If you want an exact bit-level assertion:
+  - Use Double.doubleToLongBits in the assertion as shown above so the test will fail only when bits differ and give you precise evidence.
+
+Exact next steps I recommend you run now
+1) Paste the test assertion line and the method where actual is produced OR run this quick debug inside the test immediately before the failing assert:
+- Java:
+  System.out.println("expected bits: 0x" + Long.toHexString(Double.doubleToLongBits(expected)));
+  System.out.println("actual bits:   0x" + Long.toHexString(Double.doubleToLongBits(actual)));
+  System.out.println("raw expected: " + expected + ", raw actual: " + actual);
+2) From the printed bits you will see something like:
+- expected bits: 0x8000000000000000   (this is -0.0)
+- actual bits:   0x0000000000000000   (this is +0.0)
+3) Open the method that computes actual, locate the exact arithmetic or function call that returns zero, and inspect for the normalizing functions/operations listed above (Math.abs, parse/format, cast to int, multiplication by 0.0, etc.). That is the line you need to change.
+
+If you paste the relevant test assertion and the method(s) that compute actual (the few lines around the assignment), I will point exactly to the line number and show the minimal code change that will either preserve −0.0 or make your test compare correctly.

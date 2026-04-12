@@ -1,0 +1,46 @@
+What fails
+- The code is supposed to work with UTF‑16 code units (16‑bit values), but at line 43 it returns a 21‑bit Unicode code point (>= 0x10000) when it sees a valid surrogate pair:
+  - Line 38 reads a 16‑bit code unit into variable high.
+  - Lines 39–41 detect a valid high/low surrogate pair.
+  - Line 43 returns 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00) — which is the full Unicode scalar value for that pair, not a UTF‑16 code unit.
+
+Why that breaks the program (root cause)
+- The surrounding code and function name (to_utf16_code_units, code_units list at line 12, and the local variable high at line 38) all show the function is intended to produce or operate on 16‑bit code units.
+- Returning a scalar > 0xFFFF (line 43) violates that contract. Callers that expect a code unit (0..0xFFFF) will get a value that:
+  - Does not fit in the UTF‑16 code unit domain, and
+  - Breaks logic that assumes each returned value corresponds to a single code unit (for example index arithmetic, appending to an out list, or later lookups).
+- In other words: the function mixes two different representations (UTF‑16 code units vs. Unicode scalar code points). That mismatch is the direct cause of the failure.
+
+Exactly where to look
+- to_utf16_code_units: lines shown in the slice (line 12 defines code_units, line 35 checks index bounds, line 38 reads high).
+- The problematic return is on line 43 (returns a Unicode scalar for a surrogate pair).
+- The normal fallback return at line 44 returns a 16‑bit code unit (high), which matches the expected representation — the pair case does not.
+
+How to fix it (concrete steps)
+Choose one of these two fixes depending on the intended contract of the function:
+
+1) If the function must produce UTF‑16 code units (keep the current name/contract):
+   - Do not return a combined scalar at line 43. Instead emit the two UTF‑16 code units (high and low) into the output list, or return them as two separate values.
+   - Example fix steps:
+     - Replace the return at line 43 with code that appends both code units:
+       - out.append(high)
+       - out.append(low)
+       - and make sure the caller advances index by 2 (or make this function itself consume both and return the new index).
+     - Or make the function return a tuple (high, low) and update callers to handle the pair.
+   - Rationale: callers and the name to_utf16_code_units expect 16‑bit units, not scalars.
+
+2) If the function is supposed to return Unicode scalar values (i.e., code points) instead of UTF‑16 units:
+   - Rename the function to reflect that it returns code points (for example to_code_points or utf16_to_code_points).
+   - Update all callers to expect and handle scalar values >= 0x10000 for characters that used surrogate pairs.
+   - Keep the return at line 43 but update documentation and usages so the representation contract is consistent.
+
+Extra checks to add (recommended)
+- Add an explicit function docstring specifying whether the function returns UTF‑16 code units or Unicode scalar values.
+- Add unit tests covering:
+  - ASCII and BMP characters (single code units).
+  - Characters requiring surrogate pairs (e.g., U+1F600) and verify the representation returned matches the function contract.
+- If you keep the code‑unit contract, ensure index arithmetic and any callers that read code_units are updated when a pair is consumed (advance index by 2).
+
+Summary
+- Root cause: line 43 returns a Unicode code point (>= 0x10000) for surrogate pairs while the rest of the code expects 16‑bit UTF‑16 code units.
+- Fix: make the returned/added values consistently either code units or code points, and update callers and names accordingly.

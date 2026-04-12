@@ -1,0 +1,56 @@
+What happened (root cause)
+- At line 335 the code sets inferred_type = type(array). That gets the Python type of the list object itself (e.g. list), not the type of the list elements.
+- Later, at line 346 the code checks inferred_type == object to decide whether to raise a TypeError for an "object list" being cast to a more specific expected_type. Because inferred_type is the list class (list) instead of the element type, that check behaves incorrectly: sometimes it suppresses an error that should be raised, and sometimes it raises an error that shouldn't be raised. In short: the code is testing the wrong thing (the container type) when it means to test the element type.
+
+Where it occurs (specific lines)
+- Line 335: if array is not None: inferred_type = type(array)  <-- wrong: inspects the list object
+- Lines 346–351: if inferred_type == object and expected_type != object: raise TypeError(...)  <-- this check relies on inferred_type being the element type, so it fails when inferred_type is list
+
+Why that causes failure
+- The logic assumes inferred_type represents the element component type. Using type(array) makes inferred_type equal to list (or whatever container class), so comparisons like inferred_type == object and the f-string that mentions [Ljava.lang.{expected_type.__name__}; become meaningless/wrong for the real situation. That leads to incorrect TypeErrors or missed type checks when adding element to the new list.
+
+Concrete examples
+- If array is a normal empty list and element is not None, inferred_type becomes list, not the element type; the code can't correctly decide whether to allow casting to expected_type.
+- If array is None and element is None, the path sets inferred_type = object (line ~340). That part is OK, but the mismatch arises when array is present — the code never looks at the element values to infer their type.
+
+How to fix it (explicit steps and exact places)
+1. Replace the type(array) usage with logic that inspects element types, not the container:
+   - At line 335 change:
+     inferred_type = type(array)
+   - To something like:
+     if len(array) > 0:
+         inferred_type = type(array[0])
+     else:
+         inferred_type = expected_type if expected_type is not None else object
+2. Make the element-type inference robust:
+   - If array is non-empty, ensure all elements share the same type (or at least are instances of expected_type). If they are heterogeneous, decide whether to:
+       - use a common base class,
+       - fall back to object, or
+       - raise TypeError (pick the policy you want).
+   - Example additional check:
+       for x in array:
+           if x is not None and type(x) is not inferred_type:
+               inferred_type = object
+               break
+3. Keep the existing branch when array is None:
+   - If array is None and element is not None, inferred_type = type(element)
+   - If both are None, inferred_type = object (as current code does)
+4. After you infer the element type correctly, keep the TypeError check at lines 346–351 but compare element-type values. That will make the error message and raising behavior accurate.
+
+Minimal corrected snippet (replace lines ~335–340)
+- if array is not None:
+    if len(array) > 0:
+        inferred_type = type(array[0])
+        for x in array:
+            if x is not None and type(x) is not inferred_type:
+                inferred_type = object
+                break
+    else:
+        inferred_type = expected_type if expected_type is not None else object
+  elif element is not None:
+    inferred_type = type(element)
+  else:
+    inferred_type = object
+
+Why this solves it
+- inferred_type now represents the element/component type (or object when heterogeneous or unknown). The later check at line 346 (inferred_type == object and expected_type != object) will then correctly determine when a cast from an object-typed list to a specific expected_type is invalid, and will only raise TypeError when appropriate.

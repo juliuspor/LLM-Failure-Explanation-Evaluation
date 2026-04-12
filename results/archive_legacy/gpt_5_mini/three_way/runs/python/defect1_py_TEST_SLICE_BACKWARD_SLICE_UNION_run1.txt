@@ -1,0 +1,45 @@
+What failed
+- The check that rejects invalid minute values is wrong. At lines 396–397 the code does:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  This rejects any negative minutes (minutes_offset < 0), so calls like
+  DateTimeZone.for_offset_hours_minutes(0, -15), (0, -15), (-2, -15), and other cases in your tests get a ValueError before any further logic runs.
+
+Where this happens (exact lines)
+- The failure is raised at lines 396–397 (the minutes range check).
+- Later code (lines shown in the slice: 402 and 404) expects to see negative or positive minutes and then adjusts minutes_offset relative to the sign of hours:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+  Those lines never get a chance to run for negative minutes because execution already aborted at 396–397.
+
+Why this is wrong (root cause)
+- The intended allowed range for minutes is -59 to +59, not 0 to 59. By rejecting minutes < 0, the function disallows legitimate inputs like -15 which the rest of the code (and your tests / Joda-Time behavior) expects to accept.
+- The later code shows the implementation tries to handle sign combinations (e.g. negative hours with negative minutes) by transforming minutes_offset relative to hours, but the pre-check prevents those transformations from executing.
+
+What to change (concrete steps)
+1. Change the minutes range check at lines 396–397 to allow negative minutes:
+   Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Keep the rest of the sign-handling logic (lines ~402 and ~404) as-is, because that code expects minutes to be in -59..+59 and will compute the correct total minutes depending on the sign of hours. If you want to be explicit and clearer, replace the adjustments with a direct computation such as:
+     total_minutes = hours * 60
+     if hours < 0:
+         total_minutes -= abs(minutes)
+     else:
+         total_minutes += minutes
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   but this is optional — the minimal fix is to allow minutes down to -59.
+
+3. Update any error messages if desired to reflect the new valid range "-59..+59".
+
+Effect of the fix
+- After changing the check to minutes_offset < -59, inputs like (0, -15), (-2, -15), and (-2, 15) will pass validation and be handled by the subsequent sign-handling logic, so the tests expecting "-00:15", "-02:15", etc., will not be incorrectly rejected.
+
+Summary
+- Root cause: incorrect minutes range check (line 396) that disallows negative minutes.
+- Fix: change the check to permit minutes in [-59, 59] (replace minutes_offset < 0 with minutes_offset < -59). Optionally simplify the sign-handling logic to compute total_minutes explicitly.

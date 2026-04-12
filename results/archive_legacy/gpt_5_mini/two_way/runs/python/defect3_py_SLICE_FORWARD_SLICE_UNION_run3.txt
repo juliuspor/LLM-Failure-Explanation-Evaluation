@@ -1,0 +1,44 @@
+What happened (where it fails)
+- The bug is in the snippet at lines 38–44 (shown in both slices). The function reads a UTF‑16 code unit into variable high (line 38) and attempts to form a Unicode scalar from a surrogate pair (lines 39–43). If it does not find a valid low surrogate it falls through to line 44 and returns high.
+- The problem: high can be a high-surrogate code unit (0xD800–0xDBFF). Returning that value as if it were a Unicode code point is incorrect: surrogate code units are not valid Unicode scalar values. Returning an unpaired high surrogate causes consumers to receive invalid code points and triggers Unicode errors later.
+
+Why it happens (root cause)
+- The code only checks for a valid high+low pair and, if one exists, computes the correct scalar (line 43). If no valid pair is found it unconditionally returns high (line 44), even when high is a high-surrogate. In other words, the function treats a single surrogate code unit as if it were a legitimate code point.
+- This can occur when:
+  - index points at a high-surrogate at the end of code_units (index + 1 == len(code_units)), or
+  - index points at a high-surrogate but the following code unit is not a low-surrogate.
+
+Concrete example
+- If code_units[index] == 0xD834 (a high surrogate) and either index+1 is out of range or code_units[index+1] == 0x0041 (not a low surrogate), the function returns 0xD834. 0xD834 is not a valid Unicode scalar; it should be treated as an error or replaced with U+FFFD.
+
+What to change (exact steps)
+1. Decide how you want to handle unpaired surrogates: either
+   - raise an error (UnicodeDecodeError or IndexError), or
+   - return the Unicode replacement character U+FFFD (0xFFFD).
+2. Apply one of the following precise fixes to lines 43–44:
+
+Option A — return replacement character:
+- Replace line 44 with:
+  return 0xFFFD
+- This makes the function return U+FFFD for any unpaired surrogate instead of an invalid surrogate value.
+
+Option B — raise an error:
+- Replace lines 43–44 with:
+  raise UnicodeDecodeError("utf-16", b"", index, index+1, "unpaired surrogate")
+- This makes the caller explicitly get a decode error when encountering an unpaired surrogate.
+
+Option C — treat low surrogates similarly (optional but recommended):
+- Add an explicit check before returning high to catch a low surrogate appearing alone:
+  if 0xDC00 <= high <= 0xDFFF:
+      # unpaired low surrogate
+      return 0xFFFD    # or raise UnicodeDecodeError
+
+Why these fixes work
+- Unicode scalar values must not be surrogate code points. Returning U+FFFD or raising an error ensures the function never hands out invalid scalar values. That prevents downstream Unicode errors and makes behavior explicit.
+
+Summary of exact edit (minimal):
+- Change the final return on line 44 from:
+  return high
+  to either:
+  return 0xFFFD
+  or raise UnicodeDecodeError(...) depending on whether you prefer replacement or failure.

@@ -1,0 +1,75 @@
+What happened
+- The test that failed called DateTimeZone.for_offset_hours_minutes(0, -15).
+- The implementation in hit01_timezone.py rejected minutes == -15 with ValueError("Minutes out of range: -15").
+- That means the minutes validation is too strict: it rejects any negative minutes instead of allowing -59..+59.
+
+Where it occurs
+- Inside hit01_timezone.py, in the method DateTimeZone.for_offset_hours_minutes.
+- The offending check looks like (or is equivalent to) this:
+  if minutes < 0 or minutes > 59:
+      raise ValueError("Minutes out of range: %d" % minutes)
+  (this is the line that raised the ValueError with -15)
+
+Why it fails (root cause)
+- The code treats valid negative minute values (e.g. -15) as out-of-range. The tests — and the class docstring — expect minute to be allowed in the range -59..+59.
+- Because minutes are restricted to >= 0 in the current code, calls such as for_offset_hours_minutes(0, -15), for_offset_hours_minutes(-2, -15) and for_offset_hours_minutes(-2, 15) are rejected or handled incorrectly, causing the failing test.
+
+What the code should do (rules the tests expect)
+- Minutes must be between -59 and +59 inclusive.
+- The combination rules used by the tests:
+  - (hours > 0, minutes < 0) is invalid and should raise ValueError (e.g. (2, -15) -> error).
+  - (hours < 0, minutes > 0) is allowed and treated as extending the negative offset (e.g. (-2, 15) -> -02:15).
+  - hours == 0 may use either positive or negative minutes (0, -15) -> -00:15.
+
+Concrete fix (exact changes to make)
+1. Change the minutes range check so it allows negative minutes down to -59:
+   Replace the current check (the one that rejects any minutes < 0) with:
+   if minutes < -59 or minutes > 59:
+       raise ValueError("Minutes out of range: %d" % minutes)
+
+2. Enforce the invalid mixed-sign case (positive hours combined with negative minutes):
+   Add a specific check to reject hours > 0 with minutes < 0:
+   if hours > 0 and minutes < 0:
+       raise ValueError("Positive hours and negative minutes are not supported: %d, %d" % (hours, minutes))
+
+3. Compute total offset correctly (example implementation):
+   - Define constants:
+       MILLIS_PER_HOUR = 3600000
+       MILLIS_PER_MINUTE = 60000
+   - Compute total_millis as:
+       total_millis = hours * MILLIS_PER_HOUR
+       if hours < 0:
+           total_millis -= abs(minutes) * MILLIS_PER_MINUTE
+       else:
+           total_millis += minutes * MILLIS_PER_MINUTE
+   This preserves the docstring/test behavior that (-2, 15) and (-2, -15) both become -02:15, while (2, -15) is rejected.
+
+Example patch (drop into for_offset_hours_minutes)
+- Replace the existing minutes validation and offset calculation with:
+
+    # validate minutes range
+    if minutes < -59 or minutes > 59:
+        raise ValueError("Minutes out of range: %d" % minutes)
+
+    # disallow positive hours with negative minutes
+    if hours > 0 and minutes < 0:
+        raise ValueError("Positive hours and negative minutes are not supported: %d, %d" % (hours, minutes))
+
+    # compute total milliseconds
+    MILLIS_PER_HOUR = 3600000
+    MILLIS_PER_MINUTE = 60000
+    total_millis = hours * MILLIS_PER_HOUR
+    if hours < 0:
+        # extend the negative magnitude by minutes
+        total_millis -= abs(minutes) * MILLIS_PER_MINUTE
+    else:
+        total_millis += minutes * MILLIS_PER_MINUTE
+
+    # then create/return the DateTimeZone using total_millis and id formatting
+
+Why this fixes the failing test
+- The first change allows minutes == -15 so for_offset_hours_minutes(0, -15) no longer raises.
+- The additional sign rule keeps (2, -15) invalid per tests, while (-2, 15) becomes a negative offset as expected.
+- The total_millis calculation ensures the id and offset match tests like "-02:15" and "+00:15".
+
+If you want, I can produce a ready-to-paste diff for hit01_timezone.py showing the exact lines to replace.

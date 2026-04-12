@@ -1,0 +1,65 @@
+What happened (root cause)
+- The IndexError is raised on line 35 when this check runs:
+  if index < 0 or index >= len(code_units):
+  The value of index is 2, but len(code_units) is smaller (or zero), so the check fails and you raise IndexError("String index out of range: 2").
+- The code then immediately tries to read code_units[index] on line 38:
+  high = code_units[index]
+  but code_units does not contain the data the code is trying to index into.
+
+Why that is wrong
+- The variable names show two different things exist: s (the original string argument) and code_units (the list of UTF-16 code units). The code is treating index as an index into whatever contains the original string code units, but the length check and the subsequent read use code_units, which is not guaranteed to be filled at this point.
+- Concretely, line 10 defines code_units = [] (empty). If the function is trying to interpret index as an index into the original string s, it should be checking len(s) and reading from s (or ord(s[index])), not from code_units. If the intent is to index the code_units list, that list must be populated before you check or read from it.
+
+Where it occurred
+- to_utf16_code_units(s: str) at lines shown:
+  - line 10: code_units = []
+  - line 35: if index < 0 or index >= len(code_units):
+  - line 38: high = code_units[index]
+  - lines 39–44: handling of surrogate pairs using code_units[index+1]
+- The IndexError text shows the index value (2), which is meaningful: index 2 exists in the original string but not in code_units as currently used.
+
+How to fix (explicit steps)
+Pick one of these fixes depending on the intent of the code:
+
+A) If index is supposed to be an index into the original string s
+1. Change the length check to use len(s):
+   if index < 0 or index >= len(s):
+2. Read the code unit from the string (convert to code unit) instead of from code_units. For example:
+   high = ord(s[index])
+   if 0xD800 <= high <= 0xDBFF and index + 1 < len(s):
+       low = ord(s[index + 1])
+       if 0xDC00 <= low <= 0xDFFF:
+           return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+   return high
+
+B) If index is supposed to be an index into code_units (the output list)
+1. Ensure code_units is populated before this function attempts to index it. That means:
+   - Move the code that appends UTF-16 code units into code_units so it runs before these index checks,
+   - Or call this indexing routine only after to_utf16_code_units has returned the populated list.
+2. Keep the length check as using len(code_units) and then read high = code_units[index] as you currently do.
+
+C) If the function is supposed to translate the whole string and return code_units (no indexing)
+1. Remove the index logic entirely and simply construct and return the list of code units:
+   code_units.append(...) etc.
+2. Do surrogate handling during construction rather than by indexing into a not-yet-filled list.
+
+Which fix to choose
+- If this function name to_utf16_code_units(s) is meant to return a list of code units for the whole string, use (C): populate and return code_units and do not index into it before it's built.
+- If there is a separate helper that computes a code point from a position in a sequence, use (A) and operate on s (or the correct input sequence) instead of code_units.
+- If you actually need to operate on an already-built code_units list, use (B) and ensure the list is built first.
+
+Example change (most likely correct for a "get code point at string index" helper — apply A):
+Replace lines 35–44 with:
+if index < 0 or index >= len(s):
+    raise IndexError(f"String index out of range: {index}")
+high = ord(s[index])
+if 0xD800 <= high <= 0xDBFF and index + 1 < len(s):
+    low = ord(s[index + 1])
+    if 0xDC00 <= low <= 0xDFFF:
+        return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+return high
+
+This makes the length check and reads use the same data source (s) and removes the mismatch that caused the IndexError.
+
+Summary
+- The code checks and reads from code_units, but code_units is empty/not populated when index is used. Use the same container for both the bounds check and the read (either s or a filled code_units), or populate code_units before indexing.

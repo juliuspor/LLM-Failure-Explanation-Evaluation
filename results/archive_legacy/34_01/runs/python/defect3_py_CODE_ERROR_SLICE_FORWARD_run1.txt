@@ -1,0 +1,75 @@
+What happened (root cause)
+- The IndexError happens inside code_point_at when you call it with index == len(code_units). The traceback slice shows code_point_at reads code_units[index] (line 38) and fails because index is out of range (index == 2 in your example).
+- That out-of-range call comes from the loop at the end of translate:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+  Here you call code_point_at(code_units, pos) without checking that pos is still valid. When pos reaches length (or becomes greater than valid last index), code_point_at tries to read code_units[index] and raises IndexError.
+
+Why it happens with the current variables and flow
+- You enter the while loop while pos < length (so pos is initially valid).
+- You call consumed = self.translate_codepoint(code_units, pos, out). consumed > 0 indicates the translator handled some input (per your comment, it "took care of a surrogate pair").
+- Instead of advancing pos by the number of code units consumed, you run a for pt in range(consumed) and inside that for you call char_count(code_point_at(code_units, pos)). That inner call reads the code unit(s) at pos to compute how many chars the current codepoint uses and then advances pos by that many.
+- If consumed says "1" (or any number) but the codepoint at pos is a 2-code-unit surrogate pair, or if pos is at the last code unit and char_count/code_point_at tries to read a following low surrogate, one of the code_point_at calls will be invoked with index == length (out-of-range) and crash.
+- Concretely: suppose length == 2 and pos == 1. consumed > 0, you enter the for loop and call code_point_at(code_units, 1). code_point_at tries to read code_units[1] (OK) and then, because it sees a high surrogate or otherwise checks index+1, it may try to access code_units[2] if the function logic is incorrect or if pos gets incremented and a subsequent iteration calls code_point_at with pos == 2. That is the out-of-range access shown in the error.
+
+Where exactly (line references)
+- The failure originates at the code_point_at call inside the for loop in translate (the loop beginning at your comment "Contract with translators..."). The error slice shows the crash at the first line of code_point_at: high = code_units[index] (line 38 in the slice).
+- The problematic code is these lines in translate:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+Why your current approach is wrong
+- You trust that calling translate_codepoint and then re-scanning code units with code_point_at/char_count will never read beyond the input. But you do not guarantee that: you do not check bounds before every code_point_at invocation, and you mix two different "units" of counting (consumed vs. actual code units advanced).
+- The comment suggests translators already handled surrogate pairs, so your re-scan is unnecessary and inconsistent with the contract (translator may have consumed code units, not codepoints).
+
+Concrete fixes (pick one, with exact code changes)
+
+1) Simplest and correct if consumed is the number of code units consumed by the translator:
+- Replace the whole for loop with a single pos increment by consumed:
+
+    # after consume > 0
+    pos += consumed
+    continue
+
+This avoids re-reading code_units entirely.
+
+2) If consumed is the number of codepoints consumed (not code units), and you must compute code-unit length per codepoint:
+- Ensure you do bounds checks before calling code_point_at, and stop if pos >= length:
+
+    for pt in range(consumed):
+        if pos >= length:
+            break
+        pos += char_count(code_point_at(code_units, pos))
+
+3) If you cannot change translate_codepoint contract, make contract explicit and enforce it:
+- Document/validate whether consumed means code units or codepoints.
+- If consumed is ambiguous, assert and fail early:
+
+    # right after getting consumed
+    if consumed < 0 or consumed > length - pos:
+        raise ValueError(f"translate_codepoint returned invalid consumed={consumed} at pos={pos}")
+
+Then handle pos increment accordingly (pos += consumed).
+
+Which fix I recommend
+- Use fix (1) if translate_codepoint returns the number of code units consumed (the comment "they just took care of a surrogate pair" implies translators already handled paired surrogates). Change the loop to pos += consumed and continue. This is minimal and eliminates the out-of-range read.
+
+Summary of exact code change (recommended)
+Replace:
+
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+With:
+
+    pos += consumed
+    continue
+
+And optionally add an assertion immediately after consumed is returned:
+
+    if consumed < 0 or consumed > length - pos:
+        raise ValueError(f"translate_codepoint returned invalid consumed={consumed} at pos={pos}")
+
+This prevents the IndexError and makes the translator contract explicit.

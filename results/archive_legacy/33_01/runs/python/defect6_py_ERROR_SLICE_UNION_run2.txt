@@ -1,0 +1,54 @@
+What happened (where)
+- The failing assertion happened inside Slice_union.add (line 126) when it called self.append(newcode) on line 138.
+- The test expected the stored value to be negative zero (-0.0) but the object actually stored a plain positive zero (0). The assertion message shows the difference: "Expected -0.0, got 0".
+
+Why it failed (root cause)
+- Somewhere in append (the code at/around line 138) the value newcode is being normalized so that any zero loses its negative sign bit. In other words, the code is treating -0.0 and 0.0 as identical and replacing -0.0 with 0.0 (or otherwise creating a float value whose sign bit is positive).
+- In Python -0.0 == 0.0 is True, so a lot of common operations will collapse the distinction:
+  - assigning newcode = 0 or newcode = float(newcode) after a truthy check that treats 0 as falsy,
+  - using newcode = abs(newcode),
+  - adding zero (newcode += 0.0),
+  - using int(newcode) or other coercions,
+  - storing values as keys in a dict/set that later rebuilds them,
+  any of these will lose the negative zero sign bit.
+- Because append modifies or coerces newcode before storing it, the stored value loses its negative sign and becomes 0.0, so the test that expected -0.0 fails.
+
+Exactly where to look
+- Open the append implementation at/near line 138. Look for any of these operations on newcode or on values derived from it:
+  - assignments like newcode = 0, newcode = float(newcode)
+  - arithmetic that forces normalization: newcode += 0.0, newcode = +newcode
+  - abs(newcode) or math.fabs
+  - int(newcode), round(newcode), or conversions to some other numeric type
+  - any conditional that replaces falsy values: if not newcode: newcode = 0
+- Also inspect add (line 126) for pre-processing of newcode before the call to append — it might already have been normalized there.
+
+How to confirm the hypothesis
+1. Reproduce with a tiny test:
+   - Call add(-0.0) and then check the stored value with:
+     - repr(stored_value) — repr shows "-0.0" vs "0.0"
+     - or check the sign bit: import math; math.copysign(1.0, stored_value)
+2. Add a temporary debug print right before append stores the value:
+   - print("append storing:", repr(newcode), math.copysign(1.0, newcode))
+   That will show whether the negative sign is already gone when append receives it, or whether append itself strips it.
+
+Concrete fixes (pick one, depending on intent)
+- If you must preserve -0.0 exactly:
+  1. Stop normalizing zeros inside append (remove any code that sets zeros to 0, uses abs(), casts to int, does +0.0, or uses "if not newcode: newcode = 0").
+  2. Preserve the float value as-is and store newcode directly. This preserves the sign bit.
+  3. Where you need to test sign later, use math.copysign(1.0, value) == -1.0 to detect negative zero.
+  Example: replace destructive normalization with:
+     stored = newcode   # do not coerce or replace zeros
+- If negative-zero is not required and the test should accept it:
+  1. Change the test to accept 0.0 and -0.0 as equivalent, or compare sign bits explicitly if needed.
+  2. For assertions, use math.copysign to test sign, or normalize the expected value to 0.0 before comparing.
+
+Small code snippets to help
+- Detect negative zero:
+  import math
+  def is_negative_zero(x):
+      return x == 0.0 and math.copysign(1.0, x) < 0
+- Force a negative zero (if you need to store it explicitly):
+  neg_zero = math.copysign(0.0, -1.0)
+
+Summary
+- The failure is caused by append (line 138) normalizing away the negative sign bit of -0.0, so add (line 126) ends up storing 0 instead of -0.0. Inspect append for coercions (abs, int, +0.0, "if not ..." branches) and either stop that normalization (if you need to preserve -0.0) or change the test to not expect the sign of zero.

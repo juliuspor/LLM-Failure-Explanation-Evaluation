@@ -1,0 +1,1 @@
+Append a numeric literal to the output stream. This emits a compact, Java-like representation and may insert whitespace when needed to avoid creating ambiguous tokens.

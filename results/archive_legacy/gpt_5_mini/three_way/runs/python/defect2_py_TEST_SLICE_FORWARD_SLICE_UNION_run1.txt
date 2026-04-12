@@ -1,0 +1,54 @@
+What happened (where, in plain terms)
+- At get_paint (line 54) the code computes g at line 71:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- Immediately after, at lines 74–75 the code checks:
+  if g < 0 or g > 255:
+      raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- Because the tests pass values outside the bounds (e.g. -0.5 and 1.5), g becomes negative or >255 and the code raises ValueError instead of clamping to black or white. That is the direct cause of the failing tests.
+
+Why it fails (root cause)
+- The implementation raises an error when the computed gray value g is outside [0,255] rather than clamping the input to the lower/upper bounds or clamping g to [0,255]. The tests expect clamping behavior (values < lower_bound -> black; values > upper_bound -> white).
+- Concretely:
+  - For gps.get_paint(-0.5) with default bounds 0.0..1.0: the numerator (value - lower) is negative, so g < 0 and the code raises ValueError at line 74–75.
+  - For gps.get_paint(1.5): g > 255 and the code raises ValueError at the same check.
+- The offending code is the raise in lines 74–75. The exception is both unexpected by the tests and wrong for the intended behavior.
+
+Exact places to change and suggested fixes (step-by-step)
+1. Remove the ValueError raise at lines 74–75. Those lines cause the failure.
+2. Implement clamping instead. Two acceptable approaches (pick one):
+
+Option A — Clamp the input value before computing g (recommended):
+- Before computing g (i.e., before line 71), clamp value:
+    value_clamped = min(max(value, self._lower_bound), self._upper_bound)
+- Use value_clamped in the formula:
+    ratio = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+    g = int(ratio * 255.0)
+- This guarantees g is in [0,255] and matches the tests' intent.
+
+Option B — Clamp g after computing it:
+- Keep the current formula for g, then replace the raise with:
+    g = max(0, min(255, g))
+- This also prevents raising and forces black/white for out-of-range inputs.
+
+3. Add a division-by-zero guard: if self._upper_bound == self._lower_bound, raise a clear error (or define desired behavior). Example:
+    if self._upper_bound == self._lower_bound:
+        raise ValueError("upper_bound must be greater than lower_bound")
+
+Minimal concrete patch (replace the part around lines 71–75)
+- Remove the if ... raise block, and instead:
+
+    # clamp input value to bounds
+    value_clamped = min(max(value, self._lower_bound), self._upper_bound)
+    # compute fraction and gray
+    ratio = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+    g = int(ratio * 255.0)
+
+- (Also add the division-by-zero check before this block.)
+
+Why this fixes the tests
+- Clamping value will convert -0.5 to lower_bound (0.0) and 1.5 to upper_bound (1.0) so get_paint(-0.5) -> (0,0,0) and get_paint(1.5) -> (255,255,255), matching the test expectations.
+- Mid values like 0.5 will produce 127 (127.5 truncated to 127), matching the test assertions.
+
+Summary
+- Root cause: raising ValueError when g is outside [0,255] (lines 74–75) instead of clamping.
+- Fix: remove the raise and clamp either the input value or g; add a check for equal bounds to avoid division by zero.

@@ -1,0 +1,49 @@
+What happened
+- The tests fail because the implementation in DateTimeZone.for_offset_hours_minutes rejects any negative minutes unconditionally.
+- The check at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  treats negative minutes as out of range even though the docstring and your tests expect negative minutes to be allowed in some cases (e.g. (-2, -15) or (0, -15)).
+
+Why it fails (root cause)
+- Variable involved: minutes_offset.
+- Method involved: DateTimeZone.for_offset_hours_minutes.
+- Location: lines 396–397 in the implementation.
+- The condition minutes_offset < 0 prohibits negative minute values globally. According to the DOCSTRING, minutes must be in the range -59 to +59 (not 0..59). By enforcing 0..59 the code contradicts its own docstring and the tests. This causes ValueError for any call that passes a negative minutes_offset (for example DateTimeZone.for_offset_hours_minutes(-2, -15) and (0, -15)), which is why those tests fail.
+
+What should be done (concrete fix steps)
+1. Change the minutes range check to allow negatives:
+   - Replace
+       if minutes_offset < 0 or minutes_offset > 59:
+   - With
+       if minutes_offset < -59 or minutes_offset > 59:
+   This enforces the documented range [-59, +59].
+
+2. Ensure sign-combination handling matches the docstring:
+   - After validating numeric ranges, enforce the intended sign rules:
+     - If hours_offset > 0 and minutes_offset < 0: raise ValueError (mixed positive hours + negative minutes is invalid per doc).
+     - If hours_offset < 0 and minutes_offset > 0: treat total offset as negative (i.e. - (abs(hours)*3600000 + minutes*60000)), per the doc behavior where (-2, 15) -> -02:15.
+     - If hours_offset == 0: preserve sign of minutes (0, -15) -> -00:15, (0, 15) -> +00:15.
+   - Example code snippet to insert after range checks:
+       if hours_offset > 23 or hours_offset < -23:
+           raise ValueError(...)
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Minutes must not be negative when hours is positive")
+       # compute total offset milliseconds:
+       sign = -1 if hours_offset < 0 else 1
+       # when hours negative and minutes positive, minutes extend the negative offset:
+       if hours_offset < 0:
+           total_mins = -(abs(hours_offset) * 60 + abs(minutes_offset))
+       else:
+           total_mins = hours_offset * 60 + minutes_offset
+       total_millis = total_mins * 60000
+
+3. Run the test suite after applying the change to confirm all tests pass.
+
+Why this fix is safe
+- It matches the method docstring (minutes in [-59, 59]).
+- It preserves the intended and documented behavior for mixed signs: disallow (+hours, -minutes), allow (-hours, +minutes) and treat them as enlarging the negative offset.
+
+If you want, I can produce the exact patch for the method (showing the few lines to change/add) so you can apply it directly.

@@ -1,0 +1,48 @@
+What happened (root cause)
+- The failure occurs inside CodeConsumer.add_number when the code reaches the integer branch starting at line 176:
+  - Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - Lines 177–178 set value = int(x) and mantissa = value.
+  - Later (line 192) the code calls self.add(str(value)) for the non-scientific-integer path.
+- For x == -0.0:
+  - Python compares -0.0 == int(-0.0) as True because int(-0.0) == 0 and -0.0 == 0.0.
+  - value becomes 0 (losing the sign).
+  - The code then takes the integer branch and does self.add(str(value)), producing "0".
+- In short: the integer-branch test (x == int(x)) treats negative zero as an ordinary zero and the code emits str(value) == "0", so the negative sign is lost. This is exactly why the test expecting "-0.0" fails.
+
+Where it happens (specific lines and variables)
+- Line 176: the branch condition uses x == int(x). Variable x is the input float.
+- Line 177: value = int(x) converts -0.0 to 0 (value).
+- Line 192: self.add(str(value)) emits "0", not preserving the sign of x.
+- The negative-zero utility exists (CodeConsumer.is_negative_zero) but is not consulted before taking the integer branch.
+
+Concrete fixes (step-by-step, exact places to change)
+1. Detect negative zero before the integer branch at or before line 176:
+   - Add an early check: if CodeConsumer.is_negative_zero(x): self.add("-0.0"); return
+   - This ensures -0.0 is handled before it can be turned into int(0) and lose its sign.
+
+   Example insertion (pseudocode showing location):
+   - Insert immediately above line 176:
+     if CodeConsumer.is_negative_zero(x):
+         # preserve sign of negative zero exactly as test expects
+         self.add("-0.0")
+         return
+
+2. Alternatively, if you prefer to keep the rest of the formatting logic:
+   - When value == 0 (after value = int(x)), check sign using is_negative_zero(x) before emitting str(value):
+     if value == 0 and CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+     else:
+         self.add(str(value))
+
+3. Ensure consistency with tests:
+   - The test expects "-0.0" specifically. Choose the format "-0.0" (not "-0") when preserving negative zero.
+
+Why these fixes work
+- They avoid converting -0.0 to an unsigned integer 0 before sign is checked.
+- is_negative_zero(x) can detect the sign bit of zero (e.g., using math.copysign or struct.unpack) and thus preserves "-0.0" before any integer conversion removes the sign.
+
+Extra note about alternatives
+- You can also move any negative-zero handling to the top of add_number so no downstream branch ever needs to special-case zero sign.
+- Avoid relying on x == int(x) to detect integers for zeros where sign matters.
+
+This pinpoints the exact failing lines (176, 177, 192) and gives concrete code changes to fix the loss of the negative-zero sign.

@@ -1,0 +1,56 @@
+What happened (root cause)
+- The code treats -0.0 as an integer because of the test on line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - For x = -0.0, int(x) == 0 and x == 0.0 evaluates True, so the code enters the "integer" branch.
+- Once inside that branch:
+  - value = int(x) sets value = 0 (line 177).
+  - Because abs(x) < 100, the loop to build mantissa/exp is skipped; exp remains 0 (lines 180–187).
+  - The code reaches the integer output path at line 192: self.add(str(value)). That calls str(0) and writes "0", dropping the sign.
+- If the code had taken the floating branch (the else at line 193/194), str(x) for x = -0.0 would produce "-0.0" and preserve the sign. But the earlier integer-detection test forces the wrong branch for -0.0.
+
+Where it occurs (exact lines)
+- The check that misclassifies -0.0 is at line 176.
+- The conversion to integer and loss of sign happens at lines 177 (value = int(x)) and 192 (self.add(str(value))).
+- The floating fallback that would have preserved "-0.0" is at line 194 (self.add(str(x))).
+
+Why this is wrong
+- -0.0 is a distinct IEEE-754 floating value that carries a negative sign (sign bit). Equality x == int(x) compares numeric values and treats -0.0 equal to 0, so that equality test alone is not sufficient to decide "integer-like" formatting when the sign must be preserved.
+- The integer formatting path uses int(value) and str(value) which cannot represent the negative sign of -0.0, so the sign is lost.
+
+Concrete fixes (step-by-step)
+Option A — Preferred, minimal change: detect negative zero before the integer branch and emit "-0.0"
+1. Add a check immediately before the existing integer branch (before line 176). Example code:
+   if CodeConsumer.is_negative_zero(x):
+       self.add("-0.0")
+       return
+2. This ensures -0.0 never gets classified as an integer and is printed as "-0.0" to match the tests.
+
+Option B — Alternate: preserve sign when value == 0
+1. Keep the integer branch but special-case zero there:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x):
+       value = int(x)
+       if value == 0 and math.copysign(1.0, x) < 0:
+           self.add("-0.0")
+           return
+       ...
+2. This also prints "-0.0" for negative zero but leaves other integer formatting unchanged.
+
+Option C — Use float-to-string formatting consistently
+1. Avoid the integer detection for values that are exactly zero: treat zero as a float formatting case so str(x) keeps the sign.
+2. Example: change the if to skip the integer branch when x == 0.0 (or use is_negative_zero to check).
+   if x == int(x) and x != 0.0 and not math.isinf(x) and not math.isnan(x):
+       ...
+3. This preserves negative zero but may change formatting decisions for 0 vs 0.0 in other contexts — test accordingly.
+
+Which to choose
+- Option A is simplest and matches the existing test suite: it uses the existing utility CodeConsumer.is_negative_zero (the tests reference it), is explicit, and prevents the integer branch from consuming -0.0.
+- Implement the change at the exact spot before line 176 so the behavior is corrected with minimal intrusion.
+
+Tests to run after the fix
+- Run the provided tests:
+  - TestCodeConsumerAddNumber.test_negative_zero should now get "-0.0".
+  - Existing integer/float tests must still pass (positive zero prints "0", 42.0 -> "42", etc.).
+  - Edge cases: infinities and NaN should remain handled as before.
+
+Summary
+- Cause: The equality check x == int(x) (line 176) classifies -0.0 as an integer and the integer branch uses int/str(0) (lines 177 & 192), which drops the negative sign.
+- Fix: Special-case negative zero before the integer branch (use CodeConsumer.is_negative_zero(x) and add "-0.0"), or detect sign when value == 0 and output "-0.0".

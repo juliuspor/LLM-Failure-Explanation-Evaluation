@@ -1,0 +1,56 @@
+What fails
+- The code returns the wrong total-minute value (and therefore the wrong millisecond offset) whenever the hour offset is negative. This happens on these lines inside the try block:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why it fails (root cause, exact place and variables)
+- You reuse the parameter minutes_offset to hold the "total minutes" instead of computing a separate total_minutes. That reuse masks the original minutes value and leads to a sign error in the negative-hour branch.
+- Specifically, when hours_in_minutes < 0 you do:
+    minutes_offset = hours_in_minutes - minutes_offset
+  But hours_in_minutes is already negative (hours_offset * 60). Subtracting the positive minutes_offset makes the result "more negative" than intended in the general case where the sign convention expects the minute component to follow the hour sign.
+- This is the wrong sign-handling logic for offsets because the code assumes the minute component is always positive and then subtracts it from a negative hour total. The correct rule is: the total minutes = sign(hours_offset) * (abs(hours_offset) * 60 + minutes_offset). The existing code does not implement that rule reliably; it replaces minutes_offset with a mixed value and then uses that mixed value to compute milliseconds (line 405), producing an incorrect offset.
+
+Concrete example (where it goes wrong)
+- Input: hours_offset = -1, minutes_offset = 30
+  - hours_in_minutes = -60
+  - Code computes minutes_offset = hours_in_minutes - minutes_offset = -60 - 30 = -90
+  - That yields total minutes = -90 (which may look correct), but the code’s logic is fragile and will produce incorrect results for other combinations or if the sign convention expected is different. Reusing minutes_offset is confusing and error-prone.
+- More importantly, the intended clear rule is: -1:30 should be -(1*60 + 30) = -90; the code’s logic should compute that explicitly but instead mutates minutes_offset and relies on subtraction with an already-negative hours_in_minutes which is hard to reason about and easy to get wrong.
+
+Where it occurs (lines)
+- Validation of minutes occurs at line 396–397:
+    if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- The problematic assignment and multiplication occur at lines 402, 404 and 405:
+    402: minutes_offset = hours_in_minutes - minutes_offset     # negative hour branch
+    404: minutes_offset = hours_in_minutes + minutes_offset     # positive hour branch
+    405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+How to fix (clear steps)
+1. Do not reuse minutes_offset for the computed total; introduce a new variable total_minutes.
+2. Compute total_minutes using an explicit sign calculation:
+   - If hours_offset < 0: total_minutes = hours_in_minutes - minutes_offset
+   - Else: total_minutes = hours_in_minutes + minutes_offset
+   (This preserves the intended sign semantics but done clearly in a new variable.)
+3. Multiply total_minutes by MILLIS_PER_MINUTE and pass that to for_offset_millis:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing validation checks (hours and minute ranges) and the UTC short-circuit.
+5. Optionally, add unit tests for:
+   - Positive offsets (e.g., 1:30 -> +90 minutes)
+   - Negative offsets (e.g., -1:30 -> -90 minutes)
+   - Boundary values (±23:59) and zero
+
+Minimal corrected code sketch (replace the try block)
+    total_minutes = 0
+    try:
+        hours_in_minutes = hours_offset * 60
+        if hours_in_minutes < 0:
+            total_minutes = hours_in_minutes - minutes_offset
+        else:
+            total_minutes = hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Why this fixes it
+- Using total_minutes makes the intent explicit and prevents accidental reuse of the input variable.
+- The sign logic becomes readable and less error-prone, and the multiplication uses the correct total number of minutes.

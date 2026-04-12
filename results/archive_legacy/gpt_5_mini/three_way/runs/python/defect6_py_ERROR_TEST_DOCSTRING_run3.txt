@@ -1,0 +1,74 @@
+What happened (what failed)
+- The test expected add_number(-0.0) to produce the string "-0.0".
+- The implementation produced "0" (no sign), so the assertion failed with: Expected -0.0, got 0.
+
+Root cause (why it failed, precisely where)
+- In CodeConsumer.add_number the code first tests whether the float is an integer and then formats it as an int. A common implementation looks like:
+  if value.is_integer():
+      self.append(str(int(value)))
+- For value == -0.0, value.is_integer() is True and int(-0.0) is 0. Converting int(−0.0) to string yields "0", which loses the negative sign bit. The negative sign is lost by the int conversion, so the output becomes "0" instead of preserving "-0.0".
+- The sign-loss happens before any negative-zero detection is applied (or because there is no early detection). In short: the code converts the float to an int (or otherwise strips trailing .0) before checking/handling negative zero.
+
+How to confirm it quickly
+- Reproduce in REPL:
+    v = -0.0
+    v.is_integer() -> True
+    int(v) -> 0
+    str(int(v)) -> "0"
+  That shows the conversion path that loses the sign bit.
+
+Exact place to change
+- Method: CodeConsumer.add_number(value)
+- Variable: value (the numeric argument passed in)
+- Also check: CodeConsumer.is_negative_zero (utility used to detect negative zero)
+
+Concrete fixes (step-by-step)
+1. Detect negative zero before converting the float to an int / dropping the fractional part. At the top of add_number (before any int-conversion or integer-branch), add:
+    if self.is_negative_zero(value):
+        self.append("-0.0")
+        return
+   This makes the behavior explicit and immediate for -0.0.
+
+2. Make sure is_negative_zero is implemented robustly. Use math.copysign to test sign bit without relying only on equality:
+    import math
+    @staticmethod
+    def is_negative_zero(x):
+        return x == 0.0 and math.copysign(1.0, x) < 0.0
+   This returns True only for negative zero, False for +0.0 and for non-zero values.
+
+3. Alternatively, if you prefer not to special-case -0.0, avoid converting to int for exact zero and preserve the float formatting if value == 0.0 but has a negative sign:
+    if value == 0.0:
+        if math.copysign(1.0, value) < 0.0:
+            self.append("-0.0")
+        else:
+            self.append("0")
+        return
+
+Why this fixes the problem
+- Checking is_negative_zero first prevents losing the sign in an int conversion.
+- Using math.copysign checks the IEEE sign bit; it detects -0.0 separately from +0.0 without relying on string formatting quirks.
+
+Minimal patch example
+- Insert near the start of add_number (pseudocode with exact names from the tests):
+    import math
+
+    def add_number(self, value):
+        # preserve negative zero sign
+        if self.is_negative_zero(value):
+            self.append("-0.0")
+            return
+
+        # existing logic that may convert integer floats to ints
+        if value.is_integer():
+            self.append(str(int(value)))
+            return
+        ...
+- Ensure is_negative_zero is as above.
+
+Notes and edge cases
+- Don’t try to detect negative zero by stringifying the float first — the current bug shows that conversion can already have removed the sign.
+- This change only affects outputs for -0.0; other numeric formatting branches remain unchanged.
+- The tests for positive zero, integers, and floats will still pass because those paths are left intact.
+
+Summary
+- The failure was caused by converting -0.0 to int(−0.0) (=> 0) before checking for negative zero, which drops the sign bit. Fix: detect negative zero first (use math.copysign) and append "-0.0" before any integer conversion or formatting that would remove the sign.

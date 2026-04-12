@@ -1,0 +1,40 @@
+What happened (what failed)
+- The test calls escaper.translate_string('\U0001F630') — that string is a single Unicode character U+1F630 (an "astral" code point > U+FFFF).
+- to_utf16_code_units(s) produced the UTF‑16 code units for that input. For U+1F630 UTF‑16 requires a surrogate pair, so code_units ends up with length 2 (indexes 0 and 1).
+- Somewhere after that, translate_string (calling into to_utf16_code_units or using its result) accessed code_units[index] with index == 2.
+- The bounds check at lines 35–36 of to_utf16_code_units raised IndexError("String index out of range: 2") because index >= len(code_units) (2 >= 2). That is the direct cause of the crash.
+
+Why it happened (root cause)
+- The code mixes two incompatible concepts: "number of Python string characters" (code points) and "number of UTF‑16 code units". For an astral character like U+1F630 there are 1 Python code point but 2 UTF‑16 code units.
+- translate_string assumes there is an index 2 available (for example by iterating using code point counts or by incrementing index incorrectly), and then tries to read the next UTF‑16 code unit without checking that it exists.
+- Concretely: variable code_units contains 2 entries, but the code later uses index == 2 (for example after consuming one unit or by an off‑by‑one loop) and calls code_units[2]. That triggers the bounds check at lines 35–36.
+
+Where it occurred (specific names and lines)
+- Function: to_utf16_code_units(s: str)
+- Variables: code_units (list of UTF‑16 code units), index (the index used to read code_units)
+- Exact check raising the error: lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- Call site: escaper.translate_string('\U0001F630') triggered the code path that led to index == 2.
+
+How to fix it (concrete steps)
+1. Decide whether you want to work in code points (Python str indexes) or UTF‑16 code units. Mixing them causes off‑by‑one errors for astral characters.
+2. If you must work with UTF‑16 code units:
+   - Build code_units reliably, e.g. units = list(s.encode('utf-16-le')) parsed into 16‑bit values, or construct surrogate pairs explicitly.
+   - Iterate with a while loop that checks bounds before accessing a look‑ahead unit:
+     - while index < len(code_units):
+         - if you need to look at the next unit, first confirm index+1 < len(code_units)
+         - handle the case where the next unit is missing (treat as malformed, use replacement, or avoid accessing it)
+     - when you consume a surrogate pair, advance index by 2; otherwise advance by 1.
+3. If you want to work with Python code points (simpler):
+   - Operate on the original string s (iterate characters of s), not on UTF‑16 units. Python gives each astral character as a single element, so you won't accidentally index past the end when you assume one element = one character.
+4. Add explicit tests for astral characters (like '\U0001F630') and malformed surrogate sequences to ensure your index arithmetic is correct.
+
+Minimal actionable change example (if current code tries to access code_units[index+1]):
+- Before reading code_units[index+1], add:
+    if index+1 >= len(code_units):
+        handle_missing_low_surrogate()  # replace, emit error, or skip
+  This prevents the IndexError and forces you to decide how to handle incomplete pairs.
+
+Summary
+The code crashes because translate_string tries to access code_units[2] even though to_utf16_code_units produced only two UTF‑16 units (indexes 0 and 1) for the single astral character. Fix by not mixing code point vs UTF‑16 unit counting, and by checking index+1 < len(code_units) before any look‑ahead access.

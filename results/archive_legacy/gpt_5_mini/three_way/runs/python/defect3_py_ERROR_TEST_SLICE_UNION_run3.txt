@@ -1,0 +1,33 @@
+What happened (where it failed)
+- The IndexError "String index out of range: 2" comes from the check at to_utf16_code_units / code_point_at:  
+  if index < 0 or index >= len(code_units): raise IndexError(f"String index out of range: {index}")  
+  (slice lines 35–36).
+- The failing test input is input_str = "\U0001F630A" (an emoji U+1F630 followed by 'A').
+- That input contains a UTF‑16 surrogate pair followed by another code unit. The translator code is treating indices inconsistently and ends up calling code_point_at (or indexing code_units) with an index equal to the length of code_units (2 in this failure), which triggers the IndexError.
+
+Why it happened (root cause)
+- The bug is an index‑advance mismatch when the loop encounters a surrogate pair:
+  - When code_point_at sees a high surrogate at code_units[index] and a valid low surrogate at code_units[index+1], it correctly decodes the pair to one code point (lines 39–44).
+  - However, the caller of code_point_at (the translate loop in CsvEscaper.translate_string) advances its index by the wrong amount after decoding a surrogate pair. It advances by 1 instead of consuming two UTF‑16 code units.
+  - As a result the next iteration uses an index that points into the middle (or just past) the surrogate pair area. For the input "\U0001F630A" that manifests as an index value equal to len(code_units) (2), causing the explicit bounds check at line 35–36 to raise IndexError.
+- In short: the code decodes two 16‑bit units as one code point but still increments the loop index by one 16‑bit unit; that mismatch causes out‑of‑range indexing on the next step.
+
+Exactly where to change (concrete steps)
+1. In the translate loop (CsvEscaper.translate_string), after you obtain the code point from code_point_at (or after detecting whether the current unit is a surrogate pair), advance the index by the number of UTF‑16 code units consumed:
+   - If you decoded a BMP code point (<= 0xFFFF), increment index by 1.
+   - If you decoded a supplementary code point (> 0xFFFF), increment index by 2.
+   Example logic:
+     if cp > 0xFFFF:
+         index += 2
+     else:
+         index += 1
+2. Alternatively, iterate over Python code points (the Python str) rather than UTF‑16 code units. If you iterate characters of the Python string, each iteration is a Unicode code point and you won’t need to handle surrogate pairs yourself.
+3. Make sure any call sites that pass index into code_point_at use the same index space as code_point_at expects (UTF‑16 code unit indices if code_point_at works on UTF‑16 units).
+
+Why this fix stops the exception
+- Advancing the index by 2 when a surrogate pair was consumed prevents the loop from re‑visiting the low surrogate or advancing into an index equal to len(code_units). The next index will point to the 'A' code unit (or to the end of the array correctly), so the bounds check at line 35 will no longer trigger incorrectly.
+
+Summary
+- Root cause: loop advances index by 1 after decoding a surrogate pair that consumed 2 UTF‑16 units.  
+- Symptom: code_point_at is called with index == len(code_units) and raises IndexError (line 35–36).  
+- Fix: advance index by 2 when consuming a surrogate pair (or iterate by code points instead). This will make the tests (including "\U0001F630A") pass.

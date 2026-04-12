@@ -1,0 +1,53 @@
+What happened (root cause)
+- At runtime the code calls code_point_at(code_units, pos) with pos == len(code_units), which causes the IndexError at line 38 of your slice: high = code_units[index]. That is out of bounds.
+- That bad call comes from this block in translate (the for-loop after a translator returns consumed > 0):
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  You enter the outer while because pos < length. But inside this for you call code_point_at repeatedly while you also increment pos. If consumed > 1 the loop will call code_point_at again after pos has been advanced to length (or beyond), so code_point_at receives index == length and crashes.
+
+Exactly where and why (line/variable references)
+- Outer loop condition: while pos < length: ensures pos is valid at loop start.
+- After a translator returns consumed (translator handled N codepoints starting at pos), you run for pt in range(consumed): and inside you call code_point_at(code_units, pos).
+- code_point_at starts with high = code_units[index] (line 38 in your slice). If index == len(code_units) this line raises IndexError.
+- That happens when one iteration of the for-loop increments pos to length, but the for-loop still has more iterations and calls code_point_at again with the now-out-of-range pos.
+
+How to fix it (concrete changes)
+Choose one of these clear options:
+
+1) Stop calling code_point_at when pos is already at/over the end:
+   Replace the for-loop by a guarded loop:
+
+       for _ in range(consumed):
+           if pos >= length:
+               break
+           pos += char_count(code_point_at(code_units, pos))
+
+   This prevents calling code_point_at(index == length).
+
+2) Compute the amount to advance without re-calling past-the-end:
+   If translate_codepoint(consumed) tells you how many codepoints were consumed starting at original_pos, compute the total increment by scanning only while pos < length:
+
+       i = 0
+       while i < consumed and pos < length:
+           pos += char_count(code_point_at(code_units, pos))
+           i += 1
+
+   This is equivalent to (1) but clearer about bounds.
+
+3) Prefer correctness by making translate_codepoint also return the number of UTF-16 code units consumed (1 or 2 per codepoint) instead of codepoints, so you can just do pos += consumed_units without looping. Example contract change:
+   - change translate_codepoint to return consumed_units (number of code units).
+   - then do pos += consumed_units
+
+Notes and why these are different
+- The current bug arises because you assumed the for-loop iterations are safe just because the outer while started with pos < length. That assumption fails when the for-loop advances pos and still has remaining iterations.
+- Option (1) or (2) are minimal and fix the out-of-range call immediately.
+- Option (3) is cleaner if you can change the translator contract (avoid repeated code_point_at and char_count calls).
+
+What to check after the fix
+- Test boundary cases: input of length 1 with a high-surrogate at the end, input ending with a single low or high surrogate, and translators that return consumed > 1 at the end of the string.
+- Ensure translate_codepoint's contract is clear: whether it returns number of codepoints or number of code units, and adjust loop logic accordingly.
+
+Summary in one sentence
+The for-loop calls code_point_at after pos has been advanced to or past length; guard the loop with pos < length (or change translate_codepoint to return code-unit count) to avoid passing an out-of-range index into code_point_at.

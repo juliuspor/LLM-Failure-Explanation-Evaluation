@@ -1,0 +1,38 @@
+What happened (root cause)
+- translate_codepoint(...) returns a count in the wrong unit for how the caller uses it.
+- The caller assumes "consumed" is a number of codepoints and then advances pos by calling char_count(code_point_at(...)) for each unit of "consumed".
+- In practice translate_codepoint(...) returns the number of UTF-16 code units consumed (1 or 2 for a surrogate pair). The loop
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  therefore advances pos too far (it multiplies the code-unit count by char_count), and then code_point_at(...) is called with an out-of-range index. That triggers the IndexError from code_point_at (see lines 35–36 in your slice union).
+
+Where it fails (specific names & lines)
+- The failure happens inside translate(...) in the while loop after consumed = self.translate_codepoint(code_units, pos, out).
+- The problematic code is the for loop that updates pos:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- code_point_at(...) raises IndexError("String index out of range: index") (lines 35–36 in the provided slice union) when pos gets incremented past the end for the surrogate pair input U+1F630.
+
+Why this happens on your test string '\U0001F630'
+- '\U0001F630' is a single Unicode codepoint represented as two UTF-16 code units (a surrogate pair).
+- If translate_codepoint(...) returns 2 (code units consumed) but the caller treats that 2 as "two codepoints" and does the inner pos += char_count(...), the first iteration advances pos by 2 already and the second iteration calls code_point_at with pos == length, causing the IndexError.
+
+How to fix it (clear, step-by-step)
+1. Decide what translate_codepoint(...) should report:
+   - Option A (recommended): make it return the number of UTF-16 code units consumed. Then advance pos by exactly that number.
+     Replace the whole for loop with:
+       pos += consumed
+   - Option B: make it return the number of Unicode codepoints consumed. If you choose this, keep the loop but make sure consumed is a codepoint count and each iteration advances pos by char_count(code_point_at(code_units, pos)). That requires changing translate_codepoint(...) implementation accordingly.
+
+2. Update the code and add a unit test:
+   - If you implement Option A, change:
+       for pt in range(consumed):
+           pos += char_count(code_point_at(code_units, pos))
+     to:
+       pos += consumed
+   - Add a test with a surrogate-pair character (like your '\U0001F630') and a couple of BMP characters to verify pos moves correctly and no IndexError occurs.
+
+3. Add an assertion or docstring so callers and implementers know the unit of "consumed" (code units vs codepoints).
+
+Concise summary
+- The code double-counts when advancing pos because translate_codepoint's return value and the caller disagree on whether that value is in UTF-16 code units or codepoints. This causes pos to run past the end and code_point_at to raise IndexError for surrogate pairs. Fix by making translate_codepoint and the pos-updating code agree (simplest: pos += consumed).

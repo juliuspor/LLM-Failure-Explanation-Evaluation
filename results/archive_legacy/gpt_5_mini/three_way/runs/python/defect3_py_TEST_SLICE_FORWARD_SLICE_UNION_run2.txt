@@ -1,0 +1,50 @@
+What happened
+- The IndexError originates at line 35 in code_point_at (the check "if index < 0 or index >= len(code_units): raise IndexError(...)").
+- That means translate_string (the caller) passed an out-of-range index into code_point_at because its loop advanced index incorrectly after reading a surrogate pair.
+
+Why it happened (root cause)
+- code_point_at returns the Unicode code point at a given index in a list of UTF-16 code units (code_units). If the code unit at index is a high surrogate and the next unit is a matching low surrogate, code_point_at returns the combined code point (>= 0x10000). If not, it returns the single 16-bit value (the high variable).
+- The caller (CsvEscaper.translate_string) uses that returned value to decide how far to advance index, but it advances incorrectly (advancing the wrong amount of UTF-16 code units).
+  - For a surrogate pair you must advance the index by 2 (because the pair occupies two UTF-16 code units).
+  - For a non-surrogate code unit you must advance by 1.
+- Because the caller advanced wrongly, an index past the end of code_units is passed to code_point_at; that triggers the IndexError at the start of code_point_at (line 35).
+
+Where in the code this occurs
+- to_utf16_code_units builds the list named code_units (see slice_union lines around 10).
+- code_point_at uses the index into that list and checks bounds at line 35, reads high = code_units[index] (line 38), and may read a following low surrogate at index + 1 (line 40).
+- The failure occurs when translate_string (in CsvEscaper) increments index incorrectly after seeing a surrogate pair, so the next call to code_point_at gets an out-of-range index and raises at line 35.
+
+How to fix it (clear, specific steps)
+Option A — Fix the caller loop in CsvEscaper.translate_string:
+1. After calling cp = code_point_at(code_units, index), do not use cp itself to move the index.
+2. Instead, advance by the number of UTF-16 code units consumed:
+   - If cp > 0xFFFF then it was a surrogate pair: index += 2
+   - Otherwise: index += 1
+3. Example loop sketch:
+   - while index < len(code_units):
+       cp = code_point_at(code_units, index)
+       ...process cp...
+       if cp > 0xFFFF:
+           index += 2
+       else:
+           index += 1
+
+Option B — Make code_point_at tell the caller how many code units it consumed:
+1. Change code_point_at to return a tuple (code_point, consumed), where consumed is 1 or 2.
+2. Caller becomes:
+   - cp, consumed = code_point_at(code_units, index)
+   - index += consumed
+
+Either option explicitly communicates how many UTF-16 code units to skip; that removes the incorrect index arithmetic that caused the IndexError.
+
+Why these fixes work
+- code_point_at only returns the numeric code point; it cannot implicitly tell the caller whether it read one or two code units unless the caller inspects the numeric value and interprets it properly. The correct contract is: the caller must advance by  number of UTF-16 code units consumed (1 for BMP, 2 for surrogate pair). Making that explicit (either by calculation or by returning consumed) prevents overshooting the code_units list and avoids the IndexError at line 35.
+
+Variables and lines referenced
+- code_units (to_utf16_code_units, around line 10)
+- index (checked at line 35, used at lines 38–41)
+- high and low (lines 38–41)
+- code_point_at (the function shown in slice_union lines)
+- CsvEscaper.translate_string (the caller that must be fixed)
+
+If you want, paste the current translate_string loop here and I will point exactly where to change it and show the corrected code.

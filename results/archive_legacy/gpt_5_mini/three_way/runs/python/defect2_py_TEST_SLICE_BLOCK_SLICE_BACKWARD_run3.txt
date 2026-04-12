@@ -1,0 +1,48 @@
+What happened (where): In GrayPaintScale.get_paint the code computes g at line 71:
+
+  71 | g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+
+and immediately checks and raises at lines 74–75:
+
+  74 | if g < 0 or g > 255:
+  75 |     raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+
+Why it fails (root cause, with examples):
+- For input value = -0.5 (test_lower_bound_clamping) with default lower_bound=0.0 and upper_bound=1.0, g becomes int((-0.5 - 0.0)/(1.0 - 0.0)*255) = int(-127.5) = -127. Because g < 0, the code raises ValueError (lines 74–75). The test expects clamping to black (0,0,0), not an exception.
+- For value = 1.5 (test_upper_bound_clamping), g becomes >255 and triggers the same raise instead of clamping to white (255,255,255).
+- The logic raises on out-of-range values instead of clamping them to [0,255] or clamping the input value to [lower_bound, upper_bound] first. That mismatch between implementation and the tests’ expected behavior is the direct cause of test failures.
+
+Where to change (concrete steps)
+1. Replace the raise with clamping. Either clamp g after computing it, or clamp value before computing g. Example (replace lines 71–75 with one of these):
+
+Option A — clamp the value first:
+- value = max(self._lower_bound, min(self._upper_bound, value))
+- denom = self._upper_bound - self._lower_bound
+- if denom == 0.0: return (0, 0, 0)   # or decide appropriate behavior
+- g = int((value - self._lower_bound) / denom * 255.0)
+- g = max(0, min(255, g))
+- return (g, g, g)
+
+Option B — compute g then clamp:
+- g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+- g = max(0, min(255, g))
+- return (g, g, g)
+
+2. Handle the edge case where upper_bound == lower_bound (division by zero). Decide the desired behavior (e.g., return black or white, or raise a clear error). If you choose to clamp value first, check denom == 0 and return a deterministic color.
+
+Why these fixes work:
+- Clamping the input or the computed g prevents negative indices and values >255 from producing a ValueError, matching the tests’ expectation that out-of-range values map to black or white.
+- Handling denom == 0 avoids a ZeroDivisionError and makes behavior deterministic for degenerate bounds.
+
+Minimal code patch example (replace lines 71–75):
+
+    # clamp input to bounds first
+    v = max(self._lower_bound, min(self._upper_bound, value))
+    denom = self._upper_bound - self._lower_bound
+    if denom == 0.0:
+        return (0, 0, 0)  # or choose another sensible default
+    g = int((v - self._lower_bound) / denom * 255.0)
+    g = max(0, min(255, g))
+    return (g, g, g)
+
+This will make tests for negative values, >1.0 values, mid values, and custom bounds pass as written.

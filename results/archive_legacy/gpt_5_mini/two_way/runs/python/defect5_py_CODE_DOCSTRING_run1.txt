@@ -1,0 +1,56 @@
+What happened (root cause)
+- On the first branch you do: inferred_type = type(array). That gets the Python class of the container object (e.g. <class 'list'>), not the element type contained in that list.
+- That wrong inferred_type is passed to ArrayUtils._copy_list_grow1. That helper expects a component/element type, so it creates a new list with the wrong component type. The later type-check and/or code that expects element-type semantics then fails (the code that raises or triggers ClassCast-like behavior relies on having an element type, not the list type).
+- In short: you treated the list itself as if it were an element, so inferred_type is the list class instead of the element class, causing a type mismatch when you try to produce or cast the new list.
+
+Where it occurs (lines and names)
+- The incorrect assignment occurs at:
+  inferred_type = type(array)
+  (the first if branch).
+- The incorrect value is then used in:
+  new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+  and later in the expected_type check:
+  if inferred_type == object and expected_type != object: ...
+- The actual failure surfaces because _copy_list_grow1 or later type-checking receives a component type of list (or similar) instead of the element type and cannot reconcile that with expected_type or the actual elements.
+
+Why that causes the failure
+- type(array) returns the class of the container (list), not the type of items. The code downstream uses inferred_type as if it described elements. That mismatch produces invalid assumptions about the new list's element type and leads to the TypeError/ClassCast-like failure you see.
+
+How to fix it (clear steps)
+1. When array is not None, infer the element/component type from the array contents, not from the array object:
+   - If array is non-empty use type(array[0]) (or compute a common element type if you need more precision).
+   - If array is empty fall back to:
+     a) type(element) if element is not None, or
+     b) expected_type if provided and not None, or
+     c) object otherwise.
+2. Keep the existing logic for the case array is None: infer from element, or object if element is None.
+3. Make the expected_type check after you pick the correct inferred_type.
+
+Example corrected logic (pseudocode)
+- If array is not None:
+    - if len(array) > 0:
+         inferred_type = type(array[0])
+    - else:
+         inferred_type = type(element) if element is not None else (expected_type or object)
+- elif element is not None:
+    inferred_type = type(element)
+- else:
+    inferred_type = expected_type or object
+
+Notes and edge cases
+- If your lists may contain mixed types, pick the rule you want (first-element type, most-specific common base, or rely on expected_type). Document which rule you choose.
+- If expected_type is supplied, consider using it as a stronger hint and validating elements against it.
+- If ArrayUtils._copy_list_grow1 needs an explicit element-type object (not a Python type), adapt accordingly.
+
+Fix example (concrete)
+Replace:
+    if array is not None:
+        inferred_type = type(array)
+with:
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+        else:
+            inferred_type = type(element) if element is not None else (expected_type or object)
+
+This ensures inferred_type describes the element type, not the list class, removing the source of the cast/type mismatch.

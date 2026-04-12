@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The code checks minutes_offset at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes_offset unconditionally. As a result, valid calls per the docstring such as (hours_offset=0, minutes_offset=-15) or (hours_offset=-2, minutes_offset=-15) raise ValueError here and never reach the later logic (lines 402/404) that adjusts minutes based on the sign of hours_offset.
+
+Why that is wrong (root cause)
+- The docstring explicitly allows negative minute offsets in some combinations:
+  - (0, -15) should produce -00:15
+  - (-2, -15) should produce -02:15
+- The unconditional range check only permits minutes_offset in [0, 59], so it wrongly treats negative minutes_offset as out-of-range even when the hour sign makes the negative minute valid.
+- The later code (lines 402 and 404) expects to receive negative minutes and handle them relative to hours_in_minutes, but it never gets the chance because the early check already raised.
+
+Where it happens (variables and methods)
+- The failing variables and lines: minutes_offset at lines 396–397.
+- Later code that would have used a negative minutes_offset (if allowed) is at 402 and 404 where minutes_offset is combined with hours_in_minutes, then multiplied:
+  405 |             offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  408 |         return cls.for_offset_millis(offset)
+
+How to fix it (concrete steps)
+1. Allow minutes_offset to be negative in the initial range check. Replace the unconditional check with a bounds check for magnitude:
+   - require -59 <= minutes_offset <= 59 (not minutes_offset >= 0).
+2. After allowing negative minutes, enforce the sign-combination rule that the docstring describes:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (example: (2, -15) invalid)
+   - Otherwise accept minutes_offset negative when hours_offset <= 0.
+3. Keep the later checks that ensure the resulting total offset does not exceed +/- 23:59:59.000.
+
+Minimal patch (illustrative)
+- Replace lines 396–397 with something like:
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Immediately after that, add:
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError(f"Inconsistent sign: hours positive but minutes negative ({hours_offset}, {minutes_offset})")
+
+Why this fixes it
+- The first change accepts negative minutes in the allowed magnitude.
+- The second change enforces the prohibited case (positive hours with negative minutes) described in the docstring.
+- This lets valid inputs like (0, -15) and (-2, -15) pass through to the logic at 402/404 and produce the intended offset calculation with FieldUtils.safe_multiply and cls.for_offset_millis.
+
+Example failing call
+- Calling the factory with hours_offset=0, minutes_offset=-15 currently raises ValueError at line 396. After the fix it will produce the intended -00:15 offset.

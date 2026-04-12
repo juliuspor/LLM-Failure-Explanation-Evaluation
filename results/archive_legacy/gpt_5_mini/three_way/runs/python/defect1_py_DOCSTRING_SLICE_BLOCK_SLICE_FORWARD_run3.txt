@@ -1,0 +1,39 @@
+What happened (where)
+- The failure is caused by the validation at line 396:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check unconditionally rejects any negative minutes_offset before the code that later expects negative minutes to be permitted in some cases (lines 402 and 404):
+  402 |                 minutes_offset = hours_in_minutes - minutes_offset
+  404 |                 minutes_offset = hours_in_minutes + minutes_offset
+
+Why it fails (root cause)
+- The docstring and the later logic allow negative minutes when the overall sign is negative (and allow zero hours with negative minutes), e.g. (0, -15) → -00:15 and (-2, -15) → -02:15. But the check at line 396 forbids any negative minutes at all. Because negative minutes are rejected early, inputs like minutes_offset = -15 trigger the ValueError at line 397 even though they are valid according to the method's rules and the later computation code.
+- In short: minutes_offset is being validated too strictly (forbidding negative values) while later code and the spec expect minutes_offset to be allowed in the range -59..+59 with additional sign rules relative to hours_offset.
+
+Exact places to change
+- Replace the unconditional negative check at line 396 with a range check that allows -59..+59.
+- Add the correct sign-combination validation (hours positive with negative minutes should be rejected) after you have both hours_offset and minutes_offset available, before doing the offset arithmetic at lines 402/404.
+- Ensure you still check the final total offset does not exceed +/- 23:59:59.000 (the existing checks around lines 405–407).
+
+Concrete fix (patch-style steps)
+1. Change the test at line 396 from:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   to:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. After you have hours_offset (where you already validate -23..+23), add this explicit sign-combination check (place it before the arithmetic on lines 402/404):
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is not allowed")
+
+   (This enforces the rule shown in the docstring example (2, -15) → ValueError.)
+
+3. Leave the existing arithmetic at lines 402/404 and the final limit check (lines 405–407) unchanged; they expect minutes_offset can be negative and will compute the correct millisecond offset.
+
+Why this fix works
+- Step 1 lets minutes_offset be negative when it should be (range -59..59).
+- Step 2 enforces the prohibited combination (positive hours with negative minutes) exactly where the code has both inputs available.
+- The later code at lines 402/404 can then correctly compute the total offset using negative minute values when allowed.
+
+That pinpoints the root cause (overly strict validation at line 396) and gives exact lines to change and the minimal checks to add.

@@ -1,0 +1,76 @@
+What happened (where it failed)
+- The failure occurs inside LocaleUtils.to_locale when parsing the string "fr__POSIX".
+- The code reaches the branch that assumes a language + '_' + country (positions 0..4) and immediately reads:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - then it checks that ch3 and ch4 are uppercase letters.
+- For "fr__POSIX" locale_str[3] is '_' (because the country is empty: "fr" + "_" + "" + "_" + "POSIX"). The uppercase-letter check fails and ValueError is raised. In short: the function does not handle an empty country (the double underscore) and incorrectly assumes positions 3–4 are always two uppercase letters.
+
+Why it happened (root cause)
+1. The parser assumes that when length != 2 the next two characters after the '_' (indexes 3 and 4) are always an uppercase country code. That is not true for variants like "fr__POSIX" where the country is empty and there are two consecutive underscores.
+2. The length check at the top is awkward and easy to misread: `if length != 2 and length != 5 and length < 7:` — the intent is likely "valid lengths are 2, 5, or >= 7", but this expression is confusing. It works for many inputs but the logic for the empty country case is still not handled later.
+
+Exactly where (lines / checks)
+- The problematic lines are the ones that unconditionally set and validate ch3 and ch4:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+    raise ValueError(...)
+- Those lines are inside the else branch after `if length == 2:` — i.e., the branch for longer locale strings.
+
+How to fix it (precise steps)
+1. Improve the initial length check so it clearly allows exactly lengths 2, 5, or >=7:
+   - Replace `if length != 2 and length != 5 and length < 7:` with
+     `if not (length == 2 or length == 5 or length >= 7):`
+2. Allow an empty country when there are two underscores at positions 2 and 5:
+   - After verifying locale_str[2] == '_' check whether locale_str[3] == '_' (empty country). If so, treat country as "" and continue to verify that locale_str[5] == '_' (the second underscore before variant), then return Locale(language, "", variant).
+   - Otherwise validate ch3/ch4 as uppercase letters and proceed as before.
+3. Do not unconditionally index locale_str[4] before confirming country is present.
+
+A corrected minimal implementation (replace the main parsing part with this)
+    def to_locale(cls, locale_str: str) -> Optional[Locale]:
+        if locale_str is None:
+            return None
+
+        length = len(locale_str)
+        if not (length == 2 or length == 5 or length >= 7):
+            raise ValueError(f"Invalid locale format: {locale_str}")
+
+        ch0 = locale_str[0]
+        ch1 = locale_str[1]
+        if ch0 < 'a' or ch0 > 'z' or ch1 < 'a' or ch1 > 'z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+
+        if length == 2:
+            return Locale(locale_str, "")
+        # now length >= 5
+        if locale_str[2] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+
+        # handle empty country (double underscore) -> language + "__" + variant
+        if locale_str[3] == '_':
+            # expect '_' at pos 5 before variant for valid variant form
+            if length < 7 or locale_str[5] != '_':
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            return Locale(locale_str[0:2], "", locale_str[6:])
+        else:
+            # country must be two uppercase letters
+            if length < 5:
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            ch3 = locale_str[3]
+            ch4 = locale_str[4]
+            if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            if length == 5:
+                return Locale(locale_str[0:2], locale_str[3:5])
+            # length >= 7: verify '_' before variant
+            if locale_str[5] != '_':
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+This change:
+- stops the illegal read/validation of positions 3/4 when the country is empty,
+- clearly enforces valid lengths,
+- correctly returns Locale('fr', '', 'POSIX') for "fr__POSIX".
+
+If you want, I can run through additional example inputs and show how they parse with this corrected logic (e.g., "en", "en_US", "en_US_POSIX", "fr__POSIX").

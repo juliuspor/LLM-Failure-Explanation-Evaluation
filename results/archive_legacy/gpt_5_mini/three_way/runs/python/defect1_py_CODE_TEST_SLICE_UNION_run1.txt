@@ -1,0 +1,62 @@
+What fails
+- At line 396 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This makes inputs like (-2, -15) and (0, -15) fail even though the tests expect negative minutes to be allowed in the range -59..59.
+
+Why that causes the tests to fail (where it happens)
+- The failure happens during the minutes validation (line 396). The tests call DateTimeZone.for_offset_hours_minutes(-2, -15) and DateTimeZone.for_offset_hours_minutes(0, -15). Because the code forbids minutes < 0, those tests raise ValueError immediately and the rest of the logic (lines 402–405 that combine hours and minutes) never runs.
+
+What else in the code is fragile / confusing
+- The code later reassigns minutes_offset to represent the total minutes (lines 402–404):
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  Reusing minutes_offset for the total minutes is confusing and error-prone. Combined with the strict range check above, the intention (to allow negative minutes and to handle negative hours by subtracting minutes) is not implemented correctly.
+
+Concrete, step-by-step fixes (exact places to change)
+1. Allow minutes in the signed range -59..59 (change line 396):
+   Replace
+       if minutes_offset < 0 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce incompatible mixed-sign inputs where required (before combining):
+   - If hours_offset > 0 and minutes_offset < 0, this should be invalid (tests expect ValueError for (2,-15)).
+   - If hours_offset < 0 and minutes_offset > 0, tests expect this to produce a negative total (i.e. minutes extend the negative magnitude), so do not raise.
+
+   Add after computing hours_in_minutes (around line 402):
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Positive hours with negative minutes is not allowed")
+       if hours_offset < 0:
+           # ensure minutes contribute to the negative magnitude
+           minutes_total = hours_in_minutes - abs(minutes_offset)
+       else:
+           minutes_total = hours_in_minutes + minutes_offset
+
+3. Stop reusing minutes_offset for the total and use a clear name (replace the block at 402–405):
+   Replace that whole try block portion with:
+       hours_in_minutes = hours_offset * 60
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Mixed signs: positive hours with negative minutes")
+       if hours_offset < 0:
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+       else:
+           total_minutes = hours_in_minutes + minutes_offset
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why these fixes work
+- Step 1 lets you accept negative minutes in the allowed signed range.
+- Step 2 enforces the test expectation that (2, -15) is invalid but (-2, 15) and (-2, -15) both become -02:15 by always subtracting the absolute minutes when hours are negative.
+- Using total_minutes instead of reusing minutes_offset avoids accidental sign flips and makes the code clearer.
+
+Summary of exact lines to change
+- Line 396: change the minutes range check to -59..59.
+- Insert the mixed-sign validation and compute total_minutes (replace lines 402–405).
+- Use total_minutes when calling FieldUtils.safe_multiply (line 405).
+
+If you want, I can produce the corrected function body with the exact replacement code.

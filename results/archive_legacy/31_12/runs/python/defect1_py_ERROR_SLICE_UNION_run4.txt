@@ -1,0 +1,58 @@
+What happened (where it failed)
+- The exception is thrown at the check on line 400:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  The actual value that caused the failure was minutes_offset == -15, so the code raised ValueError("Minutes out of range: -15").
+
+Why it happened (root cause)
+- The code expects minutes_offset to be in the range 0..59 (the sign, if any, is supposed to be carried by the hours argument), and it rejects any negative minute value right away (line 400). In your run a negative minutes_offset (-15) was passed into this method, so the guard at line 400 blocked further processing.
+- The later lines (406–409) show logic that tries to adjust minutes_offset for negative values:
+    406:                 minutes_offset = hours_in_minutes - minutes_offset
+    408:                 minutes_offset = hours_in_minutes + minutes_offset
+  but those lines are never reached because the early check (line 400) has already raised the exception. In short: the code both forbids negative minute inputs (line 400) and also contains adjustment logic later that seems intended to handle sign/normalization — those two parts are contradictory. The immediate cause is that the caller supplied -15 minutes (or the caller computed -15) and the function fails before it can normalize that.
+
+Where it occurred (call chain pointers)
+- The exception originates in the block shown (lines 400–412), before offset is multiplied (line 409) and before cls.for_offset_millis(offset) is returned (line 412). The failure is in the minutes range check at line 400.
+
+How to fix it (concrete steps)
+Pick one of these two clear remedies depending on intended API:
+
+Option A — Fix the caller (recommended when the API expects 0..59 minutes)
+1. Find the code that calls this method and ensure it passes minutes in the 0..59 range and uses the hours sign to represent negative offsets.
+2. If the caller currently supplies negative minute values (e.g., -15), change it to supply minutes = 15 and adjust the hours sign accordingly (for example, hours = -(abs(hours) + 1) if combining -hours and negative minutes).
+
+Option B — Accept and normalize negative minutes inside this method (if you want the method to be tolerant)
+1. Remove or change the strict guard at line 400 so you can normalize minutes_offset first.
+2. Normalize minutes before the range check. For example (conceptual pseudocode to replace lines 400–409):
+   - if minutes_offset < 0:
+         // borrow 1 hour and make minutes positive
+         hours_offset -= 1
+         minutes_offset += 60
+   - if minutes_offset >= 60:
+         // carry to hours
+         hours_offset += minutes_offset // 60
+         minutes_offset = minutes_offset % 60
+   - now enforce 0 <= minutes_offset <= 59 and handle hours bounds
+3. After normalization, compute offset = FieldUtils.safe_multiply(minutes_total, DateTimeConstants.MILLIS_PER_MINUTE) and return cls.for_offset_millis(offset).
+
+Exact change to lines (minimal example)
+- Replace the early raise at line 400 with normalization, e.g.:
+
+  // before: if minutes_offset < 0 or minutes_offset > 59: raise...
+  // new:
+  if minutes_offset < 0:
+      hours_offset -= ( (-minutes_offset) + 59 ) // 60   // borrow whole hours if needed
+      minutes_offset = minutes_offset % 60
+  if minutes_offset > 59:
+      hours_offset += minutes_offset // 60
+      minutes_offset = minutes_offset % 60
+  // now you can safely enforce 0 <= minutes_offset <= 59
+
+- Then continue the existing code that computes minutes_offset into milliseconds (line 409) and returns (line 412).
+
+Which to choose
+- If the method's documented contract requires minutes be 0..59, fix the caller (Option A).
+- If the method should accept minute values like -15 and normalize them, implement Option B and remove the contradictory early range check.
+
+Summary
+- The code failed because minutes_offset = -15 triggered the strict check at line 400. The method contains later normalization logic (lines 406–409) but the early guard prevents that logic from ever running. Either the caller must pass non-negative minutes, or the method must be changed to normalize negative minute values before raising an error.

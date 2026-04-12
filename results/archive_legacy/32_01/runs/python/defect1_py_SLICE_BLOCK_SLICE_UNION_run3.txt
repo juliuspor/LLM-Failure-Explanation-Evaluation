@@ -1,0 +1,45 @@
+What happened (where)
+- At lines 400–401 the code checks minutes_offset is between 0 and 59:
+  - 400: if minutes_offset < 0 or minutes_offset > 59:
+  - 401:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later (lines 406–409) that same variable minutes_offset is reused to store the total minutes offset:
+  - 406: minutes_offset = hours_in_minutes - minutes_offset
+  - 408: minutes_offset = hours_in_minutes + minutes_offset
+  - 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- If hours_in_minutes is large (e.g. hours_in_minutes == hours * 60), the new minutes_offset after the arithmetic is a large number (hundreds), and safe_multiply can overflow. That triggers the "Offset is too large" path at line 411 and a ValueError is raised before the method returns at 412.
+
+Why it fails (root cause)
+- The variable minutes_offset is used for two different meanings:
+  1. first as the parsed minutes-of-hour component (0..59) that must be validated (lines 400–401), and
+  2. later as the total minutes offset (hours*60 ± minutes) used to compute milliseconds (lines 406–409).
+- Reusing the same variable hides the change in meaning and makes the code hard to reason about. The initial range check (lines 400–401) is correct for the minute-of-hour component, but it gives a false impression that minutes_offset will remain in that small range. After the arithmetic on lines 406/408 the value becomes large, and that large value is then multiplied and can overflow, causing the later "Offset is too large" ValueError at line 411. In short: mixing the two meanings caused an unexpected overflow and an exception.
+
+Concrete fixes (steps you can apply)
+1. Keep the parsed minutes-of-hour and the total minutes offset in separate variables:
+   - Rename the parsed minute-of-hour variable to minute_part (or minutes_of_hour).
+   - Leave the validation at 400–401 to check minute_part is 0..59.
+2. Compute the total minutes into a new variable before multiplying:
+   - total_minutes = hours_in_minutes + minute_part  (or hours_in_minutes - minute_part for negative sign)
+3. Use the new total_minutes when calling safe_multiply:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. After computing offset, explicitly check for overflow and raise a clear error if needed (this is already attempted at line 411 — keep that behavior but it will now reflect an expected large total_minutes rather than a confusing reuse).
+5. Optional: add comments explaining the two separate concepts (minute part vs total minutes) so future readers don’t reuse variables.
+
+Example concrete replacement (conceptual, referencing the original lines)
+- Replace lines 400–401 with:
+    minute_part = minutes_offset  # the parsed minute-of-hour
+    if minute_part < 0 or minute_part > 59:
+        raise ValueError(f"Minutes out of range: {minute_part}")
+- Replace lines 406–409 with:
+    if negative_sign:
+        total_minutes = hours_in_minutes - minute_part
+    else:
+        total_minutes = hours_in_minutes + minute_part
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The validation stays accurate for the minute-of-hour field.
+- The calculation of total minutes is explicit and clear.
+- You avoid accidental reuse of a small-range variable for a large-range value, so the overflow/exception at line 411 becomes predictable and correct.
+
+If you want, paste the full method and I’ll show the exact patch with correct variable names and minimal changed lines.

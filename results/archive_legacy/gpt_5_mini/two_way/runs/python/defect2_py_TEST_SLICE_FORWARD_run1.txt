@@ -1,0 +1,49 @@
+What fails
+- The test expecting get_paint(0.5) to return (127, 127, 127) fails because the implementation converts the computed gray level with round(), which in Python 3 uses "round half to even". For the value 0.5 the computed intensity is 0.5 * 255 = 127.5 and round(127.5) -> 128, so the method returns (128, 128, 128) instead of (127, 127, 127).
+
+Where it happens (likely)
+- In GrayPaintScale.get_paint you compute a fraction and then convert it to an 0–255 integer, for example with a line like:
+    gray = int(round((value - lower) / (upper - lower) * 255))
+  or
+    g = round((value - lower) / (upper - lower) * 255)
+  That conversion is producing 128 for 127.5 because round() in Python 3 does banker's rounding.
+
+Why it happens (root cause)
+- Python 3 round() implements ties-to-even. 127.5 is exactly halfway, so round(127.5) == 128.
+- The tests (and the original Java behaviour) expect truncation toward zero (i.e. casting double to int in Java), which produces 127 for 127.5.
+- If you also skip clamping the input value before this conversion, values below lower or above upper may produce negative or >255 results or even exceptions. The test suite expects explicit clamping to [lower, upper] before mapping to the 0–255 range.
+
+How to fix it (concrete steps and exact code)
+1. Clamp the input value first (use the names in your code: value, lower, upper). Example:
+    if value < self.lower:
+        value = self.lower
+    elif value > self.upper:
+        value = self.upper
+
+2. Compute fraction and convert using truncation/floor to match Java cast-to-int behavior (this yields 127 for 127.5). Replace any int(round(...)) or round(...) conversion with int(...) on the raw product or use math.floor(...). For example:
+    frac = (value - self.lower) / (self.upper - self.lower)
+    intensity = int(frac * 255)        # truncates toward 0, 127.5 -> 127
+
+   Or explicitly:
+    import math
+    intensity = int(math.floor(frac * 255))
+
+3. Ensure intensity stays in [0, 255] (extra safety):
+    intensity = max(0, min(255, intensity))
+
+4. Return the tuple:
+    return (intensity, intensity, intensity)
+
+Minimal concrete replacement for the problematic lines
+- Replace something like:
+    gray = int(round((value - lower) / (upper - lower) * 255))
+  with:
+    frac = (value - lower) / (upper - lower)
+    gray = int(frac * 255)
+
+Why this fixes tests
+- int(frac * 255) truncates the fractional part like Java's cast-to-int, so 127.5 -> 127 as your tests expect.
+- Clamping before computing frac prevents negative or >255 values and avoids exceptions when inputs are outside [lower, upper] (covers the -0.5 and 1.5 test cases).
+
+If you prefer symmetric rounding (not required by these tests)
+- Use a consistent rounding policy (e.g., math.floor(frac * 255 + 0.5)) but be aware this will produce 128 for 127.5 and fail these tests. The tests were written to match truncation behavior.

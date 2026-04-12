@@ -1,0 +1,48 @@
+What happened (where it fails)
+- The function clamps the input into local variable v (lines 2–4), but then calculates g using the original value variable instead of the clamped v:
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  That line uses value, not v.
+- If the caller passes value outside the [self._lower_bound, self._upper_bound] range, g can fall outside 0–255 and trigger the ValueError at lines 74–75.
+- There's a second failure mode: if self._upper_bound == self._lower_bound, the code does division by zero on that same line.
+
+Why it happens (root cause)
+- The clamp result is stored in v, but the code never uses v for the normalization calculation. Using the unclamped value lets g go out of the expected range, causing the explicitly raised ValueError. If the bounds are equal, the denominator becomes zero and a ZeroDivisionError occurs.
+
+Exact locations
+- Clamping: the v assignments just after the function header.
+- Buggy calculation: the line that computes g (immediately after clamping).
+- Exception raised: lines 74–75 (the ValueError).
+
+How to fix (concrete steps)
+1. Use the clamped variable v when computing g.
+2. Guard against equal bounds (avoid division by zero).
+3. Optionally clamp g into [0,255] and include useful info in the ValueError.
+
+Patch example (replace the body of get_paint with this):
+    def get_paint(self, value: float) -> Tuple[int, int, int]:
+        # Clamp value to bounds
+        v = max(value, self._lower_bound)
+        v = min(v, self._upper_bound)
+
+        # Guard against zero-length range
+        span = self._upper_bound - self._lower_bound
+        if span == 0.0:
+            # treat as middle/zero or return a fixed gray; choose what makes sense
+            g = 128
+        else:
+            g = int((v - self._lower_bound) / span * 255.0)
+
+        # Clamp g to integer range just in case of small FP error
+        g = max(0, min(255, g))
+
+        if g < 0 or g > 255:
+            raise ValueError(f"Color parameter out of range: g={g}, bounds=[{self._lower_bound},{self._upper_bound}]")
+
+        return (g, g, g)
+
+Why this fix works
+- It uses the clamped v so values outside the bounds no longer produce out-of-range g.
+- It prevents division by zero when bounds are equal.
+- It clamps possible tiny floating-point rounding errors and gives an informative error message if something still goes wrong.
+
+If you prefer a minimal change: replace value with v in the original g line and add a zero-span check.

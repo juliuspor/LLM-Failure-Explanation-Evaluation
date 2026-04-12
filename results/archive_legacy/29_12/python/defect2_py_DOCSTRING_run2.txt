@@ -1,0 +1,78 @@
+I can’t point to the exact line that fails because you didn’t include the function source. To diagnose precisely I need the function text. Meanwhile, here are the concrete, non‑vague reasons this docstring mismatch typically causes failures, exactly where to look in your code, and a concrete corrected implementation you can compare line‑by‑line.
+
+What usually goes wrong (root causes and where to check)
+1. Wrong return type (check the return statement)
+   - Problem: code returns floats (e.g. 0.5, 128.0) or a single scalar instead of an (r,g,b) tuple of integers 0–255.
+   - Where to look: the line with "return ..." in the function (e.g. return value or return (value,)). If return produces floats, downstream code expecting ints will fail or produce invalid colors.
+
+2. No clamping or rounding (check calculation lines)
+   - Problem: calculation produces values <0 or >255 (or non‑integers) and the function never clamps or converts to int. The docstring promises a ValueError for out‑of‑range, but the code either never raises it or raises it at the wrong place.
+   - Where to look: the lines that compute r, g, b and any conditional that should raise ValueError (e.g. if not (0 <= r <= 255): raise ValueError(...)).
+
+3. Docstring and behavior mismatch (check exception handling and callers)
+   - Problem: docstring states “Raises: ValueError” but implementation silently clamps or returns unexpected types. Or it raises a different exception (TypeError) earlier.
+   - Where to look: function header and the try/except wrappers around code that call this function.
+
+4. Off‑by‑one or integer division bug (check arithmetic lines)
+   - Problem: using integer division in a language that truncates, or using a scale factor wrong (e.g. using value*256 instead of *255), producing 256 or -1 results.
+   - Where to look: any line that multiplies value by 255 or divides by a max — e.g. r = int(value * 255) — and any normalization step.
+
+Concrete example: buggy implementation (with line numbers)
+1  def paint_for_value(value):
+2      """Returns a paint (RGB tuple) for the specified value."""
+3      # assume value is 0.0..1.0
+4      gray = value * 255.0        # produces float, might be out of range
+5      r = gray
+6      g = gray
+7      b = gray
+8      if r < 0 or r > 255:
+9          raise ValueError("RGB outside range")   # raises only if out of range
+10     return (r, g, b)      # returns floats, not ints
+
+Why this fails (line references above)
+- At line 4 the code computes gray as a float. That’s OK only if you convert later, but then:
+- At lines 5–7 r/g/b remain floats. If downstream code expects ints 0–255, those floats may cause errors or wrong colors.
+- At lines 8–9 the function raises ValueError only when out-of-range. It does not handle NaN or non-numeric input, and it does not convert floats to ints, so the return at line 10 violates the docstring (“A tuple (r, g, b) representing the grayscale color” — usually implies integer bytes).
+- If value can be exactly 1.0, r will be 255.0 (OK) but if value is 1.0+eps the code raises. If callers expect values clamped rather than an exception, behavior differs from docstring.
+
+Concrete corrected implementation (with line numbers)
+1  def paint_for_value(value):
+2      """Returns an (r, g, b) grayscale tuple for value in 0.0..1.0 (integers 0–255)."""
+3      # Validate numeric input
+4      if not isinstance(value, (int, float)):
+5          raise TypeError("value must be int or float")
+6      # Convert and clamp to 0.0..1.0
+7      v = float(value)
+8      if v != v:                       # catches NaN
+9          raise ValueError("value is NaN")
+10     # Option A: raise on out-of-range per original docstring
+11     if v < 0.0 or v > 1.0:
+12         raise ValueError("value must be between 0.0 and 1.0")
+13     # Convert to integer 0..255
+14     gray = int(round(v * 255.0))
+15     # Ensure exact bounds after rounding
+16     gray = max(0, min(255, gray))
+17     return (gray, gray, gray)
+
+Why this fixes it (line references)
+- Lines 4–5 ensure you fail fast on non‑numeric input.
+- Lines 11–12 implement the docstring promise to raise ValueError for out‑of‑range values.
+- Line 14 converts the float to an integer (no more floats returned).
+- Line 16 guards against any rounding edge cases producing 256 or -1.
+- Line 17 returns the exact (r, g, b) tuple of integers that callers expect.
+
+Steps for you to take now (actionable checklist)
+1. Paste the actual function source for an exact line‑by‑line diagnosis.
+2. Search your function for:
+   - The return statement line (confirm it returns three ints).
+   - Any arithmetic lines that produce r/g/b (confirm clamping and int conversion).
+   - Any lines that raise ValueError (confirm they trigger on the conditions documented).
+3. If the function currently returns floats or does not clamp, change it to the corrected pattern above (convert to int, clamp or raise as your API requires).
+4. Add and run unit tests:
+   - paint_for_value(0.0) => (0,0,0)
+   - paint_for_value(1.0) => (255,255,255)
+   - paint_for_value(-0.1) => raises ValueError (or returns (0,0,0) if you prefer clamping—choose one and update docs)
+   - paint_for_value(1.0001) => same as above
+   - paint_for_value("a") => raises TypeError
+
+If you paste the exact function (include line numbers if possible), I will point to the exact failing line(s) and give a minimal patch you can apply.

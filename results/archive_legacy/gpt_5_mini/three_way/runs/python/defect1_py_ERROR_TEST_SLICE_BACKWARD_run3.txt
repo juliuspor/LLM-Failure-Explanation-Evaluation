@@ -1,0 +1,45 @@
+What happened (where it failed)
+- The test called DateTimeZone.for_offset_hours_minutes(0, -15).
+- Inside for_offset_hours_minutes the variable minutes_offset is checked at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15, the condition minutes_offset < 0 is true and the code raises ValueError("Minutes out of range: -15").
+- So the immediate root cause is that negative minute values (e.g. -15) are being rejected by that range check.
+
+Why that is wrong
+- The test suite (and Joda-Time behavior referenced by the tests) expects minutes to be allowed in the range -59..+59, not only 0..59.
+- The current check only allows 0..59. It therefore incorrectly treats valid negative minute inputs as out-of-range.
+- This is a validation bug in for_offset_hours_minutes: it uses the wrong lower bound for minutes.
+
+Concrete fixes (exact steps and lines to change)
+1) Allow negative minutes in the range -59..59:
+   - Replace the current check at lines 396–397:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2) Handle mixed sign rules consistently (based on the tests):
+   - After range checks, enforce these rules:
+     - If hours_offset > 0 and minutes_offset < 0: raise ValueError (e.g. (2, -15) is invalid).
+     - If hours_offset < 0 and minutes_offset > 0: treat minutes as negative (so (-2, 15) → -2h -15m).
+     - If hours_offset == 0: allow minutes sign to define the offset (e.g. (0, -15) → -00:15).
+   - Concretely, add this logic (pseudocode you can paste into the method after range validation):
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Hours and minutes must have the same sign")
+     if hours_offset < 0 and minutes_offset > 0:
+         minutes_offset = -minutes_offset
+
+3) Compute the final offset using the normalized minutes_offset:
+   - total_millis = hours_offset * 3600000 + minutes_offset * 60000
+   - (Keep existing formatting of zone ID to reflect the sign and two-digit minute field.)
+
+Why these fixes satisfy the tests
+- Changing the lower bound to -59 lets inputs like -15 pass the range check (fixes the immediate failure).
+- Normalizing minute sign when hours is negative ensures (-2, 15) and (-2, -15) both produce -02:15 (matches the tests and the docstring behavior).
+- Rejecting (2, -15) enforces the test's invalid-mixed-sign requirement.
+
+Summary
+- Bug: minutes_offset < 0 is treated as invalid (line 396). This caused ValueError("Minutes out of range: -15").
+- Fix: allow minutes in -59..59 (change the range check) and add the sign-normalization/mixed-sign checks described above so the method behaves as the tests expect.

@@ -1,0 +1,38 @@
+What happened
+- The code assumes the list code_units contains UTF‑16 code units (16‑bit halves, including surrogate halves for characters above U+FFFF).
+- But to_utf16_code_units(s) builds code_units by taking ord(c) for each Python character c. For '\U0001F630' ord(c) == 0x1F630 (a single integer > 0xFFFF), not two UTF‑16 halves.
+- At line 38 the code does high = code_units[index]. For U+1F630 that gives high == 0x1F630, so the surrogate test at line 39 (0xD800 <= high <= 0xDBFF) fails and the function returns 0x1F630 (line 44). Downstream code expects to see surrogate pairs and treats indices/lengths as UTF‑16 code units, so the logic misindexes or otherwise mistranslates the character. That mismatch causes translate_string('\U0001F630') to be handled incorrectly and the assertion to fail.
+
+Where it occurs (specific variables/lines)
+- to_utf16_code_units(s) returns code_units (line 12).
+- The problematic assumption is used starting at line 35 where index is compared to len(code_units), and at line 38 high = code_units[index] is treated as a 16‑bit value.
+- Lines 39–44 try to detect a high surrogate and combine it with a following low surrogate, but because code_units contains full code points (e.g. 0x1F630) there are no surrogate halves and the logic never runs as intended.
+
+Why this is wrong (plain language)
+- Python str is a sequence of Unicode code points; ord(c) gives the full code point value. UTF‑16 represents some code points (U+10000 and above) as two 16‑bit surrogate code units. You cannot treat ord(c) values > 0xFFFF as if they were UTF‑16 half‑words — the code must explicitly emit surrogate halves when it needs a UTF‑16 view.
+
+How to fix it (concrete steps)
+1. Change to_utf16_code_units so it produces actual UTF‑16 code units:
+   - For each code point cp = ord(c):
+     - If cp <= 0xFFFF: append cp.
+     - Else (cp > 0xFFFF): compute the surrogate pair:
+       - high = 0xD800 + ((cp - 0x10000) >> 10)
+       - low  = 0xDC00 + ((cp - 0x10000) & 0x3FF)
+       - append high, then low.
+2. Ensure all code that indexes or measures len(code_units) treats that list as UTF‑16 code units (one entry per 16‑bit unit), not one entry per Python code point.
+
+Example replacement for to_utf16_code_units (pseudo/Python)
+- def to_utf16_code_units(s: str) -> List[int]:
+    code_units = []
+    for ch in s:
+        cp = ord(ch)
+        if cp <= 0xFFFF:
+            code_units.append(cp)
+        else:
+            cp -= 0x10000
+            code_units.append(0xD800 + (cp >> 10))
+            code_units.append(0xDC00 + (cp & 0x3FF))
+    return code_units
+
+Result
+- With that change, a character like '\U0001F630' becomes two UTF‑16 code units (a high surrogate and a low surrogate). The surrogate detection at lines 39–44 then works as intended, the indexing/combining is correct, and translate_string('\U0001F630') will no longer fail the assertion.

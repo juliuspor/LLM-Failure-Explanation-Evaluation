@@ -1,0 +1,45 @@
+What happened (where it fails)
+- The code at lines 396–397 unconditionally rejects any negative minute value:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397:     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check causes a ValueError whenever minutes_offset is negative, even in cases the docstring says should be allowed (for example (hours_offset=-2, minutes_offset=-15) or (0, -15)).
+- In short: the code enforces minutes_offset ∈ [0,59], but the doc and intended behavior allow minutes_offset ∈ [-59,59] with some sign rules.
+
+Why it fails (root cause)
+- The minutes-range validation is wrong: it treats negative minutes as always invalid. The doc explicitly allows negative minutes for zero or negative hours, so rejecting negative minutes unconditionally is the direct cause of the failure.
+- The bug lives at the validation step using variable minutes_offset (lines 396–397). Because that check runs before any sign-consistency checks, legitimate combinations get rejected early.
+
+What must be checked instead (precise, step-by-step)
+1. Validate hours_offset is in [-23, +23].
+2. Validate minutes_offset is in [-59, +59] (allow negative minutes).
+3. Enforce sign consistency: if hours_offset > 0 then minutes_offset must be >= 0 (i.e., (+hours, -minutes) is invalid). The doc allows (+2,0) and (+2,15) but forbids (2,-15).
+   - The doc allows (0,-15) and (-2,-15) and (-2, +15). So negative minutes are allowed when hours_offset is zero or negative.
+4. Validate the combined absolute offset does not exceed 23:59:59.000 (e.g., abs(hours_offset)*60 + abs(minutes_offset) <= 23*60+59).
+
+Suggested concrete replacement for lines 396–397
+- Replace the current check with logic that follows steps 2–4. Example Python snippet to use in place:
+
+  # allow minutes in -59..+59
+  if minutes_offset < -59 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+  # disallow a positive hours with negative minutes (e.g., (2, -15))
+  if hours_offset > 0 and minutes_offset < 0:
+      raise ValueError(f"Positive hours with negative minutes not allowed: ({hours_offset}, {minutes_offset})")
+
+  # validate total absolute offset does not exceed 23:59
+  total_minutes = abs(hours_offset) * 60 + abs(minutes_offset)
+  if total_minutes > 23 * 60 + 59:
+      raise ValueError(f"Resulting offset exceeds +/-23:59: ({hours_offset}, {minutes_offset})")
+
+Examples showing the current bug and the fix
+- Current code (fails):
+  - hours_offset = -2, minutes_offset = -15 -> raises "Minutes out of range: -15" at lines 396–397.
+- With the replacement checks (works, as doc requires):
+  - (-2, -15) -> accepted and interpreted as -02:15
+  - (0, -15) -> accepted and interpreted as -00:15
+  - (2, -15) -> rejected by the sign-consistency check, as intended by the doc
+
+Summary
+- Root cause: unconditional rejection of negative minutes at lines 396–397.
+- Fix: allow minutes_offset in [-59,59], then enforce sign-consistency and combined-range checks as shown above. This matches the docstring and prevents rejecting valid inputs like (-2, -15) or (0, -15).

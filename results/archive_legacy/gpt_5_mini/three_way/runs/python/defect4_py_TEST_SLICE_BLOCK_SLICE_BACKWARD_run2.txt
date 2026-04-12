@@ -1,0 +1,48 @@
+What happened (root cause)
+- The bug is in TimePeriodValues._update_bounds when updating the "max middle" tracking.
+- The method computes the current period's middle value into a local variable middle and has an index parameter named index.
+- When it tries to compare middle against the previously recorded maximum middle it fetches the stored period using the wrong index variable. Instead of using the stored index self._max_middle_index it uses the local index (or another wrong variable), so the code ends up comparing the new middle against the period you just added (or some other item), not the previously recorded max.
+- As a result self._max_middle_index gets set incorrectly (often to the last inserted index) and get_max_middle_index() returns the wrong value (your test expected 1 but got 3).
+
+Where it occurs
+- Method: TimePeriodValues._update_bounds
+- Variables involved: index (the index of the period being added), middle (the computed middle time for that period), self._max_middle_index (the stored index of the current maximum middle).
+- Symptom in your tests: test_max_middle_index_simple — the max middle should be at index 1 (middle=150) but you get 3 because the comparison used the wrong index and therefore accepted a smaller or wrong candidate.
+
+Why this causes the observed wrong index
+- Correct logic should:
+  1. If there is already a max (self._max_middle_index >= 0), retrieve the period at self._max_middle_index and compute its middle into min_middle (or max_middle).
+  2. Compare the new middle to that stored middle.
+  3. If the new middle is larger, update self._max_middle_index = index.
+- The buggy code uses index (or another incorrect variable) when retrieving the previously recorded period. That means the comparison compares the new middle to itself (or to the wrong period), so the condition to update is wrong and the stored index is overwritten incorrectly.
+
+Exactly what to change (concrete steps)
+1. Open TimePeriodValues._update_bounds.
+2. Find the block that updates the maximum middle. It will look roughly like:
+   - if self._max_middle_index >= 0:
+       max_middle_period = self.get_data_item(index).get_period()    # WRONG
+       ... compute max_middle ...
+       if middle > max_middle:
+           self._max_middle_index = index
+   - else:
+       self._max_middle_index = index
+3. Replace the wrong retrieval with the stored index:
+   - max_middle_period = self.get_data_item(self._max_middle_index).get_period()    # CORRECT
+4. Ensure similar fixes for any other min/max calculations that may be using the wrong index variable (min_middle, min_start, max_start, min_end, max_end).
+5. Run your test suite (the provided tests). The failing test should then pass.
+
+Patch example (illustrative snippet)
+- Change this (buggy):
+    if self._max_middle_index >= 0:
+        max_middle_period = self.get_data_item(index).get_period()
+        ...
+- To this (correct):
+    if self._max_middle_index >= 0:
+        max_middle_period = self.get_data_item(self._max_middle_index).get_period()
+        ...
+
+Why this fix works
+- It ensures you compare the new period's middle to the previously recorded maximum middle (the period at self._max_middle_index). That produces the correct comparison and only updates self._max_middle_index when the new middle actually exceeds the stored maximum.
+
+Notes
+- The same class already contains similar logic for min_start_index, max_start_index, min_end_index, max_end_index (see slice around lines ~331–349). Verify each comparison uses the correct stored index variable (e.g., self._min_start_index) when retrieving the existing candidate period; the bug is a pattern of using the wrong index variable in at least the max_middle branch.

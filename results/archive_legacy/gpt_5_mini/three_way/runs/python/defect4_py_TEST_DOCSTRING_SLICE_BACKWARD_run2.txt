@@ -1,0 +1,49 @@
+What happened (root cause)
+- In TimePeriodValues._update_bounds the code that updates the “extreme” indices has a logic bug: after doing a conditional compare it then unconditionally assigns the index, so the conditional has no effect. That means the “max middle” (and similar bounds) index gets overwritten by a later unconditional assignment and ends up pointing to the last-added item instead of the true extreme.
+- You can see this exact pattern in the min-start example in the slice you supplied:
+  - At line 346 the code correctly does a comparison:
+    if start < min_start:
+        self._min_start_index = index
+  - But then at line 349 it immediately does:
+        self._min_start_index = index
+    which unconditionally sets _min_start_index to the current index regardless of the comparison result.
+- The test failure you saw (expected max_middle_index == 1 but got 3) is the same symptom: whatever logic computed the correct extreme index is later overwritten by an unconditional assignment, so the reported index becomes the last index processed (3 in the test), not the correct one (1).
+
+Why this causes the specific failure
+- The test data has the maximum middle at index 1. When the code evaluates bounds it might temporarily find that index, but then when processing later entries it executes the stray unconditional assignment and resets the stored index to the current entry (index 3). The returned get_max_middle_index() therefore yields 3 instead of 1.
+
+Where to look (exact names/lines)
+- Method: TimePeriodValues._update_bounds
+- Variable names to inspect:
+  - self._min_start_index (example shown in slice)
+  - self._max_middle_index (the one that fails in your tests)
+  - any stored extreme value variables used for comparisons (e.g., max_middle, min_middle, max_start, min_start — ensure comparisons are against the value, not an index)
+- Lines in the slice showing the same bug pattern:
+  - 346: if start < min_start: self._min_start_index = index
+  - 349: self._min_start_index = index
+  These two lines demonstrate the unconditional overwrite bug you must search for in the other bound-update blocks (max_middle block in particular).
+
+Clear fix / steps to fix
+1. Open hit04_timeperiod.py and find the _update_bounds method.
+2. Locate the block that updates the “max middle” bound (look for variables named max_middle, _max_middle_index or similar). You will see a conditional that compares the current period’s middle to the stored max middle.
+3. Remove the stray unconditional assignment that follows the conditional. There should be no unconditional assignment of the index immediately after the if block. The index should only be set when the comparison indicates the current value is a new extreme.
+   - Example incorrect pattern:
+       if middle > max_middle:
+           self._max_middle_index = index
+       self._max_middle_index = index   # REMOVE this line
+   - Example correct pattern:
+       if middle > max_middle:
+           self._max_middle_index = index
+4. Repeat for all bound-update blocks (min_start, max_start, min_end, max_end, min_middle, etc.) — ensure none of them have an unconditional assignment that overwrites the result.
+5. Run the test suite again. The tests in your snippet (test_max_middle_index_simple and others) should now pass.
+
+Extra note about comparisons
+- Also make sure the comparisons compare values to values. Don’t accidentally compare a value (like middle time) to an index (like self._max_middle_index). The comparison must be:
+    if middle > self._max_middle_value:
+        self._max_middle_value = middle
+        self._max_middle_index = index
+  If you accidentally wrote:
+    if middle > self._max_middle_index:
+  you’d be comparing a timestamp to an index, which is also a bug. Check that the code maintains separate variables for the extreme value and the extreme index, and that comparisons use the stored extreme value.
+
+That is the direct cause of your failing test: an unconditional index assignment in _update_bounds overwrites the correctly-detected extreme index. Removing the stray assignment (or correcting the wrong variable used in the comparison) fixes it.

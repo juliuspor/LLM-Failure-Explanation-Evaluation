@@ -1,0 +1,61 @@
+What happened (root cause)
+- The bug is in for_offset_hours_minutes, in the block that combines hours and minutes into total minutes:
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, ...)
+- That logic is wrong when hours_offset is negative and minutes_offset is negative (or positive). It subtracts minutes_offset from hours_in_minutes instead of applying the minutes in the correct direction.
+
+Concrete failing example
+- Call: for_offset_hours_minutes(-2, -15)
+  hours_in_minutes = -2 * 60 = -120
+  The code computes minutes_offset = hours_in_minutes - minutes_offset = -120 - (-15) = -105
+  That yields -105 minutes (which is -01:45) but the intended result is -135 minutes (which is -02:15).
+- So the code produces the wrong total offset when hours_offset < 0.
+
+Why this error occurs (plain language)
+- When hours are negative, the minutes should make the total more negative. The code instead subtracts minutes_offset (which, if negative, gets negated by the minus) and therefore can move the total toward zero rather than away from zero.
+- The bug comes from reusing minutes_offset for both the input minutes and the running total and using the wrong sign operation when hours_in_minutes < 0.
+
+Where it occurs
+- In method for_offset_hours_minutes, in the block immediately after computing hours_in_minutes:
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+What to change (step-by-step fix)
+1. Do not reuse minutes_offset for the combined minutes. Introduce a new variable total_minutes for clarity.
+2. Handle three cases explicitly:
+   - hours_offset > 0:
+       - reject minutes_offset < 0 (per doc — "ValueError" for positive hours with negative minutes)
+       - total_minutes = hours_in_minutes + minutes_offset
+   - hours_offset < 0:
+       - total_minutes = hours_in_minutes - abs(minutes_offset)  (so minutes always increase the magnitude of the negative hour)
+   - hours_offset == 0:
+       - total_minutes = minutes_offset
+3. Then multiply total_minutes by MILLIS_PER_MINUTE and continue as before.
+
+Suggested corrected logic (pseudo-code)
+    hours_in_minutes = hours_offset * 60
+    if hours_offset > 0:
+        if minutes_offset < 0:
+            raise ValueError("Minutes must be non-negative when hours are positive")
+        total_minutes = hours_in_minutes + minutes_offset
+    elif hours_offset < 0:
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+    else:
+        total_minutes = minutes_offset
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- For (-2, -15): hours_in_minutes = -120, total_minutes = -120 - 15 = -135 (correct).
+- For (-2, +15): total_minutes = -120 - 15 = -135 (matches spec: negative hour means minute is applied to the negative side).
+- For (2, 15): total_minutes = 120 + 15 = 135 (correct).
+- For (2, -15): rejected (per doc).
+- For (0, -15): total_minutes = -15 (correct).
+
+Additional note
+- Keep the existing range checks and the ArithmeticError handling. Rename variables (minutes_offset -> input_minutes, total_minutes) to avoid confusion and accidental reuse.

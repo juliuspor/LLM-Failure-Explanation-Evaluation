@@ -1,0 +1,50 @@
+What happened
+- The call was: ArrayUtils.add(None, None, expected_type=str).
+- In ArrayUtils.add, both parameters array and element are None, but expected_type is str.
+- The method created a new plain Object[] with one slot and then cast that Object[] to a String[] (or to List[str]-typed array). That cast triggers the runtime error:
+  ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.String;
+  (reported as TypeError: Cannot cast object list to str list).
+
+Why that fails (root cause)
+- In Java (and in code that mimics Java array typing), an Object[] is not a String[]; you cannot cast an Object[] instance to String[] even if every element currently is null. The runtime type of the allocated array matters.
+- The code allocates an array with runtime component type Object (e.g. via "new Object[1]") and then does a cast to the expected_type array (e.g. (String[])). That cast is illegal and throws ClassCastException.
+- This situation happens specifically when element is None (so we cannot derive the component type from element.getClass()) but expected_type is supplied. The code still uses Object[] instead of allocating an array whose runtime component type is expected_type.
+
+Where it occurs in the code
+- In ArrayUtils.add, at the line that creates the new array for the result. Look for code like:
+    (T[]) new Object[size]
+  or any place that allocates Object[] and then casts to the expected_type array. That is the exact line that causes the exception.
+
+How to fix it (concrete steps)
+1. Decide componentType when array is None:
+   - If element != null: componentType = element.getClass().
+   - Else if expected_type != null: componentType = expected_type.
+   - Else: componentType = Object.class.
+
+2. Allocate the result array with that componentType so the runtime array type matches the expected_type:
+   - Replace allocations of new Object[size] and casts like (T[]) new Object[size]
+     with:
+       (T[]) Array.newInstance(componentType, size)
+     (Java API: java.lang.reflect.Array.newInstance(componentType, size))
+
+3. Keep the element insertion the same (result[existingLength] = element). If element is null and componentType is expected_type (e.g. String.class), this creates a String[] whose only element is null — exactly what the test expects.
+
+4. Add/adjust tests:
+   - The failing test: result = ArrayUtils.add(None, None, expected_type=str) should now create a String[] with single null; in Python-style test that compares lists, ensure your API maps String[] to [None].
+   - Also add tests for:
+     - add(None, someString, expected_type=str)
+     - add(None, None, expected_type=None) -> should produce Object[] / list[object].
+
+Example change (Java pseudocode)
+- Old (problematic):
+    T[] result = (T[]) new Object[existingLength + 1];
+- New (correct):
+    Class<?> componentType = ... (element!=null ? element.getClass() : expected_type != null ? expected_type : Object.class);
+    T[] result = (T[]) Array.newInstance(componentType, existingLength + 1);
+
+Why this fix works
+- Array.newInstance creates an array whose runtime component type is componentType, so casting to T[] (where T is componentType) is legal. If componentType is String.class, you get a String[] at runtime, and no ClassCastException occurs even when the single slot is null.
+
+Summary
+- Root cause: allocating an Object[] and then casting it to String[] (or another expected_type array) is illegal at runtime.
+- Fix: decide the component type when array and element are null, and allocate the result array with Array.newInstance(componentType, size) instead of new Object[size].

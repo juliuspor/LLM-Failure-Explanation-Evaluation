@@ -1,0 +1,57 @@
+What happened (what failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) throws a ValueError at run time.
+- The exception is raised by the range check at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15, the check treats it as out of range and raises, so the code never reaches the later logic that would produce the expected "-02:15" id.
+
+Why it fails (root cause)
+- The docstring permits negative minutes when the hours are zero or negative (examples: (0, -15) -> -00:15, (-2, -15) -> -02:15).
+- The code at lines 396–397 unconditionally forbids negative minutes (it enforces minutes ∈ [0,59]) which contradicts the docstring and intended behavior.
+- The subsequent block at lines 402–405 contains logic to adjust/compose the minutes with the hours sign, but that code is never reached because the early check already rejected negative minutes.
+
+Where it occurs (exact places)
+- Failure point: lines 396–397 (minutes range check).
+- Correcting logic needed around lines 400–405 where sign combination is handled (the later adjustment code is correct in intent but unreachable).
+
+How to fix it (concrete steps)
+1. Broaden the minutes range check to allow negative minutes values within [-59, 59]:
+   - Change the check to:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Explicitly reject only the invalid sign combination that the doc disallows (positive hours with negative minutes):
+   - After validating ranges, add:
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Minutes cannot be negative when hours are positive")
+3. Compute the total offset minutes taking into account the rules in the doc:
+   - If hours_offset < 0: treat the minutes magnitude as adding to the negative hours:
+       total_minutes = hours_offset * 60 - abs(minutes_offset)
+   - If hours_offset > 0: minutes_offset is non-negative here (by step 2):
+       total_minutes = hours_offset * 60 + minutes_offset
+   - If hours_offset == 0: minutes_offset sign determines sign:
+       total_minutes = minutes_offset
+4. Convert total_minutes to milliseconds and continue with existing logic (this is what lines 402–405 and following already do once they are reached).
+
+Minimal example patch (pseudo-code matching current variables/lines)
+- Replace lines 396–397 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- After that, insert:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes cannot be negative when hours are positive")
+    # now compute offset minutes using the doc rules
+    if hours_offset < 0:
+        minutes_offset = abs(minutes_offset)
+        total_minutes = hours_offset * 60 - minutes_offset
+    elif hours_offset == 0:
+        total_minutes = minutes_offset
+    else:
+        total_minutes = hours_offset * 60 + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    ...
+
+Why this fix is correct
+- It matches the docstring examples (allows negative minutes for zero or negative hours, rejects negative minutes when hours are positive).
+- It lets the later sign-adjustment logic run instead of being preemptively rejected by the too-strict range check.
+
+If you want, I can produce an exact diff against the surrounding source lines.

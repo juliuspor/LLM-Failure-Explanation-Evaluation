@@ -1,0 +1,42 @@
+What happened (root cause)
+- At line 335 you call type(array). That returns the Python type of the list object itself (e.g. <class 'list'>), not the type of the elements inside the list.
+- ArrayUtils._copy_list_grow1 and the later logic expect a component/element type (like int, str, or some class), not the container type. Because inferred_type is the list class rather than an element class, the copy/allocation and the subsequent cast check are using the wrong type information.
+- Consequence: you end up creating a list/array with the wrong component type and the code either fails when assigning the element or the wrong TypeError/“ClassCastException” logic is triggered. In other words the wrong value is put into inferred_type early (line 335) and that error propagates into _copy_list_grow1 and the check at line 346.
+
+Where it occurs (lines)
+- Line 335: inferred_type = type(array) — wrong choice; this is the list’s class, not element class.
+- Line 337–338: if element is present you use type(element) which is the correct idea.
+- Line 340: falling back to object is OK as a default, but the earlier mistake at 335 means inferred_type will rarely be the real element type.
+- Line 346: the check if inferred_type == object and expected_type != object will not behave correctly because inferred_type was set to the list class, not object or the element class, so the error condition is wrong or never hit as intended.
+
+Why this is the direct cause of the failure
+- The routine that creates a new expanded list/array (_copy_list_grow1) needs to know the element type in order to allocate or copy properly. Giving it <class 'list'> instead of the element class leads to an incompatible array layout or an invalid cast error downstream (the ClassCastException-like message in your TypeError).
+- The code intended to detect the “object list” case by testing inferred_type == object, but because inferred_type is the list class the test is meaningless and the function’s type-safety checks are bypassed or misapplied.
+
+Concrete fixes (step-by-step)
+1. When array is not None and contains elements, infer the element type from the first element, not from the list object:
+   - Replace inferred_type = type(array) (line 335) with something like:
+     - if array: inferred_type = type(array[0])
+     - else: inferred_type = None (to fall back to element or expected_type)
+2. Prefer element type when available:
+   - If element is not None use inferred_type = type(element) (you already do this at line 337–338; keep it).
+3. If both array is empty and element is None, fall back to expected_type or object:
+   - e.g. inferred_type = expected_type if expected_type is not None else object
+4. Adjust the compare to use identity or explicit class equality:
+   - Use "is" or "== type" as appropriate (e.g. inferred_type is object).
+5. Make sure _copy_list_grow1 receives the element type, not the list type.
+
+Minimal corrected logic sketch
+- if array is not None and len(array) > 0:
+    inferred_type = type(array[0])
+  elif element is not None:
+    inferred_type = type(element)
+  elif expected_type is not None:
+    inferred_type = expected_type
+  else:
+    inferred_type = object
+
+Why this will fix it
+- The copy/creation routine will be given the actual element class (or a reasonable fallback), so the new list’s element type matches the element you put into it and the casting/TypeError logic at line 346 behaves as intended.
+
+If you want, I can produce a small corrected code snippet replacing the problematic lines.

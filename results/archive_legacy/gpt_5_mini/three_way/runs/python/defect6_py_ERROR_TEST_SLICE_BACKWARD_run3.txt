@@ -1,0 +1,53 @@
+What happened (short)
+- The test expects add_number(-0.0) to output "-0.0" but the method produced "0".
+- Root cause: add_number treats -0.0 as an integer because of the condition on line 176 (the slice you gave):
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  For x == -0.0 this is True (because -0.0 == 0), so the code formats x as an integer (e.g. str(int(x)) or similar). That drops the negative sign and yields "0".
+
+Why that happens (detailed)
+- In IEEE 754 floats, -0.0 compares equal to 0.0: (-0.0 == 0.0) is True.
+- The add_number code uses x == int(x) to detect whole numbers and then prints them without fractional part. That logic does not preserve the sign for -0.0.
+- There is a utility is_negative_zero defined on CodeConsumer (your tests call CodeConsumer.is_negative_zero). But add_number is not checking is_negative_zero before the integer branch, so the negative-zero case is lost at the integer-detection line (line ~176).
+
+Where to look
+- The bug occurs inside CodeConsumer.add_number, at or before the condition on the provided slice (line 176).
+- The specific variables/methods involved: x (the float argument to add_number), the integer-detection condition (x == int(x) and not math.isinf(x) and not math.isnan(x)), and the logic that converts x to a string for output (likely using int(x) or a formatting path that removes the fractional/negative-zero sign).
+- CodeConsumer.is_negative_zero exists and is the intended utility for detecting negative zero, but it must be applied before you convert to an integer string.
+
+How to fix it (concrete steps)
+1. In add_number, detect negative zero before the integer branch. For example, at the top of add_number or just before the integer-detection if, add:
+
+   if CodeConsumer.is_negative_zero(x):
+       self.append("-0.0")
+       return
+
+   (Or equivalently use math.copysign or struct to detect sign bit:
+    if x == 0.0 and math.copysign(1.0, x) < 0: ...)
+
+2. Keep the existing integer-detection logic for other whole numbers, but only after you handled negative zero explicitly.
+
+3. Make sure you return or otherwise avoid running the integer-formatting branch after you handled negative zero.
+
+Example patch (pseudo-Python, place near top of add_number, before line 176):
+
+   # preserve negative zero sign
+   if CodeConsumer.is_negative_zero(x):
+       self.append("-0.0")
+       return
+
+   # existing whole-number branch
+   if x == int(x) and not math.isinf(x) and not math.isnan(x):
+       ...
+
+Why this fix works
+- It preserves the negative sign for -0.0 by short-circuiting before any code that relies on value-equality to 0 and would remove the sign.
+- It doesn't affect other cases (positive 0.0, other integers, floats, inf, nan) because is_negative_zero only returns True for -0.0.
+
+Notes and alternatives
+- Alternative low-level detection: use math.copysign(1.0, x) < 0 or use struct.unpack to check the sign bit; both detect negative zero reliably.
+- Do not simply check x < 0 because -0.0 is not less than 0. The correct checks are the ones shown above.
+- Ensure tests for positive zero, integers, floats, infinities, NaN still pass after the change.
+
+Summary
+- Root cause: integer branch (line 176) treats -0.0 as 0 and drops the sign.
+- Fix: detect negative zero first (use CodeConsumer.is_negative_zero or math.copysign) and emit "-0.0" before the integer-formatting path.

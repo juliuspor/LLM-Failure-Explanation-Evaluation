@@ -1,0 +1,54 @@
+What went wrong (plainly)
+
+- At line 402 the code does:
+  minutes_offset = hours_in_minutes - minutes_offset
+  and later at line 404 it does:
+  minutes_offset = hours_in_minutes + minutes_offset
+
+  That reuses the variable minutes_offset to hold a combined total, but because the first assignment already overwrote minutes_offset, the second assignment uses the wrong value and yields an incorrect total number of minutes.
+
+- As a result the computed minutes_offset becomes much larger (or has the wrong sign) than intended. That wrong value is passed to
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  which then triggers the "Offset is too large" ValueError (line 407) because the total minutes exceed the allowed +/- 23:59 range.
+
+Where exactly this occurs
+- The bug is in the block that combines hours_in_minutes and minutes_offset (lines 402 and 404 in your slice). The variable minutes_offset is used both for the input minutes and for storing the computed total minutes, so the second computation uses the already-overwritten value.
+
+Why that is wrong (concrete example)
+- Suppose hours_offset = 2 -> hours_in_minutes = 120, and minutes_offset (input) = 15.
+  If the code first executes minutes_offset = hours_in_minutes - minutes_offset it becomes 105.
+  Then the next line minutes_offset = hours_in_minutes + minutes_offset becomes 120 + 105 = 225.
+  The correct total should be 135 (2 hours 15 minutes). 225 is wrong and causes the later overflow/error.
+
+What to change (step-by-step fix)
+1. Stop reusing minutes_offset for the computed total. Introduce a new variable name, e.g. total_minutes.
+2. Compute total_minutes using the intended arithmetic and the sign rules. For example:
+   - If hours_in_minutes and input minutes have the same sign (both positive or both negative) then total_minutes = hours_in_minutes + input_minutes
+   - If hours_in_minutes is negative and input minutes is positive (case like -2 hours +15 minutes => -105 minutes) then total_minutes = hours_in_minutes + input_minutes (hours_in_minutes already negative)
+   - If hours_in_minutes is positive and input minutes is negative that combination should be rejected earlier (docstring says ValueError).
+   Concretely, using the sign of hours_offset and minutes_offset_input:
+
+   minutes_input = minutes_offset  # preserve original input
+   if hours_offset >= 0:
+       if minutes_input < 0:
+           raise ValueError("minutes are negative when hours are positive")
+       total_minutes = hours_in_minutes + minutes_input
+   else:  # hours_offset < 0
+       # minutes_input may be positive or negative; if negative, treat as more negative
+       total_minutes = hours_in_minutes - abs(minutes_input) if minutes_input < 0 else hours_in_minutes + minutes_input
+
+   (A simpler and safer approach is to normalize both to signed minutes first:
+     total_minutes = hours_in_minutes + (1 if hours_offset < 0 else 1) * minutes_input
+     but be explicit about sign rules to match the docstring.)
+
+3. Use total_minutes for the millisecond conversion:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Keep the existing range check that raises ValueError if absolute offset exceeds allowed maximum.
+
+Why this fixes the failure
+- By not overwriting the input minutes and by calculating the total in a single, correct expression, total_minutes will be what you expect (e.g. 135 for +02:15) and will not overflow or produce the "Offset is too large" ValueError incorrectly.
+
+Summary (short)
+- Root cause: minutes_offset is overwritten and then used in a later expression, producing the wrong total (see lines 402 and 404).
+- Effect: wrong minute total causes the final offset multiplication to produce a value outside allowed range and raise ValueError.
+- Fix: compute the combined minutes into a new variable (total_minutes) with correct sign logic, then use that for the millisecond conversion.

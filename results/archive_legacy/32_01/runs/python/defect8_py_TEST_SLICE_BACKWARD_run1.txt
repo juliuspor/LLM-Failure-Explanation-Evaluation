@@ -1,0 +1,43 @@
+What happened (where it fails)
+- The failure happens inside LocaleUtils.to_locale, starting at line 236 in your slice.
+- At line 236 the code tests if length == 2, and then immediately at lines 242–243 reads locale_str[3] and locale_str[4].
+- If length is not 2 (for example the test string "fr__POSIX" has length 9) that conditional is wrong for the code that follows; the code is attempting to validate characters at indices 3 and 4 but the guard uses the wrong length check. That logic is therefore applied at the wrong time and causes either an IndexError or incorrect validation behavior.
+
+Why it happened (root cause)
+- The check at line 236 uses the wrong length condition. The code that accesses ch3 = locale_str[3] and ch4 = locale_str[4] is intended to validate a two-letter country code at positions 3–4 of a string like "fr_FR" (length 5), but the condition reads length == 2 (which is meaningless here).
+- Because of that wrong condition the code can run in cases it shouldn’t, or skip running when it should, and it reads indices that do not match the checked length. In short: incorrect length check -> wrong index accesses -> failure.
+
+Exactly where to change (concrete steps)
+1. Open to_locale and go to line 236 (the line with "if length == 2:").
+2. Replace the incorrect condition with a correct guard that matches the intended format. Two correct options depending on intent:
+
+- If the block is validating a two-letter country code (language + '_' + country), use:
+  - if length >= 5 and locale_str[2] == '_':
+      then read locale_str[3] and locale_str[4] and validate A–Z.
+
+- If the block was meant to validate only the case length == 5, use:
+  - if length == 5 and locale_str[2] == '_':
+      then read and validate ch3/ch4.
+
+3. Also add explicit checks for the separating underscore(s) before indexing to avoid out-of-range access and to distinguish the country vs variant forms (e.g., "fr__POSIX" has two underscores and an empty country).
+
+Minimal example patch (replace lines 236–245):
+- Old:
+  if length == 2:
+      ch3 = locale_str[3]
+      ch4 = locale_str[4]
+      if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+          raise ValueError(f"Invalid locale format: {locale_str}")
+- Suggested (country-code validation):
+  if length >= 5 and locale_str[2] == '_':
+      ch3 = locale_str[3]
+      ch4 = locale_str[4]
+      if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+          raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why this fixes your failing test
+- For "fr__POSIX" length >= 5 is true, but locale_str[2] == '_' and locale_str[3] == '_' so the country-code branch will not attempt to validate non-existent country letters (because ch3/ch4 access will still be safe but you'll see second underscore and handle variant logic elsewhere). With the explicit separator check you can then add the correct branch to parse an empty country and a variant "POSIX", producing Locale('fr', '', 'POSIX').
+
+If you’d like, I can:
+- Propose the full corrected to_locale function (handling language-only, language-country, language__variant, language_country_variant forms), or
+- Produce unit tests that cover "fr", "fr_FR", "fr__POSIX", and "fr_FR_POSIX".

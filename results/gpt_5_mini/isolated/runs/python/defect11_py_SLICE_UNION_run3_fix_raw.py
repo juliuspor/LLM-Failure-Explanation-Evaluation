@@ -1,0 +1,29 @@
+@staticmethod
+def random(count: int, start: int, end: int, letters: bool, numbers: bool) -> str:
+    if count == 0:
+        return ""
+    if count < 0:
+        raise ValueError(f"Requested random string length {count} is less than 0.")
+
+    # Derive defaults in the same way _random_internal would.
+    if start == 0 and end == 0:
+        if letters or numbers:
+            end = ord('z') + 1
+            start = ord(' ')
+        else:
+            end = 127
+            start = 0
+
+    if end <= start:
+        raise ValueError(f"Invalid start ({start}) and end ({end}) range")
+
+    # Now delegate to the internal implementation which assumes a positive gap.
+    return RandomStringUtils._random_internal(
+        count=count,
+        start=start,
+        end=end,
+        letters=letters,
+        numbers=numbers,
+        chars=None,
+        rnd=_RANDOM,
+    )

@@ -1,0 +1,44 @@
+What happened (root cause)
+- In translate(), after a translator handles a codepoint it returns consumed. The code then runs this block:
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+  That loop advances pos by char_count(code_point_at(...)) once for each iteration of the loop. If consumed == 2 (a surrogate pair), the code will call code_point_at(code_units, pos) twice, each time returning a code point whose char_count is 2, and so pos is advanced by 4. That overshoots the length of code_units and later calls to code_point_at raise IndexError:
+
+      if index < 0 or index >= len(code_units):
+          raise IndexError(f"String index out of range: {index}")   # (slice block lines 35-36)
+
+- In short: consumed is being mixed up with char counts. The loop treats consumed as a count of code points to query, but code_point_at(...) returns a code point made of 1 or 2 UTF-16 code units; char_count(...) returns 1 or 2. Repeating that addition consumed times causes pos to advance too far (2 * 2 = 4 when consumed == 2), producing an out-of-range index.
+
+Where this happens (specific names / lines)
+- translate(): after consumed = self.translate_codepoint(...), the code enters the for pt in range(consumed): ... loop and calls code_point_at(code_units, pos). That is where pos advances incorrectly.
+- code_point_at(...) performs a bounds check (slice block lines 35–36) and raises IndexError when pos is beyond len(code_units).
+
+How to fix it (concrete steps)
+Pick one of these two precise fixes depending on the intended meaning of consumed:
+
+1) If consumed is the number of UTF-16 code units consumed (typical when translators work on code units):
+   - Replace the loop with a single increment by consumed:
+         pos += consumed
+   - Rationale: consumed already counts code units, so adding consumed moves pos exactly past them.
+
+2) If consumed is the number of code points consumed (less likely here):
+   - Compute the codepoint(s) once and add their char_counts exactly once per code point. For example, if consumed is always 1 (translator handles single code point but may be a surrogate pair), do:
+         codepoint = code_point_at(code_units, pos)
+         pos += char_count(codepoint)
+     If multiple code points can be consumed, iterate over code points but compute each codepoint at the current pos and advance once per code point (not multiply char_count for the same codepoint).
+   - Rationale: you must call code_point_at and add char_count exactly once per code point, not once per code unit.
+
+Recommended quick change (most likely correct)
+- Replace the loop at the end of translate() with:
+      pos += consumed
+  This directly fixes the misuse of char_count and avoids calling code_point_at beyond bounds.
+
+Example of the failing scenario
+- Input: a surrogate pair (consumed == 2) followed by another char. With the existing loop:
+  - First iteration: pos += 2 (char_count of codepoint) -> pos becomes 2
+  - Second iteration: code_point_at(code_units, pos) is called at pos==2 which may be out of range -> IndexError
+
+Summary
+- The code advances pos by char_count(...) once for each unit in consumed, effectively multiplying advances and overshooting. Use pos += consumed (or otherwise advance once per actual code point) so pos moves forward the correct amount and you don’t call code_point_at with an out-of-range index.

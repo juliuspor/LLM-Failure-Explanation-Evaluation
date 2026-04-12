@@ -1,0 +1,59 @@
+What happened (root cause)
+- The code treats -0.0 as an integer because of the test on line 176:
+  - if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - For x == -0.0, int(x) is 0 and the equality x == int(x) is True, so the integer branch runs.
+- Inside that branch value = int(x) (line 177) sets value to 0 and later the code calls self.add(str(value)) (line 192).
+- Concretely, for -0.0:
+  - x == int(x) is True
+  - value becomes 0
+  - self.add(str(value)) adds "0" (losing the sign)
+- Because the integer branch is chosen, the code never runs the else that would call self.add(str(x)) (line 194), which would preserve the "-0.0" text. So the negative sign is discarded at lines 176–193 and the test expecting "-0.0" fails.
+
+Where it occurs
+- The problem is in the block starting at line 176 and ending at line 194. Relevant variables and lines:
+  - x (input number) — checked at line 176
+  - value = int(x) — line 177
+  - mantissa — line 178
+  - exp = 0 — line 179
+  - the integer output path uses self.add(str(value)) — line 192
+  - the fallback non-integer path uses self.add(str(x)) — line 194
+- Because the integer path produces "0" for negative zero, the negative sign is lost.
+
+Why the current logic loses the negative zero sign
+- The equality test x == int(x) treats -0.0 as equal to 0, so the code assumes it is a plain integer and formats it as str(value).
+- str(value) is "0" (an int string) and contains no sign information for negative zero.
+- Negative zero in floating point is a distinct IEEE value and its sign must be preserved when serializing, but that is bypassed by converting to int too early.
+
+Precise fixes (concrete steps)
+1. Detect negative zero before the integer branch and handle it explicitly. Example code to insert at the top of the number formatting routine:
+   - if self.is_negative_zero(x):
+       self.add("-0.0")
+       return
+   This ensures -0.0 is never treated as an integer and is serialized with its sign.
+
+2. Alternatively, change the integer-branch output to preserve negative zero by checking sign before writing value:
+   - if x == int(x) and not math.isinf(x) and not math.isnan(x):
+       if self.is_negative_zero(x):
+           self.add("-0.0")
+           return
+       ...
+   This keeps the rest of the integer formatting logic intact.
+
+3. Use an explicit sign test instead of relying on x == int(x) to choose branches where sign matters:
+   - Use math.copysign or the existing is_negative_zero utility:
+       if self.is_negative_zero(x):
+           self.add("-0.0"); return
+
+Notes and safety
+- The is_negative_zero utility is already present (tests call CodeConsumer.is_negative_zero), so use that rather than reimplementing sign detection.
+- Make sure the early return is placed before any conversion to int() or mantissa manipulation (i.e., before line 177).
+- No other branches need to change for normal integers, floats, infinities, or NaN.
+
+Why this exact change fixes the failing test
+- The test calls self.cc.add_number(-0.0) and expects "-0.0".
+- Detecting negative zero first will add "-0.0" directly (preserving the sign) instead of converting to int and adding "0".
+- All other tests remain unaffected because only the -0.0 case is handled specially.
+
+Summary
+- Root cause: -0.0 passes the integer test (x == int(x)), so code formats it as int (lines 176–193), producing "0" and losing the negative sign.
+- Fix: check is_negative_zero(x) before converting to int (before line 177) and add "-0.0" directly (then return). This preserves the sign and fixes the failing test.

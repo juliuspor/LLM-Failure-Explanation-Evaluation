@@ -1,0 +1,49 @@
+What fails
+- The code correctly detects a UTF-16 surrogate pair (lines 38–41) and computes the combined code point (line 43). But it never tells the caller that it consumed two code units. The caller keeps using the same index and will process the low surrogate as a separate code unit next — producing wrong output or raising an error later.
+
+Where it happens (exact variables / lines)
+- At line 38 you load high = code_units[index].
+- At lines 39–41 you check the high surrogate and read low = code_units[index + 1].
+- At line 43 you return the combined code point but do not advance index or otherwise indicate that two code units were consumed.
+- At line 44 you return high when there is no valid pair.
+
+Why that causes the failure
+- The function gives the caller only a code point value (e.g. 0x1F600) but not how many code units were consumed. The caller therefore continues iterating with the same index + 1 and treats the low surrogate (which you already used) as a separate character. That results in duplicate/invalid characters or out-of-range errors in downstream logic.
+
+Concrete, specific fixes (pick one depending on how the caller is written)
+
+1) Return (code_point, count) so the caller can advance the index
+- Change the two return points to include the consumed count:
+  - Line 43: return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), 2
+  - Line 44: return high, 1
+- Update the caller to unpack and advance index by count.
+
+2) Advance the index inside this function and return only the code point
+- If this function owns the index variable (e.g. index is passed by reference or is an attribute), increment it before returning:
+  - After computing the pair at line 43, do index += 2 (or mutate the index holder) and then return the code point.
+  - Otherwise return a structure that includes the new index: return (code_point, new_index).
+
+3) Consume the low surrogate from code_units
+- If mutating code_units is acceptable, pop the low surrogate:
+  - After reading low, remove it: del code_units[index + 1]
+  - Then return the combined code point (caller will continue at same index which now points at the next unprocessed unit).
+- This is destructive and only appropriate if callers expect in-place consumption.
+
+Why these fixes work
+- Any of these makes sure the caller does not re-process the low surrogate. You must communicate or effect that two code units were consumed when you return the combined code point.
+
+Which to choose
+- If the caller is already structured to advance by the return value, option 1 is clean and non-destructive.
+- If the function should fully manage iteration state, option 2 is appropriate.
+- Option 3 is only for in-place, destructive pipelines.
+
+Small example patch for option 1 (illustrative)
+- Replace line 43 with:
+  return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00), 2
+- Replace line 44 with:
+  return high, 1
+- Update caller to do:
+  code_point, consumed = slice_forward(...)
+  index += consumed
+
+This directly fixes the root cause: the caller will no longer re-read the low surrogate.

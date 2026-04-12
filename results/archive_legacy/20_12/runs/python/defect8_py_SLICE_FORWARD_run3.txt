@@ -1,0 +1,36 @@
+What happened (what failed)
+- The test called LocaleUtils.to_locale('fr__POSIX') and expected Locale('fr', '', 'POSIX').
+- to_locale raised ValueError("Invalid locale format: fr__POSIX").
+
+Where it failed (exact location)
+- Failure occurs inside LocaleUtils.to_locale, specifically the length/format validation and branch logic around lines 234–252 (the slice in your RELEVANT_SLICE shows the end of that block).
+- The code path that handles the 3-part form (language + "_" + country + "_" + variant) assumes the country part always occupies characters 3–4 (indexes 3 and 4) and therefore enforces that those two characters are uppercase letters:
+  - It does ch3 = locale_str[3]; ch4 = locale_str[4] and checks they are between 'A' and 'Z' (lines around 238–244).
+- For 'fr__POSIX' the string indexes are:
+  - [0]='f', [1]='r', [2]='_', [3]='_', [4]='P', [5]='O', ...
+  - ch3 is '_' and ch4 is 'P' — ch3 fails the uppercase-letter check and triggers the ValueError.
+
+Why that is wrong (root cause)
+- The code only recognizes two valid 3-part formats:
+  1) language (2 chars) + '_' + country (2 uppercase chars) + '_' + variant (starting at index 6), i.e. "ll_CC_variant"
+- It does not handle the valid Java style where the country is empty but a variant is present (language + "__" + variant), e.g. "fr__POSIX". In that case the country is the empty string (positions 3–4 are "_" and the check for uppercase letters should be skipped).
+- Concretely: the code enforces country-character checks before determining whether the country is empty, so an input with an empty country fails the uppercase check at ch3.
+
+Where to change (how to fix)
+- In LocaleUtils.to_locale, change the validation order for the length >= 7 branch:
+  1) After confirming locale_str[2] == '_', check whether locale_str[3] == '_' — if it is, treat country as "" and the variant should start at index 3+1 (i.e. index 3 is '_' so variant starts at index 4 or 5 depending on exact slicing convention in this code). In your code the variant slice is locale_str[6:] for the non-empty country case; for empty country the variant should start at locale_str[3+1:] (i.e. locale_str[3:] shifted appropriately). Concretely for "fr__POSIX", you want to return Locale(locale_str[0:2], "", locale_str[3+1:]) = Locale("fr", "", "POSIX").
+  2) Only if locale_str[3] is not '_' should you require that locale_str[3] and locale_str[4] are uppercase letters and proceed with the country = locale_str[3:5] and variant at locale_str[6:].
+- Example concrete steps:
+  - Replace the block starting at checking ch3/ch4 (around line 238) with:
+    - if locale_str[3] == '_':
+        - if length < 4 + 1: raise ValueError (no variant present)
+        - return Locale(locale_str[0:2], "", locale_str[4:])    # variant starts at index 4
+    - else:
+        - validate ch3 and ch4 are 'A'..'Z'
+        - if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+        - else: require locale_str[5] == '_' and return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+- After this change, to_locale('fr__POSIX') will return Locale('fr', '', 'POSIX') as expected.
+
+Why this fix is safe
+- It preserves all existing validations for the standard "ll_CC" and "ll_CC_variant" forms.
+- It adds the missing allowed form "ll__variant" (language with empty country and non-empty variant), which is valid in Java Locale strings and is the exact case causing the test failure.

@@ -1,0 +1,54 @@
+What fails
+- The code throws "Minutes out of range" at lines 396–397 when the caller passes a negative minutes_offset (for example hours_offset = -1, minutes_offset = -30).
+- That happens because lines 396–397 require minutes_offset to be in 0..59, while the later logic (lines 402–405) treats minutes_offset as signed and combines it with hours_in_minutes using subtraction for negative hours. The mismatch makes the method reject perfectly valid inputs where minutes are expressed with a negative sign.
+
+Why this is the root cause (exact places)
+- Line 396: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+  - This unconditionally forbids negative minute values.
+- Lines 402–405:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  - The code expects to be able to subtract minutes_offset when hours are negative (so it treats minutes_offset as a signed quantity at combination time).
+- The inconsistency between the validation (disallow negative minutes) and the combination logic (which expects minutes possibly negative or at least subtractable) is the bug.
+
+What happened
+- A caller passed a negative minutes_offset to indicate a negative offset like -1:30. The validation rejected that input before the combination logic could run, so you get "Minutes out of range" even though the code later assumes signed minutes when computing the total.
+
+How to fix it (concrete steps)
+1. Decide what inputs you want to accept:
+   - Option A (recommended): allow minutes_offset to be negative and treat its sign relative to hours_offset; or
+   - Option B: require minutes_offset to be non-negative and combine using the sign of hours_offset (i.e. interpret minutes as magnitude).
+2. Implement one of the two changes below at the validation and combination sites.
+
+If you want Option A (allow signed minutes):
+- Change the validation at line 396 to allow -59..59:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(...)
+- Compute total minutes by adding hours_in_minutes + minutes_offset (no special subtraction):
+    total_minutes = hours_in_minutes + minutes_offset
+  (Because minutes_offset already carries its sign when caller provided -30.)
+
+If you want Option B (minutes is magnitude 0..59, sign is controlled by hours):
+- Keep validation as 0..59 but change the combination code to use the sign of hours_offset rather than comparing hours_in_minutes < 0:
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+  (Note: compare to hours_offset rather than hours_in_minutes, and write to a new variable total_minutes instead of overwriting minutes_offset to avoid confusion.)
+
+3. Use a separate variable name for the combined total (e.g., total_minutes or minutes_total) instead of mutating minutes_offset. That avoids accidental reuse and makes the intent clear:
+    total_minutes = hours_offset * 60 + (minutes_offset if hours_offset >= 0 else -minutes_offset)
+
+4. Multiply total_minutes by MILLIS_PER_MINUTE and pass to for_offset_millis:
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary (what to change where)
+- Change the validation at line 396 to match your chosen input semantics (either allow negative minutes or keep 0..59).
+- Change the combination logic at lines 402–405 to use hours_offset's sign (or simple addition if minutes is signed).
+- Use a fresh variable like total_minutes instead of mutating minutes_offset.
+
+This removes the contradiction between validation and combination and prevents the "Minutes out of range" error when callers provide signed minute offsets.

@@ -1,0 +1,57 @@
+What fails
+- The method overwrites the input variable minutes_offset and uses that same name to hold the combined total minutes. That makes the code harder to read and is the root cause of the wrong computation here (lines shown in your slice: 406–409).
+- Because minutes_offset is reused, the arithmetic that combines hours and minutes is easy to mis-write and to misinterpret. In this code the mutation leads to an incorrect or confusing result when combining a negative hour offset with a positive minutes offset (and makes debugging harder if you later inspect minutes_offset).
+
+Where it happens (line numbers from your snippet)
+- Validation: line 400–401 checks minutes_offset is 0..59.
+- Combination and mutation: lines 406–408 compute hours_in_minutes and then assign back into minutes_offset:
+  - if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset
+  - else:                  minutes_offset = hours_in_minutes + minutes_offset
+- Then minutes_offset (now a total number of minutes) is passed to safe_multiply at line 409.
+
+Why that is wrong (concrete, simple)
+- The method parameter minutes_offset means “the minutes part of the input” (0..59). After line 406–408 the same identifier minutes_offset is being used for “total minutes” (hours*60 ± minutes). Reusing the parameter name hides the original meaning and invites sign errors.
+- Reusing the same variable is the direct cause of confusion or wrong sign logic: you should form a new local variable totalMinutes and compute totalMinutes = hours_in_minutes ± minutes_part, then multiply totalMinutes by MILLIS_PER_MINUTE. Overwriting the parameter makes it easy to get the ± wrong or to mistake what is being multiplied later.
+
+Concrete example (showing how to reproduce the problem)
+- Suppose hours_offset = -1, minutes_offset = 30.
+  - hours_in_minutes = -60.
+  - Code does minutes_offset = hours_in_minutes - minutes_offset → -60 - 30 = -90.
+  - offset = safe_multiply(-90, MILLIS_PER_MINUTE) → OK, -90 minutes.
+  This is the intended numeric result, but because the parameter was mutated, it’s easy to make a subtle bug (for example if someone later changed the sign logic or used the original minutes part elsewhere, they’d be using the wrong value).
+- The mutation is the fragile point — tests that later inspect minutes_offset or extensions of this code commonly break.
+
+How to fix (step-by-step, exact edits)
+1. Stop mutating the parameter minutes_offset. Introduce a new local variable total_minutes.
+2. Compute total_minutes explicitly from hours and minutes parts:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_offset < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+     else:
+       total_minutes = hours_in_minutes + minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE and continue:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return cls.for_offset_millis(offset)
+
+Minimal corrected code fragment (what to change near lines 406–409)
+- Replace the block
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  with
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixed version is safe
+- You keep the parameter minutes_offset intact for clarity and future use.
+- total_minutes is an explicit, single-purpose variable whose value is obvious and cannot be confused with the input minute-part.
+- The sign logic is clearer and less error-prone.
+
+Summary
+- Root cause: mutation of the parameter minutes_offset and mixing meanings (minute-part vs total minutes) causes fragile, confusing logic and opens the door to wrong results.
+- Fix: compute into a new variable total_minutes (don’t reuse minutes_offset), then multiply and return.

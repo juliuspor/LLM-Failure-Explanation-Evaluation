@@ -1,0 +1,55 @@
+What happened (symptom)
+- The code sometimes raises an IndexError when you call to_locale(locale_str). The crash occurs at these lines:
+  - line 237: ch3 = locale_str[3]
+  - line 238: ch4 = locale_str[4]
+  - and then the bounds check at line 239 triggers an exception because the string was too short to index [3] or [4].
+
+Why it happened (root cause)
+- The method indexes locale_str[3] and locale_str[4] before confirming the string is long enough. If locale_str has length < 5 (for example "en", "en_", "enU", "en_U"), accessing index 3 or 4 raises IndexError.
+- The code does compute length = len(locale_str) (line 222) and has a branch for length == 2 (line 231), but it does not guard the later branch that assumes a 5+ length before doing locale_str[3] and locale_str[4]. In short: missing/incorrect length check before indexing.
+- Related correctness note: the code later checks locale_str[5] (line 245) to detect a variant separator; that check is only valid when length >= 6. If you reach the variant-handling branch without verifying length >= 6 you will again index out of range.
+
+Exactly where to change (concrete fixes)
+1. Before you read locale_str[3] and locale_str[4], ensure length >= 5. Example replacement for the block around lines 237–240:
+   - Add:
+     if length < 5:
+         raise ValueError(f"Invalid locale format: {locale_str}")
+   - Then assign:
+     ch3 = locale_str[3]
+     ch4 = locale_str[4]
+   This guarantees those indexes are valid.
+
+2. Before checking locale_str[5] (line 245) or slicing locale_str[6:] (line 247), ensure length >= 6 (for the '_' at index 5) and >= 7 if you expect a non-empty variant. Concretely:
+   - If you intend to accept forms "xx_YY" (length 5) and "xx_YY_variant" (length >=7), structure the code like:
+     if length == 5:
+         if locale_str[2] != '_':
+             raise ValueError(...)
+         return Locale(locale_str[0:2], locale_str[3:5])
+     if length >= 7:
+         if locale_str[2] != '_' or locale_str[5] != '_':
+             raise ValueError(...)
+         return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+     else:
+         raise ValueError(...)
+
+3. Also check the separator index(s) in the right order:
+   - Always validate locale_str[2] == '_' before assuming characters at 3 and 4 are the country code.
+   - Then, if you expect a variant, validate locale_str[5] == '_' before slicing locale_str[6:].
+
+Minimal illustrative corrected flow (pseudocode referencing line numbers)
+- compute length (line 222)
+- if length == 2: return Locale(locale_str[0:2])
+- if length < 5: raise ValueError(...)   <-- prevents indexing at 3/4
+- if locale_str[2] != '_': raise ValueError(...)
+- ch3 = locale_str[3]; ch4 = locale_str[4]
+- validate ch3/ch4 are A..Z
+- if length == 5: return Locale(locale_str[0:2], locale_str[3:5])
+- if length >= 7:
+    if locale_str[5] != '_': raise ValueError(...)
+    return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+- otherwise raise ValueError(...)
+
+Why this resolves the problem
+- It prevents attempts to read characters beyond the string length and explicitly validates separator positions before slicing. That eliminates the IndexError and makes the function fail with a controlled ValueError for invalid formats.
+
+If you want, I can produce the exact patched code for your function with the updated checks and exact line numbers.

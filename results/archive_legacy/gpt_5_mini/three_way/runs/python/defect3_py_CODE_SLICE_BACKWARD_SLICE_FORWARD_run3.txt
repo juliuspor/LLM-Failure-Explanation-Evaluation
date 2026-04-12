@@ -1,0 +1,39 @@
+What happened (where it fails)
+- Failure happens in translate() inside this loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- code_point_at() (shown in the slice) immediately checks the index and raises IndexError if index >= len(code_units). The code can call code_point_at() with pos past the end and hit that IndexError (or otherwise mis-advance pos and corrupt the scan).
+
+Why it fails (root cause)
+- The variable consumed is being misinterpreted. translate_codepoint(code_units, pos, out) returns how many UTF‑16 code units it consumed (1 for a BMP char, 2 for a surrogate pair). The loop treats consumed as “number of codepoints to iterate” and then, inside the loop, calls char_count(code_point_at(code_units, pos)) to compute how many code units that codepoint occupies and advance pos by that many.
+- If consumed == 2 (a single supplementary codepoint represented by a surrogate pair), the for loop runs twice. On the first iteration pos is advanced by 2 (char_count returns 2). On the second iteration pos now points past that codepoint; calling code_point_at(code_units, pos) either:
+  - reads the low surrogate as a high surrogate and returns a wrong value, or
+  - hits the index check and raises IndexError (the slice shows the IndexError is raised at the index check in code_point_at when index >= len(code_units)).
+- In short: the code double-counts the surrogate pair because consumed already counted code units, and then the inner loop advances again using char_count. That causes pos to move incorrectly and leads to an out‑of‑range access.
+
+Exactly where this happens
+- translate(): the for pt in range(consumed) ... line is the problematic block (it assumes consumed is a count of codepoints).
+- code_point_at(): the index bounds check (line shown in the slice: if index < 0 or index >= len(code_units): raise IndexError(...)) is where the exception manifests when pos is moved past length.
+
+How to fix it (concrete steps)
+1. Decide the contract of translate_codepoint:
+   - If translate_codepoint returns the number of UTF‑16 code units it consumed (1 or 2), then remove the inner loop and advance pos by that returned number:
+     consumed = self.translate_codepoint(code_units, pos, out)
+     if consumed != 0:
+         pos += consumed
+   - If translate_codepoint is supposed to return the number of codepoints consumed, change its implementation to do that (rare) and keep the loop, but then ensure the loop advances pos by the number of UTF‑16 code units for each codepoint (call char_count on each codepoint once).
+2. Minimal, recommended change (assuming translate_codepoint already returns code units):
+   Replace the whole for pt in range(consumed): ... block with:
+       pos += consumed
+   That avoids calling code_point_at unnecessarily and prevents over‑advancing.
+3. Add a defensive check before calling code_point_at anywhere:
+   if pos >= length:
+       break  # or handle appropriately
+   (This prevents accidental IndexError while debugging.)
+
+Why the recommended fix works
+- If consumed is a count of UTF‑16 code units, advancing pos by consumed exactly skips the units that translate_codepoint already processed. No extra char_count or code_point_at calls are necessary, so you won't read past the array or double-advance.
+
+Summary
+- Root cause: misinterpreting consumed (code units vs codepoints), causing double advancement and out‑of‑range access in code_point_at.
+- Fix: advance pos by consumed (pos += consumed) or make translate_codepoint and the loop agree on what consumed means. Add defensive bounds checks if useful.

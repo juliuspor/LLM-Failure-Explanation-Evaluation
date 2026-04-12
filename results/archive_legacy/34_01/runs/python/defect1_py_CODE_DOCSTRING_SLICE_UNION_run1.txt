@@ -1,0 +1,48 @@
+What fails
+- At line 396 you reject any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+    raise ValueError(...)
+  That disallows valid inputs the doc shows (for example (0, -15) and (-2, -15)). So callers that pass negative minutes are rejected here even though the method should accept some negative minutes.
+- The later computation (lines 402–405) also uses the wrong arithmetic for negative hours:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(minutes_offset, ...)
+  When hours_offset is negative and minutes_offset is negative (e.g. hours = -2, minutes = -15) the code does
+    minutes_offset = (-120) - (-15) = -105
+  which yields -01:45 instead of the correct -02:15. The code subtracts minutes_offset instead of adding it, because it treats minutes_offset as something to subtract when hours are negative.
+
+Why that causes the failure
+- The guard at line 396 prevents negative minutes at all, which contradicts the doc and the allowed combinations. Tests or callers that pass valid negative minutes fail immediately.
+- Even if the guard were fixed, the arithmetic branch for negative hours (line 402) is incorrect: it computes hours_in_minutes - minutes_offset instead of hours_in_minutes + minutes_offset, producing the wrong total offset for negative hour+negative minute combinations.
+
+Precise fixes (step-by-step)
+1. Allow the full minute range the doc specifies — change the minutes range check (line 396) to permit -59..59:
+   Replace
+     if minutes_offset < 0 or minutes_offset > 59:
+   with
+     if minutes_offset < -59 or minutes_offset > 59:
+2. Disallow the invalid combination: positive hours with negative minutes (doc requires this to be an error). Add this check after the hours range check:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError(f"Minutes must be non-negative when hours are positive: {minutes_offset}")
+3. Compute total minutes correctly in one expression instead of the two-branch mutation. Replace lines 402–405 with:
+     hours_in_minutes = hours_offset * 60
+     total_minutes = hours_in_minutes + minutes_offset
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   (Keep the try/except around the multiplication as you have it.)
+4. Keep the special-case for (0,0) returning cls.UTC and the hours range check as-is.
+
+Result
+- After these changes:
+  - (0, -15) yields -00:15 (allowed)
+  - (-2, -15) yields -02:15 (correct)
+  - (2, -15) raises ValueError (as the doc requires)
+  - other combinations produce the correct millisecond offset
+
+Where the errors occur (line numbers)
+- Rejecting negatives: line 396
+- Wrong arithmetic for negative hours: lines 402–405
+
+That is the root cause (illegal minute-range check and a sign/arith bug) and the minimal concrete steps to fix it.

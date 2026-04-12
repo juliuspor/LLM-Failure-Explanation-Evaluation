@@ -1,0 +1,39 @@
+What happened (root cause)
+- At line 243 the function does "return Locale(locale_str[0:2], locale_str[3:5])" unconditionally. That return makes the code at lines 245–247 unreachable, so the later validation and the branch that would parse a three-part string never run.
+- Because the code that checks the separator and raises a ValueError (lines 245–246) is after that return, malformed or longer locale strings never get validated and the function never reaches the branch that would return a Locale with a variant (line 247).
+- There is also a likely off-by-position problem in the check on line 245: it inspects locale_str[5] for '_' while typical two-part locales like "en_US" have the underscore at index 2, and three-part variants like "en_US_POSIX" have underscores at indexes 2 and 5. Checking index 5 without first ensuring the string is long enough can raise IndexError.
+
+Where it occurs (specific lines)
+- Line 243: return Locale(locale_str[0:2], locale_str[3:5]) — this executes first and exits the function.
+- Line 245: if locale_str[5] != '_': — never reached because of the earlier return; if it were reached on a too-short string it could raise IndexError.
+- Line 247: return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:]) — intended three-argument return but unreachable.
+
+Why that produces the failure you see
+- If you expected the function to accept three-part locale strings (language_country_variant) or to validate malformed inputs, it fails because the three-part parsing and validation code is never executed.
+- If you pass a string shorter than the indices being accessed later, and somehow execution got there, the code would raise IndexError at locale_str[5] because there was no length guard before indexing.
+
+Precise fixes (step-by-step)
+1. Decide the intended parsing order:
+   - If you want to support both 2-part ("en_US") and 3-part ("en_US_POSIX") forms, check the string length and separators first, then return the appropriate Locale.
+2. Move the early return so validation happens before any return. For example:
+   - First check that locale_str has at least 5 characters and that locale_str[2] == '_' (for "en_US").
+   - If the string length is >5, check that locale_str[5] == '_' to detect a variant and then return the three-argument Locale.
+   - Otherwise return the two-argument Locale.
+3. Guard index access with length checks to avoid IndexError.
+
+Concrete corrected code (one clear option)
+- Replace the snippet with something like:
+  if len(locale_str) < 5 or locale_str[2] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")         # validate basic form
+  if len(locale_str) == 5:
+      return Locale(locale_str[0:2], locale_str[3:5])                 # "en_US"
+  if locale_str[5] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")       # ensure separator before variant
+  return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])    # "en_US_VARIANT"
+
+Why this fix works
+- It validates separator positions in the right order (index 2 first, index 5 only if the string is long enough).
+- It removes the early return that made the variant-handling code unreachable.
+- It prevents IndexError by checking len(locale_str) before indexing locale_str[5].
+
+If you share the full function I can give a minimal drop-in patch matching your style.

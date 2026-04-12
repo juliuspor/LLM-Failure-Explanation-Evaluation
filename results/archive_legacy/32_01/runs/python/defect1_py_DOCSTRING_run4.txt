@@ -1,0 +1,58 @@
+I can’t see your exact source file or line numbers, so I’ll explain the single, specific logical bug that almost always causes this kind of failure and exactly how to find and fix it.
+
+What goes wrong (root cause)
+- The method that builds a fixed-offset zone (commonly named something like forOffsetHoursMinutes, ofHoursMinutes, createOffset, etc.) converts the hour and minute inputs into a single signed offset (usually minutes or seconds).
+- The bug is an incorrect sign/validation rule for minutes: the code rejects any negative minutes when the hours value is positive by doing a straight sign comparison between hours and minutes (for example, if (hours > 0 && minutes < 0) throw; — or worse, if (sign(hours) != sign(minutes)) throw).
+- That simple sign-comparison also incorrectly rejects the valid case where both hours and minutes are negative (e.g. (-2, -15) should produce -02:15). It also mishandles the zero-hour cases if the implemented check assumes hours’s sign alone determines the offset sign.
+- In short: the code is using the wrong rule to determine the final sign of the offset and to validate minute sign, so valid combinations get thrown as invalid.
+
+Where to look in your code
+- Open the method that creates the offset zone (look for names like forOffsetHoursAndMinutes, forOffsetHoursMinutes, create, ofHoursMinutes, or similar).
+- Inspect the block that validates hours and minutes and the block that converts them to a total offset (minutes or seconds). Typical culprits:
+  - A check like if (hours > 0 && minutes < 0) throw ValueError
+  - A check like if (sign(hours) != sign(minutes)) throw ValueError
+  - A conversion like totalMinutes = hours * 60 + minutes without handling negative hours correctly
+
+Concrete fix (exact steps)
+1. Validate ranges independently:
+   - require -23 <= hours <= +23
+   - require -59 <= minutes <= +59
+   - (optional) require that the absolute total offset does not exceed 23:59
+2. Compute the final signed offset using the sign implied by the inputs, not by naive sign-matching:
+   - Let absHours = abs(hours), absMinutes = abs(minutes)
+   - Determine sign:
+     - If hours < 0 OR (hours == 0 AND minutes < 0) then sign = -1
+     - Else sign = +1
+   - Compute totalMinutes = sign * (absHours * 60 + absMinutes)
+3. Validate total magnitude:
+   - If abs(totalMinutes) > (23 * 60 + 59) then throw ValueError
+4. Use totalMinutes (or totalSeconds = totalMinutes * 60) to construct the DateTimeZone.
+
+Exact code sketch (replace names to match your codebase)
+- Bad code you likely have:
+  if (hours > 0 && minutes < 0) throw new ValueError("minutes negative when hours positive");
+  totalMinutes = hours * 60 + minutes;
+- Replace with:
+  if (hours < -23 || hours > 23) throw new ValueError("hours out of range");
+  if (minutes < -59 || minutes > 59) throw new ValueError("minutes out of range");
+  int absHours = Math.abs(hours);
+  int absMinutes = Math.abs(minutes);
+  int sign = (hours < 0 || (hours == 0 && minutes < 0)) ? -1 : 1;
+  int totalMinutes = sign * (absHours * 60 + absMinutes);
+  if (Math.abs(totalMinutes) > 23*60 + 59) throw new ValueError("offset exceeds +/-23:59");
+  // then build zone from totalMinutes
+
+Examples / test cases to add
+- (2, 15) -> +135 minutes -> +02:15
+- (2, -15) -> ValueError (minutes negative when hours positive)
+- (0, 15) -> +15 minutes
+- (0, -15) -> -15 minutes
+- (-2, 15) -> -135 minutes (sign is negative because hours < 0)
+- (-2, -15) -> -135 minutes (both negative, allowed)
+- (23, 59) -> allowed; (23, 60) -> ValueError
+- (-23, -59) -> allowed; (-23, -60) -> ValueError
+
+Why this explains your failure
+- If your code rejected (-2, -15) or any case with both hour and minute negative, or mishandled 0 hours with negative minutes, it’s because the code decided minutes’ sign must match hours’ sign rather than deriving the final sign from the combination. The steps above fix that deterministically.
+
+If you want, paste the specific method (the validation and the line that computes totalMinutes/seconds). I’ll point to the exact lines to change and produce a ready-to-drop-in patch.

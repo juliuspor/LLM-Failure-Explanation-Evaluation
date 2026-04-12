@@ -1,0 +1,65 @@
+What happened (root cause)
+- The translator walks UTF-16 code units using an index variable (called index or i in the file) and sometimes needs to consume a surrogate pair (two UTF‑16 code units) as a single code point.
+- The code that advances the index after handling a code point is wrong: when it encounters a high-surrogate it accepts the pair but then advances the loop index in a way that steps off the end of the code-unit array. That leads to an attempt to read units[index+1] (or similar) when index is already the last valid position, producing IndexError: String index out of range: 2 for the test input "\U0001F630A" (surrogate pair + 'A').
+
+Where it happens (specific names / locations)
+- In hit03_translator.py, inside CharSequenceTranslator.translate (exposed by CsvEscaper.translate_string), the loop uses:
+  - input_seq (or its converted form to_utf16_code_units) as the sequence of UTF‑16 code units,
+  - index (or i) to iterate,
+  - code_point_at(...) to get a code point when a high surrogate is seen,
+  - out (the output list) to append translated code units.
+- The bug is in the index advancement logic immediately after code_point_at is used and a surrogate pair has been decoded. That code advances index incorrectly (either increments it in two places or increments by the wrong amount), so the next loop iteration tries to read past the end.
+
+Why the test triggers it
+- Input: "\U0001F630A"
+  - In UTF‑16 code units this is [high_surrogate, low_surrogate, 'A'] — length 3.
+  - Correct behavior: when you decode the surrogate pair you must advance index by 2 and then process the 'A' at index 2.
+  - Faulty code advances index incorrectly (for example by 3 or by 1 twice), so the loop reaches index == 2 and then tries to read index+1 (or the loop increments again and then reads beyond index 2) and fails with index out of range: 2.
+
+Precise failure symptom in this code path
+- code_point_at reads units[index]; if that is a high surrogate it reads units[index + 1] without ensuring index + 1 < len(units). Because index was mis-advanced earlier, index can be the last slot and index+1 is out of range. The traceback reports the IndexError when the translator tries to access units[2] or units[3] depending on how the loop mis-advanced — in your failing test the reported out-of-range index is 2.
+
+How to fix it (concrete steps)
+1. Make the loop control single-source the index advancement:
+   - Convert any for/implicit increments to an explicit while loop that only advances index in one place. Example pattern:
+     - units = to_utf16_code_units(input_seq)
+     - i = 0
+     - while i < len(units):
+         cp = code_point_at(units, i)   # must not read past end
+         if cp == <special-to-escape>:
+             append escaped code units to out
+         else:
+             append original code units to out
+         # advance i by number of UTF-16 code units consumed by cp
+         i += (2 if cp > 0xFFFF else 1)
+   - This guarantees the index moves exactly by 1 for BMP chars and 2 for supplementary characters.
+
+2. Make code_point_at robust:
+   - Before reading units[index + 1] to build a surrogate pair, check index + 1 < len(units). If not, handle as an isolated high surrogate (either treat as itself or raise a controlled error).
+   - Example:
+     - if is_high_surrogate(u):
+         if index + 1 >= len(units) or not is_low_surrogate(units[index+1]):
+             handle_malformed_surrogate()  # do not blindly read units[index+1]
+         else:
+             combine to code point using units[index] and units[index+1]
+
+3. Remove any double increments:
+   - Search the translate implementation for any place that does index += 1 inside the loop and then relies on the for-loop or another increment elsewhere. Consolidate all index movement so a surrogate pair is consumed exactly once.
+
+Why these steps fix it
+- The IndexError comes from a mismatch between how many code units you thought you consumed and what you actually left to read. Explicitly advancing by 1 or 2 depending on code-point width and adding a bounds check before reading index+1 prevents out-of-range reads and preserves following characters (like the 'A').
+
+Example change sketch (pseudo-Python)
+- Replace:
+    for index in range(len(units)):
+        cp = code_point_at(units, index)
+        ...   # existing logic
+- With:
+    i = 0
+    while i < len(units):
+        cp = code_point_at(units, i)
+        ...   # existing logic using cp
+        i += 2 if cp > 0xFFFF else 1
+
+Final note
+- The failing test specifically exercises a surrogate pair followed by another character; fixing the index advancement and making code_point_at check bounds will both stop the IndexError and preserve the following character as expected.

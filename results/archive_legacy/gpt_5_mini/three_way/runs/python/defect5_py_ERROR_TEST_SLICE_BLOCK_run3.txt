@@ -1,0 +1,48 @@
+What happened (what failed, where)
+- The failing code is in ArrayUtils.add, at the block shown (lines 346–351).
+- The test calls ArrayUtils.add(None, None, expected_type=str).
+- At runtime inferred_type is object (because both the input array and the new element are None, so the routine could not infer a more specific element type).
+- The code checks:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  That is exactly lines 346–351, and because inferred_type == object and expected_type is str (not object), the code raises the TypeError you see:
+      Cannot cast object list to str list (ClassCastException: [Ljava.lang.Object; cannot be cast to [Ljava.lang.str;)
+- So the failure occurs because the code refuses to create a list of the caller's expected_type when it couldn't infer a concrete element type from inputs.
+
+Why this is the root cause (simple, concrete)
+- inferred_type is set to object when there is no information from the inputs (both array and element are None).
+- expected_type is provided by the caller as str.
+- The code treats "inferred_type == object && expected_type != object" as an unresolvable conflict and raises, instead of using expected_type as the desired target type in this exact situation where inference produced no info.
+- In short: the code treats lack of inference (object) as an error when the caller explicitly provided an expected_type, even though it is perfectly valid to produce a str-list [None] when expected_type=str.
+
+Exactly where to change it and how to fix it (step-by-step)
+1. Replace the raising behavior with accepting the caller's expected_type when inference produced only object. Concretely, at/around line 346 change:
+   if inferred_type == object and expected_type != object:
+       raise TypeError(...)
+   to:
+   if inferred_type == object and expected_type != object:
+       # Use the caller's expected type when no inference info is available
+       inferred_type = expected_type
+
+2. Ensure expected_type has a sensible default (e.g., None or object) and that the rest of the code uses inferred_type when allocating or casting the new array/list.
+
+3. After changing the condition, ensure the code constructs the resulting list using inferred_type (which will now be expected_type=str in the failing test), so ArrayUtils.add(None, None, expected_type=str) will return [None] with the intended type semantics instead of raising.
+
+Why this fix is safe / intended
+- When inferred_type == object it means the method had no concrete type information from inputs; the caller-provided expected_type should be treated as the authoritative type to produce.
+- Raising a TypeError in that branch prevents valid scenarios (like the test) where the caller explicitly requests a typed result.
+- Only raise when there is a real conflict: for example, if inferred_type is a concrete non-object type (e.g., int) and expected_type is a different concrete incompatible type (e.g., str), then raising is appropriate.
+
+Example minimal patch (illustrative)
+- Current (lines 346–351):
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+
+- Replace with:
+  if inferred_type == object and expected_type != object:
+      # No type info from inputs: honor caller's expected_type instead of failing
+      inferred_type = expected_type
+
+After this change, the test calling ArrayUtils.add(None, None, expected_type=str) will not raise and will produce a list corresponding to the expected_type (e.g., [None]).
+
+If you want, I can produce the exact diff for the function body around those lines or run through other edge-cases to ensure there are no additional places that still force a raise.

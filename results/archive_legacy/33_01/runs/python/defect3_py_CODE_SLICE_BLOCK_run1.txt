@@ -1,0 +1,44 @@
+What failed
+- Where it crashed: in the for loop that handles a non-zero consumed (the block starting at "for pt in range(consumed): ..."). The IndexError comes from code_point_at(code_units, pos) when index >= len(code_units) (the check on lines like your slice block: line 35–36).
+- Why it crashed (root cause): translate_codepoint(...) and the code that advances pos disagree about what "consumed" counts. The loop treats consumed as a number of codepoints to skip and calls code_point_at(code_units, pos) that expects pos to point at a valid code unit. But consumed is actually larger than the number of remaining codepoints or is measured in code units, so the loop runs too many iterations and calls code_point_at with pos beyond the end of code_units. That makes code_point_at raise IndexError for an out-of-range index.
+
+Concretely:
+- At start of the while you call consumed = self.translate_codepoint(code_units, pos, out).
+- If consumed > 0 you do:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  The code calls code_point_at(code_units, pos) consumed times.
+- If translate_codepoint returned a value measured in UTF-16 code units (or otherwise differs from "how many codepoints remain here"), the for-loop will iterate the wrong number of times and eventually call code_point_at with pos == len(code_units) (or larger), causing the IndexError shown in your slice.
+
+What happened (specific variables and lines)
+- Variable pos is used as an index into code_units (length = len(code_units)).
+- consumed is used to decide how many iterations to advance pos by calling code_point_at.
+- If consumed does not equal the number of codepoints starting at pos, the for loop will run too many times and call code_point_at with an out-of-range pos, raising the IndexError at the code_point_at(index) bounds check (your slice lines 35–36).
+
+How to fix it (clear steps)
+Pick one consistent meaning for translate_codepoint and make the loop match it:
+
+Option A — If translate_codepoint returns a count of UTF-16 code units consumed:
+1. Change the advancement to add consumed directly, not by calling code_point_at repeatedly:
+   replace the for loop with:
+       pos += consumed
+   This avoids calling code_point_at and matches the units translate_codepoint returned.
+
+Option B — If translate_codepoint returns a count of codepoints consumed:
+1. Keep the loop idea but ensure translate_codepoint truly returns codepoint counts.
+2. Also guard the loop against over-running the buffer. For safety, change the loop to:
+       for _ in range(consumed):
+           if pos >= length:
+               break   # or raise a clear error
+           pos += char_count(code_point_at(code_units, pos))
+   This prevents code_point_at being called with pos >= length.
+
+Option C — Make translate_codepoint report both values or return how many code units it advanced:
+1. Modify translate_codepoint to return number_of_code_units_consumed (an integer).
+2. Then use pos += number_of_code_units_consumed (same as A).
+
+Which to choose
+- The simplest, least error-prone change is Option A if translate_codepoint is already counting UTF-16 code units. If translate_codepoint is meant to count codepoints, then fix translate_codepoint (Option B) so it never claims more codepoints than are present, and add a safety guard as shown.
+
+One-line summary
+The loop assumes consumed counts codepoints but consumed actually uses different units (or exceeds remaining codepoints), so the code calls code_point_at with pos out of bounds. Make the meaning of consumed consistent with how you advance pos (prefer pos += consumed if consumed is code units), and add a bounds check to avoid IndexError.

@@ -1,0 +1,37 @@
+What happened (where)
+- The failure occurs in LocaleUtils.to_locale when processing "fr__POSIX".
+- In the failing code path it reads characters at indices 3 and 4 (see lines 237–239) and then requires those characters to be uppercase letters:
+  - ch3 = locale_str[3] (line 237)
+  - ch4 = locale_str[4] (line 238)
+  - then it checks if ch3 and ch4 are between 'A' and 'Z' and raises ValueError if not (line 239).
+- For the input "fr__POSIX" the characters are:
+  - index 0 = 'f', 1 = 'r', 2 = '_', 3 = '_', 4 = 'P' ...
+- So ch3 is '_' (index 3). The uppercase-letter test at line 239 fails because '_' is not between 'A' and 'Z', and the method raises ValueError("Invalid locale format: fr__POSIX").
+
+Why it happened (root cause)
+- The code assumes the pattern after the language is either:
+  - "_CC" (country two uppercase letters) or
+  - "_CC_VARIANT" (country + '_' + variant)
+- It never accounts for the valid Java/expected form where the country is empty and two underscores delimit a language followed immediately by a variant: "language__variant".
+- In that empty-country case the character at index 3 is '_' (the second underscore), not an uppercase letter, so the uppercase check at line 239 incorrectly treats a valid format as invalid.
+
+Exactly where to change (concrete steps)
+1. Before the uppercase checks at lines 237–239, detect the double-underscore empty-country form:
+   - If locale_str[2] == '_' and locale_str[3] == '_', treat this as language + empty country + variant.
+2. Extract the variant starting at index 4:
+   - variant = locale_str[4:]
+   - return Locale(locale_str[0:2], "", variant)
+3. Keep or add validation that the variant is non-empty if that is required by your rules.
+4. If the double-underscore case is not present, continue with the existing checks (lines 237–247) for the normal country and country+variant cases.
+
+Example patch sketch (pseudo-change referenced to lines)
+- Insert before line 237:
+  if locale_str[2] == '_' and locale_str[3] == '_':
+      # language__variant -> country is empty, variant starts at index 4
+      if len(locale_str) <= 4:
+          raise ValueError(f"Invalid locale format: {locale_str}")  # optional: require non-empty variant
+      return Locale(locale_str[0:2], "", locale_str[4:])
+- Then leave the existing ch3/ch4 checks for the normal "_CC..." paths.
+
+Summary
+- The method rejects "fr__POSIX" because it expects an uppercase country at index 3 but finds a '_' (the second underscore used to indicate empty country). Add explicit handling for the "language__variant" pattern (check locale_str[2] and locale_str[3] being '_' and return Locale(language, "", variant)) before the uppercase country checks at lines 237–239.

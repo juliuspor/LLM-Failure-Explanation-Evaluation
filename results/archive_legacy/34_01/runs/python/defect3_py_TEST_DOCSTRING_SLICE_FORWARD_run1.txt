@@ -1,0 +1,40 @@
+What happened
+- The test passes the Python string '\U0001F630' (a single code point U+1F630) into CsvEscaper.
+- slice_forward (lines shown) assumes its input is a list of 16-bit UTF‑16 code units (i.e. values in the surrogate range 0xD800–0xDFFF when needed).
+- On this input, code_units[index] is the full code point 0x1F630 ( > 0xFFFF ), so line 39's surrogate check (0xD800 <= high <= 0xDBFF) fails and the function returns high unchanged at line 44.
+- The rest of the algorithm expects 16‑bit code units or a surrogate pair; returning a >0xFFFF value breaks that expectation and causes the translation to fail (the test assertion does not hold).
+
+Why it failed (root cause)
+- slice_forward and the surrounding code are written to operate on UTF‑16 code units (16‑bit words) and explicitly detect high/low surrogates.
+- The caller actually passed Unicode code points (Python str characters, where an astral character is a single code point > 0xFFFF), not UTF‑16 code units. That mismatch is the root cause.
+
+Where it occurred (specific variables/lines)
+- Variable: high = code_units[index] (line 38).
+- Check: if 0xD800 <= high <= 0xDBFF (line 39) — this never matches when high is 0x1F630.
+- Return: return high (line 44) returns a value the rest of the code cannot handle.
+
+How to fix it (concrete steps)
+Choose one of these two precise fixes, depending on which representation your escaper implementation expects:
+
+A — Make the caller supply UTF‑16 code units (recommended if algorithm is tightly coupled to UTF‑16):
+1. Convert the input string to UTF‑16 little-endian 16‑bit words before calling translate:
+   - bytes_utf16 = input_seq.encode('utf-16-le')
+   - code_units = [bytes_utf16[i] | (bytes_utf16[i+1] << 8) for i in range(0, len(bytes_utf16), 2)]
+2. Pass that code_units list into translate_string (or adapt caller to supply it).
+This ensures high is always a 16‑bit value or a surrogate, so the surrogate check at line 39 is valid.
+
+B — Make slice_forward (and callers) handle Unicode code points (if you want to work in code points instead of UTF‑16):
+1. Remove or change the surrogate-pair logic to work with Python code points:
+   - If code_units is a list of code points, you do not need surrogate combining; return the code point unchanged.
+2. Update all code that expects 16‑bit units so it instead accepts code points > 0xFFFF.
+This is a larger change because many places assume 16‑bit units; only choose it if you intend to work in code points throughout.
+
+Minimal concrete change example (caller-side UTF‑16 conversion):
+- Before calling translate_string, do:
+  bytes_utf16 = s.encode('utf-16-le')
+  code_units = [bytes_utf16[i] | (bytes_utf16[i+1] << 8) for i in range(0, len(bytes_utf16), 2)]
+  escaper.translate_string(code_units, out)
+This will make high equal 0xD83D and low 0xDE30 for U+1F630, so lines 39–43 will correctly combine them.
+
+Summary
+The code fails because slice_forward expects UTF‑16 16‑bit units (possibly a surrogate pair) but is given a single Python code point 0x1F630. Either convert the input to UTF‑16 code units before calling translate_string or change the algorithm to work with Python code points consistently.

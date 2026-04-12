@@ -1,0 +1,40 @@
+What happened (where, and what variable/method is involved)
+- The failing assertion compares an expected value "-0.0" with the actual stored value "0".
+- The test calls your class' add method (line 126: def add(self, newcode)), which immediately calls self.append(newcode) on line 138.
+- The root cause is that append(...) is changing newcode from a negative float -0.0 into a plain zero (the integer 0 or a non-negative float) before the test checks it. That is why the test reports "Expected -0.0, got 0".
+
+Why that happens (exact likely code pattern)
+- Somewhere inside append(...) you are normalizing or converting the incoming value. Common code patterns that cause this:
+  - Using int(newcode) or otherwise casting to an integer: int(-0.0) == 0
+  - Converting to a non-signed representation or doing something like if newcode == 0: newcode = 0 (this loses the minus sign)
+  - Formatting/parsing that strips the sign (e.g. using "%g" or str() at the wrong time and storing the formatted value instead of the original float)
+- Any of those transforms will turn a negative-zero float into a plain zero value that compares/prints as 0, so the assertion fails because the test expected a float carrying the negative sign (repr -0.0).
+
+How to find the exact line causing it
+1. Open the file containing add and append.
+2. Inspect the append implementation around line ~138 (and the lines just below/above it). Look for:
+   - int(...), long(...), or any integer cast applied to newcode
+   - code like if newcode == 0: newcode = 0
+   - calls that reformat/serialize the value (str/format/`%`/round) before storing
+3. Add quick diagnostics inside append to observe the value and type before/after any conversion:
+   - print("append in:", newcode, type(newcode), repr(newcode))
+   - print("append out:", value_being_stored, type(value_being_stored), repr(value_being_stored))
+   This will show whether newcode is converted to integer 0 or to a positive float 0.0.
+
+Concrete fixes (step-by-step)
+- If you intended to preserve the exact float value (including sign bit for -0.0):
+  1. Remove any int(...) casts: do not call int(newcode) inside append. Keep the value as a float.
+  2. Remove any normalization that sets zero values to literal 0 (e.g. delete/adjust if newcode == 0: newcode = 0).
+  3. If you must canonicalize numeric types, preserve float sign: ensure you store float(newcode) rather than int(newcode).
+  4. After changes, run the diagnostic prints or a unit test to confirm repr(stored_value) prints '-0.0' when newcode was -0.0.
+- If you do not need to preserve negative zero (and tests should not expect it):
+  1. Update the test expectation to accept 0 instead of -0.0 (change expected value or use an approximate comparison).
+  2. Or change add/append docstring to state that zeros are canonicalized to plain 0.
+
+How to assert correctly if sign matters
+- To detect/preserve negative zero you can use math.copysign or inspect bits:
+  - math.copysign(1.0, x) will be -1.0 for negative-zero and +1.0 for positive-zero.
+  - Or use struct.pack/bit-twiddling to check the IEEE sign bit if you need exact behavior.
+
+Summary
+- The failure is caused inside append(...) (called at line 138 from add at line 126) where newcode is being converted or normalized, stripping the negative sign of -0.0 and producing 0. Fix by removing the conversion/normalization or by storing a float that preserves the negative-zero sign, or update the test if negative-zero shouldn't be preserved.

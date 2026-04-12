@@ -1,0 +1,55 @@
+What happened (where it failed)
+- The exception was raised by this check near the top of for_offset_hours_minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  So the method is rejecting a minutes_offset of -15 right there.
+
+Why it failed (root cause)
+- The code expects callers to pass minutes as a non-negative value 0..59; a negative minutes value is treated as invalid and triggers the ValueError.
+- The later logic which combines hours and minutes into total minutes assumes minutes_offset is a non-negative number and then adjusts its sign depending on the hours sign:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  That code expects minutes_offset to be >= 0, but you passed minutes_offset == -15, so the earlier validation failed first.
+- In short: the caller provided a negative minutes value (-15) but the method requires minutes in the range 0..59. The code both validates minutes as non-negative and later applies sign logic based only on hours, so passing negative minutes is inconsistent with the method’s contract and triggers the error at the validation line.
+
+How to fix it (specific steps)
+Choose one clear policy and implement it:
+
+Option A — Require minutes to be non-negative (recommended)
+1. Keep the current validation:
+   if minutes_offset < 0 or minutes_offset > 59:
+       raise ValueError(...)
+2. Fix callers so they never pass negative minutes. For example, to represent -5 hours and 15 minutes offset, call:
+   for_offset_hours_minutes(-5, 15)
+   not for_offset_hours_minutes(-5, -15).
+3. Combine hours and minutes with a separate total_minutes variable (avoid reusing minutes_offset):
+   hours_in_minutes = hours_offset * 60
+   if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+   else:
+       total_minutes = hours_in_minutes + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Option B — Accept negative minutes inputs (if you want callers to be able to pass -15)
+1. Change validation to allow minutes_offset between -59 and 59:
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(...)
+2. Normalize sign when computing total minutes (do not rely only on hours sign):
+   total_minutes = hours_offset * 60 + minutes_offset
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Decide and document how combinations like hours=5, minutes=-15 are interpreted and ensure callers follow that contract.
+
+Concrete minimal code change (preferred: Option A, caller-side fix)
+- Replace the combination block with a clear total_minutes expression and keep the current validation:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      total_minutes = hours_in_minutes - minutes_offset
+  else:
+      total_minutes = hours_in_minutes + minutes_offset
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary
+- The ValueError was raised because a negative minutes value (-15) was passed but the method explicitly requires minutes in 0..59 (see the if minutes_offset < 0 ... check). Either change the callers to pass non-negative minutes (recommended) or change the method to accept negative minutes and normalize them consistently when computing the total offset.

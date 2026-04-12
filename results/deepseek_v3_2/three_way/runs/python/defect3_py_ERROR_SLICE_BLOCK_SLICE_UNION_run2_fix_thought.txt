@@ -1,0 +1,47 @@
+The bug is in the loop that advances `pos` after a translator consumes codepoints. The original code used `for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))`. However, `code_point_at` can raise an IndexError if `pos` is out of bounds. This can happen when `consumed` is greater than the number of remaining codepoints? Actually, the translator's `translate_codepoint` should not consume more codepoints than available. But the issue is that `code_point_at` is called with `pos` that might be at the end of the list. In the case where `consumed` is 1 and the last codepoint is a surrogate pair (2 code units), after advancing `pos` by `char_count` (which is 2), `pos` becomes equal to `length`. Then the loop condition `while pos < length` will exit. However, if the translator consumes 0 codepoints, we go into the else branch and advance `pos` by `len(c)`. That's fine.
+
+But the error message indicated an IndexError at index 2. That suggests that `code_point_at` was called with index 2 when `code_units` length is 2. This could happen if the translator returns `consumed = 1` for a single code unit at index 0, then we go into the for loop: `for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))`. Initially `pos=0`. We get codepoint at index 0, char_count is 1, so `pos` becomes 1. Then the loop continues? Wait, `range(consumed)` is only one iteration, so we stop. That's fine.
+
+But if the translator returns `consumed = 2`? For a string "ab", each is a single code unit. If a translator consumes 2 codepoints, after first iteration `pos` becomes 1, second iteration we call `code_point_at(code_units, 1)` which is fine, then `pos` becomes 2. That's okay because `pos` is now equal to length, and the while loop will exit. No IndexError.
+
+Wait, the error says index 2 out of range. That means `code_point_at` was called with index 2 when length is 2. That could happen if `pos` is already 2 and we call `code_point_at` again. That could happen if the translator returns `consumed = 1` but the codepoint is a surrogate pair (2 code units). Let's simulate: string is "ab" (two single code units). Suppose at index 0, translator returns consumed=1. Then we go into the for loop: `for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))`. At start pos=0. Get codepoint at index 0, char_count=1, pos becomes 1. That's fine. Now while loop continues with pos=1. Suppose translator again returns consumed=1. Then for loop: pos=1, get codepoint at index 1, char_count=1, pos becomes 2. Now while loop condition pos < length? length=2, so pos=2 is not less than 2, loop exits. No IndexError.
+
+But what if the string is a single character that is a surrogate pair? For example, a character outside BMP like '𐐀' (U+10400). `to_utf16_code_units` returns two code units: high and low surrogate. So code_units length = 2. At pos=0, translator might return consumed=1 (since it's one codepoint). Then for loop: get codepoint at index 0, which will detect the surrogate pair and return the full codepoint. char_count will be 2. So pos += 2, making pos=2. That's equal to length, loop exits. No IndexError.
+
+Wait, the error is from `code_point_at` itself, line 35-36. That's the guard condition. So the index passed is out of range. The only way is if `pos` is >= len(code_units). That could happen if the translator returns `consumed` but the calculation of char_count for the last codepoint advances `pos` beyond length? Actually, `code_point_at` checks index >= len(code_units). If `pos` equals length, it's out of range. So we must ensure we don't call `code_point_at` when `pos == length`. In the for loop, we call `code_point_at(code_units, pos)` after we've already advanced `pos`? No, we call it with the current `pos` before advancing. But if `pos` is already at length, we shouldn't be in the for loop because the while loop condition would have prevented it. However, there is a subtlety: the for loop iterates `consumed` times, and each iteration we call `code_point_at` with the current `pos`. But if `consumed` is greater than the number of remaining codepoints, we could end up calling `code_point_at` with an index that is out of bounds. For example, suppose we have one codepoint represented by 2 code units (surrogate pair). length=2. At pos=0, translator returns consumed=2 (meaning it claims to have consumed two codepoints). Then for loop: first iteration: codepoint at index 0, char_count=2, pos becomes 2. Second iteration: now pos=2, we call `code_point_at(code_units, 2)` which raises IndexError. That's the bug! The translator should not consume more codepoints than available, but we must guard against it. However, the contract is that translators should understand codepoints and not overconsume. But we can still protect by checking pos < length before calling code_point_at. However, the loop is supposed to advance by the number of codepoints consumed. If the translator overconsumes, we cannot safely advance. But the bug diagnosis says the error occurs with index 2 on a list of length 2. That matches the scenario where translator consumes 2 codepoints but only one is present (surrogate pair). So we need to fix the loop to avoid calling code_point_at when pos is already at or beyond length. We can break out of the for loop if pos >= length. Alternatively, we can compute the total code units to advance by iterating over the consumed codepoints but stop when pos reaches length. However, if translator overconsumes, we might still have an issue. The safest is to not use a for loop but instead advance pos by the total code units that correspond to the consumed codepoints, but we need to know how many code units that is. The translator returns number of codepoints consumed, not code units. We need to convert that to code units by scanning the code_units from current pos. We can do a loop that counts codepoints until we've consumed the required number, but that's similar to the for loop but with bounds checking.
+
+Let's redesign: after translator returns consumed > 0, we need to advance pos by the total number of code units that make up those consumed codepoints. We can do:
+remaining = consumed
+while remaining > 0 and pos < length:
+    cp = code_point_at(code_units, pos)
+    pos += char_count(cp)
+    remaining -= 1
+If remaining > 0 after loop, that means translator overconsumed; we can break or ignore.
+
+But the original code had the for loop that assumed pos always points to a valid codepoint start. We'll add a guard.
+
+Also, note that in the case where consumed == 0, we already advance pos by char_count(codepoint). That's fine.
+
+Let's implement the fix accordingly.
+
+We'll also ensure that the while loop condition is checked each time.
+
+Now, we need to output only the fixed `translate` method. The output format says: "the complete, fully valid Python code for the fixed `CharSequenceTranslator.translate` only (including decorators if any). Do NOT include a docstring. Do NOT include Markdown fences." Wait, it says "Do NOT include a docstring." But the original method has a docstring. Should we include the docstring? The instruction says "Do NOT include a docstring." So we should omit the docstring. However, the method signature and body must be valid. We'll include the method with its docstring? The instruction might mean not to include a separate docstring in the output, but the code should be the method as is. I think we should include the method exactly as it would appear in the class, but without the docstring? That could be ambiguous. The original method has a docstring. The instruction says "Do NOT include a docstring." So we should remove the docstring. However, the method might still have a docstring in the source, but for the fix we are to output the method without docstring. I'll follow the instruction: no docstring.
+
+We'll output the method code only, starting with `def translate(...):` and ending with the indented block.
+
+Let's craft the fixed method.
+
+We'll keep the same signature and initial checks.
+
+Then the loop.
+
+We'll change the for loop to a while loop that decrements consumed and checks pos < length.
+
+Also, we need to import the helper functions? They are already defined in the same module, so we can assume they are available.
+
+We'll write the code accordingly.
+
+We'll also note that the `translate_codepoint` method of subclasses should respect the bounds, but we guard anyway.
+
+Let's write the code.

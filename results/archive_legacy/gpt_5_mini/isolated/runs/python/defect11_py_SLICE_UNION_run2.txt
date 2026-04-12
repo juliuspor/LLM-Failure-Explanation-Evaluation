@@ -1,0 +1,35 @@
+What happened (where it fails)
+- The exception is raised at line 52: the check `if gap <= 0: raise ValueError("bound must be positive")` triggers because `gap` is non‑positive.
+- `gap` is computed at line 49 as `gap = end - start`.
+
+Why it happens (root cause)
+- `gap = end - start` does not count the end bound as part of the valid range. If the caller passes `start == end` to request a single character, `gap` becomes 0 and the code treats that as an error even though a single value is a valid bound.
+- Also, if the caller passes `start > end` the result is negative and the same error is raised (which is reasonable), but the current code confuses the off‑by‑one issue (exclusive end) with invalid bounds.
+- The actual sampling uses `_RANDOM.randrange(gap)` at line 56. `randrange(gap)` produces values 0..gap-1, so to allow sampling from start through end inclusive you must set `gap = end - start + 1`. As written the function:
+  - incorrectly rejects valid equal bounds (`start == end`),
+  - samples an off‑by‑one smaller set of characters than the caller probably expects.
+
+Consequence in concrete terms
+- Example: caller calls `random(1, 65, 65, True, False)` expecting the single character for code point 65. Current code computes `gap = 0` and raises `ValueError("bound must be positive")`.
+- Example: when `letters` or `numbers` is true the code resets `start` and `end` to 0 and 127 (lines 46–47) giving `gap = 127`. That avoids the exception but still excludes code point 127 (because of the same off‑by‑one).
+
+How to fix (precise steps and lines to change)
+1. Decide whether `end` should be inclusive (typical expectation). If inclusive, change the gap calculation:
+   - Replace line 49:
+     - from `gap = end - start`
+     - to `gap = end - start + 1`
+2. Change the validation on line 52 to reflect the proper condition:
+     - from `if gap <= 0: raise ValueError("bound must be positive")`
+     - to `if gap <= 0: raise ValueError("end must be >= start")`
+   (or keep the message but it's clearer to say `end must be >= start`.)
+3. Alternatively use Python's builtins to avoid off‑by‑one mistakes:
+   - Replace the `randrange` call at line 56 with `ch = chr(_RANDOM.randrange(start, end + 1))`
+   - Then you can leave `gap = end - start` out entirely and validate with `if end < start: raise ValueError("end must be >= start")`.
+
+Tests to add (to verify fix)
+- random(1, 65, 65, False, False) should return chr(65) and not raise.
+- random(10, 0, 127, True, False) should not raise and should include expected characters.
+- random(1, 100, 90, False, False) should raise a clear error because end < start.
+
+Summary
+- The immediate bug is an off‑by‑one in `gap = end - start` together with `randrange(gap)`, which causes valid cases with `start == end` to raise `ValueError`. Fix by making the end bound inclusive (`end - start + 1`) or using `randrange(start, end + 1)`, and make the error message clearly state `end >= start`.

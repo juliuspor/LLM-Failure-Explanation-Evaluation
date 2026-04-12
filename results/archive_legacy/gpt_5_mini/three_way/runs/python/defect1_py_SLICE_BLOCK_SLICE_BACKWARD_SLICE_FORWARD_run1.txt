@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The code raises ValueError at line 397:
+  - "if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")"
+- That happens because minutes_offset sometimes ends up outside the valid range 0–59 before that check.
+- The nearby code that produces minutes_offset is at lines 402 and 404:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because those lines mix hours_in_minutes (an hours*60 value) and minutes_offset (already in minutes), minutes_offset becomes much larger than 59 (or negative), triggering the ValueError at line 397 when the code validates minutes.
+
+Why it happens (root cause)
+- The code tries to combine hour and minute parts into a single minute offset, but it subtracts or adds hours_in_minutes directly to minutes_offset instead of combining normalized minute parts.
+- hours_in_minutes holds something like abs(hours) * 60. minutes_offset holds the minutes component (0..59 expected).
+- Doing hours_in_minutes + minutes_offset yields a value like (abs(hours)*60 + minutes), e.g. 2 hours + 30 minutes → 150. That value is >59, so the subsequent validation thinks the minute component is out of range and raises the exception.
+- In short: the code is treating a combined total-minute quantity as if it were the minute-of-hour component, then validating it as if it should be in 0–59.
+
+What exactly to change (concrete fixes with steps and lines)
+1. Keep minutes_offset strictly as the minute-of-hour value (0..59) before validating it.
+2. Compute the total offset (in minutes) separately from the minute-of-hour component, then convert to milliseconds.
+
+Suggested code changes (replace the problematic lines around 402 / 404 and the multiplication line 405):
+- Normalize minutes component first:
+  - normalized_minutes = abs(minutes) % 60
+  - if normalized_minutes < 0 or normalized_minutes > 59: (optional — should never happen after %)
+- Compute total minutes separately:
+  - total_minutes = abs(hours) * 60 + normalized_minutes
+- Apply sign to total_minutes if negative offset required:
+  - if sign_is_negative: total_minutes = -total_minutes
+- Then compute offset millis:
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+- Finally return cls.for_offset_millis(offset)
+
+Concrete minimal replacement (pseudocode aligned to your variables):
+  minutes_component = abs(minutes) % 60
+  if minutes_component < 0 or minutes_component > 59:
+      raise ValueError(f"Minutes out of range: {minutes_component}")   # defensive; will not fire
+  total_minutes = abs(hours) * 60 + minutes_component
+  if negative:
+      total_minutes = -total_minutes
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+  return cls.for_offset_millis(offset)
+
+Extra recommendations
+- Add unit tests for combinations that previously failed, e.g. hours=2, minutes=30 and negative variants, to confirm minutes validation no longer fires incorrectly.
+- Remove or change any code that tries to reuse minutes_offset for both “minute component” and “total minutes” — keep the two concepts separate.
+
+This explains where (lines 396–405), why (mixing hour*60 with minute-of-hour then validating it as a minute), and exactly how to fix it with concrete variable names and replacement steps.

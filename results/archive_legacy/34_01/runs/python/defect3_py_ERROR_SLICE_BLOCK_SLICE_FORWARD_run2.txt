@@ -1,0 +1,58 @@
+What happened (where it failed)
+- The exception was raised at line 36 in the SLICE_BLOCK snippet:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  The code raised IndexError because index had the value 2 while len(code_units) was 2 (or smaller). The condition index >= len(code_units) became true, so the function refused to proceed.
+
+Why this happened (root cause)
+- The function expects index to be a valid index into the list/array code_units (valid range 0 .. len(code_units)-1).
+- A caller passed index == len(code_units) (2 when len(code_units) == 2). That is not a valid index; attempting to use code_units[index] would be out-of-range.
+- The later lines assume index points at an actual code unit:
+  38 |     high = code_units[index]
+  If index == len(code_units) this read would fail, so the function correctly checks and raises at line 36.
+- In short: the caller asked the function to read the code unit at position 2, but code_units has no element at position 2.
+
+Where to look in your code
+- Find the call site(s) that pass index into this routine (the function containing SLICE_BLOCK and SLICE_FORWARD). Look for calls that can pass index == len(code_units). Typical spots:
+  - code that converts a slicing end index into an index without subtracting 1
+  - code that iterates with i from 0 to len(code_units) and then calls this function with i == len(code_units)
+- Check how you compute index when slicing, concatenating, or stepping through code_units. The immediate bug is at the caller, not in the bounds check.
+
+Concrete fixes (list of steps and exact changes)
+
+Option A — Fix the caller (recommended)
+1. At the site that calls this function, ensure you never call it with index == len(code_units). If you were converting a "slice end" to an index, use end-1 when you intend to read the last element.
+2. Example fix at call site:
+   - Wrong:
+     call_function(code_units, index = end)    # end == len(code_units) sometimes
+   - Right:
+     if end == len(code_units):
+         handle_end_of_string()   # don't call this function to read a code unit
+     else:
+         call_function(code_units, index = end)
+3. This makes the intent explicit: if the caller wants to represent "after the last code unit", handle that separately rather than calling this reader function.
+
+Option B — Make the function explicit about "end" vs "invalid"
+If you want this function to accept an "end" index and return a sentinel instead of raising:
+1. Replace the current check with an explicit branch for index == len(code_units):
+   35 |     if index < 0 or index > len(code_units):
+   36 |         raise IndexError(f"String index out of range: {index}")
+   37 |     if index == len(code_units):
+   38 |         return None   # or raise a clearer error, or return a sentinel value
+2. Then the callers must handle None (or sentinel) to mean "no code unit here — at end of string".
+
+Option C — Improve the error message (diagnostic)
+If you keep the raise, make it clearer where it came from:
+   35 |     if index < 0 or index >= len(code_units):
+   36 |         raise IndexError(f"String index out of range: {index} (len={len(code_units)})")
+This doesn't fix the bug but makes debugging easier.
+
+Small code example for a robust guard inside the function (explicit and clear):
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index} (len={len(code_units)})")
+  high = code_units[index]
+  ...
+
+Summary
+- The function correctly detected an invalid index (index == 2 while len(code_units) == 2). The real bug is in the caller that passed an index equal to len(code_units) when the function expects 0..len(code_units)-1.
+- Fix by changing the caller to avoid passing end-of-string as an index, or change the function to explicitly handle index == len(code_units) with a defined behaviour (return sentinel or clearer error).

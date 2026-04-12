@@ -1,0 +1,40 @@
+What fails
+- The length-check condition at the top of to_locale is wrong, so valid/invalid lengths are not filtered correctly and the method ends up accepting or rejecting strings it should not.
+
+Where it is (roughly)
+- In to_locale, the check
+  if length != 2 and length != 5 and length < 7:
+is the problematic line (near the start of the method, before the character checks). In your pasted SLICE_FORWARD view the surrounding code later returns Locale(...) on line 248 and then continues at 250–252; the length check is the first gate before those branches.
+
+Why it fails (root cause)
+- The intent appears to be: accept locale_str if its length is exactly 2, or exactly 5, or at least 7 (2-letter language, 5 = language_COUNTRY, >=7 = language_COUNTRY_variant). In logical form that is:
+  length == 2 OR length == 5 OR length >= 7
+- The code tests:
+  if length != 2 and length != 5 and length < 7:
+This expression is not the same as the intended acceptance condition and is confusing to reason about. As written it will raise for some lengths you want to allow (or conversely allow some you want to reject), because the negations and the mix of and/inequalities make the logic incorrect and fragile.
+
+Concrete example of the mismatch
+- A clear, correct way to express "not (length == 2 or length == 5 or length >= 7)" is:
+  if not (length == 2 or length == 5 or length >= 7):
+- Rewriting that into pure comparisons gives:
+  if length != 2 and length != 5 and length < 7:
+  ...which is what you have — but this transformation is error-prone and easy to misread. If any rewrite or later edits are made it's easy to introduce mistakes. (Even if your current line happens to match the negation of the intended predicate, the code is brittle and the intention is obscured.)
+
+What happened in practice
+- The confusing/incorrect condition caused the function to accept or reject some locale_str values unexpectedly, leading to ValueError or incorrect parsing in places downstream. This is where failures are observed: early in to_locale during the initial length validation.
+
+How to fix it (exact steps)
+1. Replace the length check with an explicit, easy-to-read condition that matches intention. For example:
+   if not (length == 2 or length == 5 or length >= 7):
+       raise ValueError(f"Invalid locale format: {locale_str}")
+   (Replace the current line that raises with this block.)
+2. Add unit tests that exercise boundary lengths and formats:
+   - Valid: "en", "en_US", "en_US_POSIX" (or any variant with length >= 7)
+   - Invalid: "", "e", "eng", "enU", "en_us" (lower-case country if you want to enforce case), "en_US_" (trailing underscore)
+3. If you intend to accept mixed-case or other valid ISO variants, adjust the character checks (the later checks expect 'a'..'z' for language and 'A'..'Z' for country). If that requirement is intended, leave them; otherwise, relax them or normalize (e.g., lower()/upper()) before validation.
+
+Why this fix works
+- The new condition directly encodes the intended acceptance rule (2, 5, or >=7) so there is no ambiguity from negations and mixed comparisons. Unit tests will prevent regressions.
+
+Where to change (lines)
+- Change the early validation block just after computing length (the first if that raises ValueError). The remainder of the method (character checks and slices around lines ~248–252) can remain the same once the length check correctly gates allowed lengths.

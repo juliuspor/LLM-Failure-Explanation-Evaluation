@@ -1,0 +1,58 @@
+What happened (where it fails)
+- The failure comes from get_paint at line 71 and the check at lines 74–75:
+  - Line 71 computes g:
+    g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  - Line 74 checks:
+    if g < 0 or g > 255:
+        raise ValueError(f"Color parameter outside of expected range: Red Green Blue")
+- The code raises the ValueError because the computed g is outside 0–255. That is, the expression for g produced a number < 0 or > 255, so the guard at line 74 triggered and raised the error at line 75.
+
+Why it happened (root causes)
+- value outside the expected range:
+  - If value is less than self._lower_bound or greater than self._upper_bound, the normalized ratio (value - lower) / (upper - lower) will be < 0 or > 1, so multiplying by 255 produces g < 0 or g > 255. In that case get_paint deliberately raises the ValueError at line 75.
+- denominator problem (wrong bounds ordering):
+  - If self._upper_bound <= self._lower_bound, the denominator (self._upper_bound - self._lower_bound) is zero or negative:
+    - If it is zero, the expression will raise ZeroDivisionError (not the ValueError shown). If you are not seeing ZeroDivisionError, your _upper_bound and _lower_bound are probably not equal.
+    - If it is negative (upper < lower), the ratio sign is inverted and g can easily fall outside 0–255 for valid values, causing the ValueError on line 75.
+- Misleading error message:
+  - The raised message "Color parameter outside of expected range: Red Green Blue" does not include which variable failed, nor the actual numbers. That makes diagnosing harder.
+
+Where to look (specific variable/method/lines)
+- Check the call to get_paint(value) and the value you pass.
+- Inspect self._lower_bound and self._upper_bound initialization/assignment before get_paint is called.
+- Relevant lines in your slice:
+  - Line 71: computing g
+  - Line 74–75: check and raise ValueError
+
+Concrete, step-by-step fixes you can apply
+1. Validate bounds when the object is created or when bounds change:
+   - Ensure self._upper_bound > self._lower_bound. If not, raise a clear error in the initializer, e.g.:
+     raise ValueError(f"upper_bound ({self._upper_bound}) must be > lower_bound ({self._lower_bound})")
+2. Validate input value before computing g:
+   - If you expect values only inside [lower, upper], check and raise a clear error before the arithmetic:
+     if value < self._lower_bound or value > self._upper_bound:
+         raise ValueError(f"value {value} outside bounds [{self._lower_bound}, {self._upper_bound}]")
+3. If you want to tolerate out-of-range values, clamp instead of raising:
+   - Compute ratio = (value - lower) / (upper - lower)
+   - ratio = max(0.0, min(1.0, ratio))
+   - g = int(ratio * 255.0)
+   - This avoids the ValueError and keeps g in 0–255.
+4. Improve the error message at line 75 so it reports the failing value and the computed g:
+   - For example:
+     raise ValueError(f"Computed color component g={g} outside 0..255 for value={value}, bounds=({self._lower_bound},{self._upper_bound})")
+5. Add unit tests / assertions:
+   - Test get_paint with value == lower, value == upper, and a few values in-between and outside to confirm behavior.
+
+Minimal code patch examples
+- Validate bounds at object creation:
+  if self._upper_bound <= self._lower_bound:
+      raise ValueError(f"_upper_bound ({self._upper_bound}) must be > _lower_bound ({self._lower_bound})")
+
+- Clamp ratio before int conversion:
+  denom = self._upper_bound - self._lower_bound
+  ratio = (value - self._lower_bound) / denom
+  ratio = max(0.0, min(1.0, ratio))
+  g = int(ratio * 255.0)
+
+Summary
+- The ValueError at line 75 is raised because the computed g is outside 0–255. The usual causes are: the passed value is outside [self._lower_bound, self._upper_bound], or the bounds are set wrongly (upper <= lower) which produces an invalid ratio. Fix by validating bounds and input, or by clamping the normalized ratio, and replace the generic error message with one that shows the actual numbers.

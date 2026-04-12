@@ -1,0 +1,61 @@
+The bug occurs when `lower` and `upper` exceed the string length. The original code sets `upper = len(text)` if `upper == -1 or upper > len(text)`, but then it calls `substring_java` with `end = upper` which is now valid. However, if `lower` is also > `len(text)`, the call to `StringUtils.index_of` with `start = lower` will return -1 (since start is beyond length). Then the code proceeds to `substring_java(text, 0, upper)` which is fine because `upper` is clamped. But the test expects the original string unchanged? Wait, the test `test_abbreviate_lower_beyond_length` passes `lower=15, upper=20` on a string of length 10. According to the Java version (Lang 2.4?), the behavior is: if lower > length, return original string (no abbreviation). The current code would still abbreviate at upper (which is clamped to length 10) and append the suffix because `upper != len(text)`? Actually `upper` becomes 10, which equals `len(text)`, so `upper != len(text)` is false, and no suffix is appended. The result would be the whole string. That's fine. But the test expects the original string unchanged? The test is failing because of IndexError, not because of wrong output. The IndexError is from `substring_java` when `end > len(s)`. That's because the condition `if upper == -1 or upper > len(text): upper = len(text)` is before the `if upper < lower: upper = lower`. Wait, the original code has:
+        if upper == -1 or upper > len(text):
+            upper = len(text)
+        if upper < lower:
+            upper = lower
+If lower=15, upper=20, length=10. First condition sets upper=10. Then upper < lower? 10 < 15 true, so upper = lower = 15. Now upper=15, lower=15. Then later we call substring_java with end=15, but length is 10, so end > len(s) -> IndexError. That's the bug! The order of adjustments is wrong. We should clamp upper to length, then if lower > upper, set lower = upper (or maybe set both to length). But also we need to ensure that lower is not beyond length. The fix: adjust upper first, then ensure lower <= upper, and also ensure lower <= length. If lower > length, set lower = length and upper = length (so no abbreviation). Then proceed. This matches Java behavior: if lower > length, return original string (since no space found, and upper will be length). The Java code (from Apache Commons Lang 2.4) does:
+        if (upper == -1 || upper > str.length()) {
+            upper = str.length();
+        }
+        if (upper < lower) {
+            upper = lower;
+        }
+        // If lower is greater than the length of the string, set to length
+        if (lower > str.length()) {
+            lower = str.length();
+        }
+        // Find space after lower
+        int index = StringUtils.indexOf(str, " ", lower);
+        ...
+So we need to add that check for lower > length. That will prevent the IndexError because after adjusting lower to length, upper may have been set to lower (if upper < lower). But we already set upper = lower earlier? Actually Java does upper = lower only if upper < lower after adjusting upper. Then if lower > length, set lower = length. But if lower > length, then upper could be less than lower? Wait, upper is already set to length if upper > length. Then if lower > length, upper = length, lower > upper, so upper < lower, then upper = lower? That would set upper = lower (which is > length). But they set lower = length before that? The order in Java: adjust upper, then if upper < lower, upper = lower, then if lower > str.length(), lower = str.length(). So if lower > length, after upper adjustment, upper may be length (if upper > length). Then upper < lower? length < lower true, so upper = lower (now upper = lower > length). Then lower = str.length() sets lower = length, but upper remains > length. That's a bug in Java? Actually they have:
+        if (upper == -1 || upper > str.length()) {
+            upper = str.length();
+        }
+        if (upper < lower) {
+            upper = lower;
+        }
+        // If lower is greater than the length of the string, set to length
+        if (lower > str.length()) {
+            lower = str.length();
+        }
+So if lower=15, length=10. First upper becomes 10. Then upper < lower (10<15) so upper = lower =15. Then lower > length (15>10) so lower =10. Now lower=10, upper=15. That's inconsistent. But later they call indexOf with start=lower=10, which is okay (start at end). And substring with end=upper=15, which will throw IndexError because end > length. Indeed Java would throw StringIndexOutOfBoundsException. Wait, but the test expects no exception? The test is from the Python translation, maybe the Java version does throw? The test `test_abbreviate_lower_beyond_length` likely expects the original string unchanged (no abbreviation). The Java version (3.12.0) might have fixed this? Let's check the latest Apache Commons Lang source. In version 3.12.0, WordUtils.abbreviate has:
+        if (upper == -1 || upper > str.length()) {
+            upper = str.length();
+        }
+        if (upper < lower) {
+            upper = lower;
+        }
+        if (lower > str.length()) {
+            lower = str.length();
+        }
+        final int index = StringUtils.indexOf(str, ' ', lower);
+        if (index == -1) {
+            return StringUtils.substring(str, 0, upper) + appendToEnd;
+        }
+        if (index > upper) {
+            return StringUtils.substring(str, 0, upper) + appendToEnd;
+        }
+        return StringUtils.substring(str, 0, index) + appendToEnd;
+But StringUtils.substring handles out-of-bounds by returning up to length. Actually StringUtils.substring in Java does not throw for end > length; it returns str.substring(0, str.length()). So the Java version is safe. Our substring_java throws. So we need to make substring_java safe for end > length? But the spec says it should throw like Java's String.substring. However, for WordUtils.abbreviate, we should adjust indices to be within bounds before calling substring_java. The fix: after adjusting lower and upper, ensure upper <= len(text). Since we already set upper = len(text) if upper == -1 or upper > len(text), but then we set upper = lower if upper < lower, which could make upper > len(text) again if lower > len(text). So we need to clamp upper after that. Better: adjust upper, then adjust lower to be <= len(text), then ensure upper >= lower and upper <= len(text). Let's implement:
+        if upper == -1 or upper > len(text):
+            upper = len(text)
+        if lower > len(text):
+            lower = len(text)
+        if upper < lower:
+            upper = lower
+        # Now lower <= upper <= len(text)
+This ensures no IndexError. Then proceed. This matches Java behavior? Let's test with lower=15, upper=20, length=10. Step1: upper > length so upper=10. Step2: lower > length so lower=10. Step3: upper < lower? 10 < 10 false, so upper stays 10. Now lower=10, upper=10. indexOf with start=10 returns -1. Then result = substring_java(text,0,10) which is whole string, and upper != len(text)? 10 == 10, so no suffix. Returns whole string. That's original string unchanged. Good.
+Now also need to handle the case where upper is -1: upper becomes length, then if lower > length, lower becomes length, upper >= lower, fine.
+Now also need to ensure that when upper is set to lower, upper may exceed length? Not possible because lower is clamped to length.
+Thus the fix is to add clamping of lower to length before adjusting upper relative to lower.
+We'll modify the code accordingly.

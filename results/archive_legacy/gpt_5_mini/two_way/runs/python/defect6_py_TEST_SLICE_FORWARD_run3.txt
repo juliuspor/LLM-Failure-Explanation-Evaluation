@@ -1,0 +1,34 @@
+What happened (where it fails)
+- At line 177 the code does: value = int(x). If x is -0.0, int(-0.0) == 0 — the sign is lost.
+- Later the code uses value (and then str(value) at line 192) or falls through to adding str(x) at line 194. Because the integer branch runs for -0.0, the code prints "0" (from str(value)) instead of "-0.0".
+- The test for negative zero therefore fails: the sign bit is discarded by int(x) before any negative-zero check happens.
+
+Why it happens (root cause)
+- Converting the float to an integer with int(x) destroys the distinction between +0.0 and -0.0. The code reaches the integer-formatting branch (value, mantissa, exp handling) and prints value (a plain integer string) without ever checking for negative zero.
+- There is a separate utility is_negative_zero (tested in the suite), but the add_number implementation does not call it before converting to int, so the special negative-zero handling is bypassed.
+
+Exactly where to change (concrete steps)
+1. Before any conversion to int or any logic that assumes the sign is irrelevant, check for negative zero. Insert a guard immediately before line 177 (i.e., before value = int(x)):
+   - if CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+         return
+   This ensures -0.0 is emitted as "-0.0" and no integer conversion runs.
+
+2. Alternatively, if you prefer math functions: use math.copysign or bit inspection:
+   - if x == 0.0 and math.copysign(1.0, x) < 0.0:
+         self.add("-0.0")
+         return
+   This is the same test as is_negative_zero but uses math.copysign inline.
+
+3. Do not rely on int(x) or mantissa/value branches for zero cases; handle all zero cases (positive and negative) before attempting integer/scientific formatting.
+
+Why this fix works
+- It prevents the destructive int(x) conversion from ever running on -0.0, so the sign bit is preserved and the test expecting "-0.0" passes.
+- It keeps the rest of the numeric formatting logic unchanged for non-zero values.
+
+What went wrong with the existing control flow (reference lines)
+- Line 177: value = int(x) — sign is lost here for negative zero.
+- Lines 180–183 and 190–194: integer and formatting branches use value/mantissa and eventually call self.add(str(value)) at 192 or self.add(str(x)) at 194. Because the code already converted to int, it prints "0" at 192 rather than "-0.0".
+- No earlier negative-zero check means is_negative_zero is effectively unused in the path that handles integer-looking floats.
+
+No other changes are required beyond the early guard; this is minimal, exact, and leaves the rest of the formatting code intact.

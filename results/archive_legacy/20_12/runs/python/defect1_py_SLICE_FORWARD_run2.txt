@@ -1,0 +1,40 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- The method raises ValueError("Minutes out of range: -15") (see the check at lines 383–387 in the source: the minutes range check).
+- The code therefore refuses the combination (-2, -15) even though the Joda-Time semantics (documented in the method docstring) allow a negative hour with a negative minute to mean -02:15.
+
+Why it fails (root cause)
+- The method has an early validation that requires minutes_offset to be in the range 0..59:
+  - At line ~383:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check is unconditional and runs before the later logic that intends to combine hours and minutes and handle signs (lines ~406–409).
+- As a result, any negative minutes (like -15) are rejected immediately, so (-2, -15) cannot be expressed even though the subsequent code would have handled the sign correctly.
+
+Where it occurs
+- Method: DateTimeZone.for_offset_hours_minutes (see lines in the posted code around the check and the later combination logic).
+- Exact checks:
+  - Minutes check that raises the ValueError is around the start of the method (the posted traceback message corresponds to that check).
+  - The intended sign-handling conversion happens later (lines 406–409) and therefore never runs for negative minutes because of the early check.
+
+How to fix (concrete steps)
+1. Remove or relax the early minutes range check so that negative minutes can pass through to the sign-handling logic. Replace:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with a check that only enforces absolute value:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This allows negative minutes like -15 but still rejects values whose magnitude exceeds 59.
+
+2. Keep the existing hours sign/combination logic (lines ~404–409) which expects minutes possibly negative and properly composes minutes_offset with hours_in_minutes:
+     hours_in_minutes = hours_offset * 60
+     if hours_in_minutes < 0:
+         minutes_offset = hours_in_minutes - minutes_offset
+     else:
+         minutes_offset = hours_in_minutes + minutes_offset
+   That logic will correctly produce -135 minutes for (-2, -15).
+
+3. (Optional) Add unit tests for the allowed combinations documented in the method docstring (e.g. (-2, -15) -> "-02:15", (0, -15) -> "-00:15", (2, -15) should remain invalid).
+
+Summary
+The immediate cause is the unconditional minutes range check that rejects negative minutes before the code that would combine hours and minutes with proper sign semantics. Relaxing that check to validate only the magnitude (abs(minutes) <= 59) fixes the issue and matches the method's documented behavior.

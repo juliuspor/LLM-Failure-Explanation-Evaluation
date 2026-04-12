@@ -1,0 +1,49 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- At line 396 the code checks minutes_offset with:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset == -15 is less than 0, that check raises ValueError immediately. The method never reaches the later normalization code (lines 402–405) that would combine hours and minutes.
+
+Why it fails (root cause)
+- The method currently requires minutes_offset to be non‑negative (0..59). The test passes a negative minutes value to indicate a negative offset (hours = -2, minutes = -15). The code does not accept negative minute arguments, so it treats -15 as out of range and throws the exception at line 396.
+- In short: minutes_offset is validated as non‑negative, but the caller used a negative minutes value. The sign of the offset is handled only later (lines 402/404), so the negative minutes are rejected too early.
+
+Where it occurs
+- The failure occurs at line 396 in the minutes validation:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Concrete fixes (choose one)
+
+1) Change the caller (recommended simplest)
+- Pass minutes as a non‑negative value and let the hours carry the sign:
+  DateTimeZone.for_offset_hours_minutes(-2, 15)
+- No code changes required. This matches the current method contract (minutes must be 0..59).
+
+2) Accept negative minutes in the method (if you want the method to accept -2, -15)
+- Update the validation and normalization. Example precise changes:
+  - Replace the validation at line 396 with:
+      if minutes_offset < -59 or minutes_offset > 59:
+          raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - Then normalize before computing offset (add just after current validation and before the existing normalization at line 402):
+      # ensure minutes follow the sign of hours if both provided with signs
+      if hours_offset < 0 and minutes_offset > 0:
+          minutes_offset = -minutes_offset
+      elif hours_offset > 0 and minutes_offset < 0:
+          minutes_offset = -minutes_offset
+  - Keep the later code that converts hours+minutes into minutes and millis. This allows callers to supply negative minutes and ensures a consistent sign.
+
+3) Normalize minutes to absolute and apply hours sign (alternate)
+- Change the code so minutes are always provided as absolute and the sign comes from hours:
+  - At validation keep 0..59 (current lines 396–397).
+  - Before combining, compute:
+      sign = -1 if hours_offset < 0 else 1
+      minutes_offset = sign * minutes_offset
+  - Then continue with existing combination code.
+
+Which to pick
+- If the intended API uses minutes as non‑negative (0..59) and the sign is on hours, pick option 1 or 3.
+- If you want callers to be allowed to express a negative minutes argument, pick option 2.
+
+This explains exactly what failed (minutes_offset == -15 failing at line 396), why (minutes must be >= 0), where (line 396), and gives concrete code changes and a caller fix.

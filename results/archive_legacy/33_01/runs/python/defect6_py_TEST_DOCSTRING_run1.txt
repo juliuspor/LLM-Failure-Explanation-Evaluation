@@ -1,0 +1,63 @@
+What happened
+- The test calls MockCodeConsumer.add_number(-0.0) and expects get_code() to return "-0.0".
+- The test fails because add_number turned the -0.0 input into "0.0" (or "0") before storing it, so get_code() returned "0.0" instead of "-0.0".
+
+Why it happened (root cause)
+- In Python (and most languages) -0.0 compares equal to 0.0: (-0.0 == 0.0) is True. A branch that tests the numeric value for zero therefore cannot distinguish positive zero from negative zero.
+- I suspect the code in MockCodeConsumer.add_number contains a zero-check like:
+  if value == 0:
+      token = "0.0"
+  else:
+      token = str(value)
+  That branch is what loses the sign bit. The loss occurs exactly in MockCodeConsumer.add_number, at the conditional that treats zero specially (the line with "if value == 0:" or any equivalent check).
+- Any code that canonicalizes zeros using equality or converts via arithmetic that collapses the sign (for example multiplying by 0, taking abs, or formatting that normalizes zero) will produce a positive zero string and drop the minus sign.
+
+Where it occurred
+- In MockCodeConsumer.add_number, at the branch that detects zero (the line that compares the number to 0 or otherwise special-cases zero). After that branch the stored token no longer contains the negative sign, so get_code() later returns "0.0" (or "0") instead of "-0.0".
+
+How to fix it — exact steps (pick one)
+Option A — preserve the sign using math.copysign
+1. Replace the zero-check in MockCodeConsumer.add_number with a sign test instead of equality to zero.
+2. Use math.copysign or math.copysign(1.0, value) < 0 to detect a negative sign even for -0.0.
+3. Example change (pseudo-edit of add_number):
+   import math
+   def add_number(self, value):
+       if value == 0.0:
+           # detect negative zero
+           if math.copysign(1.0, value) < 0:
+               token = "-0.0"
+           else:
+               token = "0.0"
+       else:
+           token = str(value)
+       self._tokens.append(token)
+4. Run the test: cc.add_number(-0.0) -> get_code() will yield "-0.0".
+
+Option B — inspect IEEE sign bit (if you prefer bit-level)
+1. Use struct to read the float bits to see if the sign bit is set:
+   import struct
+   def is_negative_zero(v):
+       return v == 0.0 and (struct.unpack('!Q', struct.pack('!d', v))[0] >> 63) == 1
+2. In add_number, when v == 0.0 call is_negative_zero(v) and produce "-0.0" if True.
+
+Option C — avoid special-casing zero at all
+1. If you can rely on str(value) or repr(value) preserving the sign for your Python version, remove the special-case branch:
+   def add_number(self, value):
+       token = repr(value)   # repr(-0.0) -> '-0.0' in typical CPython
+       self._tokens.append(token)
+2. Verify repr/format behavior in your environment before using this.
+
+Why these fixes work
+- math.copysign(1.0, value) looks at the sign bit and returns -1.0 for negative inputs including -0.0. That lets you detect negative zero even though value == 0.0 is True.
+- The struct/bit approach reads the IEEE sign bit directly and is also reliable.
+- Removing the special-case avoids the equality-based collapse of sign altogether.
+
+What to test after fixing
+- Run your original test:
+  cc = MockCodeConsumer(); cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0'
+- Also test positive zero:
+  cc = MockCodeConsumer(); cc.add_number(0.0); assert cc.get_code() == '0.0'
+- Test other numbers to ensure formatting didn't change unexpectedly:
+  cc.add_number(1.5); assert cc.get_code().endswith('1.5')
+
+If you want, paste the current MockCodeConsumer.add_number implementation and I will indicate the exact line(s) to change and provide the modified function.

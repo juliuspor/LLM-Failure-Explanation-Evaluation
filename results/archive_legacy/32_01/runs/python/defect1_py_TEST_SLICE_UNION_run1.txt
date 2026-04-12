@@ -1,0 +1,51 @@
+What happened
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) raises a ValueError from the minutes range check at lines 400–401:
+  - Line 400: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 401: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because you passed minutes = -15, the code treats that as an invalid minutes value and raises immediately. The later code that tries to adjust the sign of minutes (lines 406 and 408) is never reached because the early validation blocks it.
+
+Why it fails (root cause)
+- The method validates minutes before normalizing sign. It assumes minutes_offset is already non‑negative (0..59). That makes it impossible to represent offsets where the minutes part is given with a negative sign while the hour part is also negative (e.g., -2 hours and -15 minutes).
+- Concretely:
+  - You supplied hours = -2 and minutes = -15.
+  - The code checks minutes_offset < 0 at line 400 and raises at line 401.
+  - The later code that would combine hour and minute signs (lines 406 and 408) cannot run because the input never gets past the early validation.
+
+Where it occurs
+- Validation and error occur in for_offset_hours_minutes: the minutes range check at lines 400–401 causes the failure. The sign-normalization code appears later at lines 406 and 408 but is unreachable for negative minutes because of the earlier check.
+
+Suggested concrete fixes (step‑by‑step)
+Option A — normalize sign before validating minutes:
+1. At the start of for_offset_hours_minutes, determine the combined sign. For example:
+   - sign = -1 if hours < 0 or minutes < 0 else 1
+2. Use absolute minutes for range checking:
+   - if abs(minutes) < 0 or abs(minutes) > 59: raise ValueError(...)
+   (abs(minutes) < 0 is redundant, so just check if abs(minutes) > 59)
+3. Then apply the sign when computing total minutes (instead of rejecting negative minutes up front).
+4. Remove or adjust the later sign-handling code (lines 406–408) so it's consistent with the new normalization.
+
+Minimal patch sketch (conceptual):
+- Replace lines 400–401 with:
+    minutes_abs = abs(minutes_offset)
+    if minutes_abs > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Before computing offset, compute combined_minutes = abs(hours) * 60 + minutes_abs
+- Apply sign = -1 if hours < 0 or minutes_offset < 0 else 1
+- offset_minutes = sign * combined_minutes
+- Continue to multiply by MILLIS_PER_MINUTE and return.
+
+Option B — require minutes non‑negative in the API and document it
+1. Keep the existing check, but update the API docs and validation error message to tell callers that minutes must be 0..59 and that the sign must be given only on hours.
+2. Change the ValueError message to something explicit like "Minutes must be between 0 and 59; give the sign in hours only" so callers know to pass (-2, 15) instead of (-2, -15).
+
+Why the suggested fixes are concrete
+- Option A fixes the root cause by allowing callers to pass negative minutes and negative hours consistently, matching intuitive expectations. It modifies the validation order (normalize sign first).
+- Option B keeps current logic but removes ambiguity by making the allowed inputs explicit and changing the error message.
+
+Which lines to edit
+- Edit validation at lines 400–401.
+- If applying Option A, also adjust the sign-handling code at lines 406–408 to avoid double-signing or redundant logic.
+- Keep the offset calculation at line 409 and subsequent multiplier at line 410 (FieldUtils.safe_multiply(...)).
+
+Summary
+- The code fails because minutes are rejected as negative at the early range check (lines 400–401), so the later sign normalization (lines 406/408) never runs. Fix by normalizing sign before validation (or by documenting that minutes must be non‑negative and enforcing that in the error message).

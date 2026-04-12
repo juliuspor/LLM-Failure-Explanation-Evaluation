@@ -1,0 +1,73 @@
+What happened (root cause)
+- The failure happens inside MockCodeConsumer.add_number when it tries to shorten integer-valued floats by converting them to int.
+- Converting -0.0 to int produces 0, which drops the negative sign. So the code produced "0" instead of "-0.0".
+- In short: you lost the negative-zero sign by doing int(value) for values that are equal to an integer.
+
+Where it occurs (exact place)
+- In MockCodeConsumer.add_number, look for code like:
+  ```
+  def add_number(self, value):
+      if value.is_integer():
+          text = str(int(value))    # <-- this line strips -0.0 to 0
+      else:
+          text = str(value)
+      self._buffer.append(text)
+  ```
+  The problematic line is the int(value) conversion inside add_number (the if branch for integer-valued floats).
+
+Why that causes the test to fail
+- Python: int(-0.0) == 0, and str(0) == "0". The original float -0.0 prints as "-0.0" (str(-0.0) == "-0.0"). By converting to int you removed the negative sign before formatting, so get_code() returns "0" instead of "-0.0", causing the assertion to fail.
+
+Concrete fixes (choose one)
+1) Preserve sign for negative zero by not converting -0.0 to int
+   - Replace the int-conversion branch with a check for negative zero:
+     ```
+     import math
+     def add_number(self, value):
+         if value.is_integer() and not (value == 0.0 and math.copysign(1.0, value) < 0):
+             text = str(int(value))
+         else:
+             text = str(value)
+         self._buffer.append(text)
+     ```
+   - Steps:
+     1. import math at top of the file.
+     2. change add_number as above so negative zero goes to str(value) (preserves "-0.0").
+
+2) Always format with Python float string representation (keeps -0.0)
+   - Simpler: skip the int conversion entirely and use repr/str for all floats:
+     ```
+     def add_number(self, value):
+         text = repr(value)   # or str(value)
+         self._buffer.append(text)
+     ```
+   - Steps:
+     1. Remove the integer-valued branch.
+     2. Use repr(value) or str(value) so "-0.0" is kept.
+
+3) Explicitly preserve sign when integer formatting is needed
+   - If you must produce "0" for most integer floats but want "-0.0" for negative zero:
+     ```
+     import math
+     def add_number(self, value):
+         if value.is_integer():
+             if value == 0.0 and math.copysign(1.0, value) < 0:
+                 text = str(value)   # "-0.0"
+             else:
+                 text = str(int(value))  # "42", "0"
+         else:
+             text = str(value)
+         self._buffer.append(text)
+     ```
+   - Steps:
+     1. Add math.copysign check and handle zero specially.
+
+Which fix I recommend
+- Use option 1 or 2. If you don't need compact integer formatting, option 2 is the simplest and avoids edge cases. If you want compact integers but must preserve -0.0, use option 1 or 3.
+
+How to verify
+- Run your failing test:
+  cc = MockCodeConsumer(); cc.add_number(-0.0); result = cc.get_code(); assert result == '-0.0'
+- Also add tests for positive zero and other integer floats:
+  - cc.add_number(0.0) should yield "0.0" or "0" depending on chosen policy.
+  - cc.add_number(42.0) should yield "42" if you keep integer compaction.

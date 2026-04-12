@@ -1,0 +1,69 @@
+What goes wrong
+- Root cause: local variables start and/or min_start can be undefined when the code reaches the comparison at line 346, causing an exception (UnboundLocalError). There is also a logic bug at line 349 that always overwrites _min_start_index, undoing the conditional update done at line 347.
+- Where it happens:
+  - start is only assigned inside the block beginning at line 331:
+    - line 331: if isinstance(period, SimpleTimePeriod):
+    - line 332 and 335: start = ...
+    If period is not a SimpleTimePeriod, start is never set. Later (line 346) the code does if start < min_start: which will raise because start is undefined.
+  - min_start is only assigned inside the block beginning at line 341:
+    - line 341: min_start_period = ...
+    - line 342: if isinstance(min_start_period, SimpleTimePeriod):
+    - line 343 and 345: min_start = ...
+    If min_start_period is not a SimpleTimePeriod, min_start is never set. The code still does if start < min_start: and may raise because min_start is undefined.
+  - Even when both start and min_start are defined, line 349 unconditionally does self._min_start_index = index, so the conditional at line 346/347 ("if start < min_start: self._min_start_index = index") is meaningless: the index will always be set regardless of the comparison.
+
+Why this is the failure (concise)
+- If period is not a SimpleTimePeriod (or the stored min_start_period is not), trying to compare start and min_start raises an UnboundLocalError because those local variables don't exist.
+- Separately, the unconditional assignment at line 349 breaks the intended logic of only changing _min_start_index when the new start is earlier.
+
+How to fix it (concrete steps)
+1. Ensure start and min_start are always defined before comparison:
+   - Initialize them to a safe sentinel (e.g., None or a large integer) before the conditional blocks, or
+   - Collapse the logic so you only compare when both are set.
+   Example (pseudo-edit using your line numbers):
+   - Before line 331 add:
+       start = None
+       min_start = None
+   - Replace the comparison at line 346 with guarded logic:
+       if start is not None and min_start is not None:
+           if start < min_start:
+               self._min_start_index = index
+       elif start is not None and self._min_start_index < 0:
+           # no existing min, accept current
+           self._min_start_index = index
+
+2. Remove or move the unconditional assignment at line 349:
+   - Delete line 349 if the intention is to set _min_start_index only when the new period is earlier.
+   - If the intention is to always record the first valid period as the min, set _min_start_index only when it is currently -1 (i.e., in an else branch), not always.
+   Example:
+       if self._min_start_index >= 0:
+           ... compare and maybe update ...
+       else:
+           self._min_start_index = index
+
+3. Avoid duplicate assignments of start and min_start (lines 332/335 and 343/345):
+   - Pick the correct source (either get_start_millis() or int(get_start().timestamp() * 1000)) and remove the redundant line so you don't mix code paths.
+
+Minimal concrete replacement sketch
+- At start of the method (before line 331):
+    start = None
+    min_start = None
+- Replace the block from 331–349 with:
+    if isinstance(period, SimpleTimePeriod):
+        start = period.get_start_millis()  # or use timestamp() * 1000 but pick one
+    if self._min_start_index >= 0:
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        if isinstance(min_start_period, SimpleTimePeriod):
+            min_start = min_start_period.get_start_millis()
+    # Update index only when safe or when no previous min exists
+    if start is not None:
+        if min_start is None:                # no previous min, accept this one
+            self._min_start_index = index
+        elif start < min_start:              # earlier than current min
+            self._min_start_index = index
+
+Why this fully resolves the problem
+- start and min_start will always be defined (or guarded) before use, so you avoid UnboundLocalError.
+- The unconditional overwrite (line 349) is removed, so _min_start_index only changes according to the intended logic (first valid period or when a strictly earlier start is found).
+
+If you want, tell me which behavior you expect when period or min_start_period is not a SimpleTimePeriod (skip comparison, use other fields, or treat as invalid) and I will give a precise patch for those lines.

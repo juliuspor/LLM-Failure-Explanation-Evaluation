@@ -1,0 +1,63 @@
+What failed
+- Two bugs cause wrong offsets (and wrong rejections):
+  1. The minutes range check (line: `if minutes_offset < 0 or minutes_offset > 59:`) disallows negative minutes entirely, but the docstring allows minutes in -59..+59 (negative minutes are valid for hours == 0 and for negative hours).
+  2. The minutes arithmetic (lines in the try block)
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           minutes_offset = hours_in_minutes - minutes_offset
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+     treats the sign of minutes incorrectly when hours are negative and minutes are negative. It subtracts the negative minutes (turning them positive) and produces the wrong total minutes.
+
+Where it occurs (lines)
+- Minutes validation: the if that checks minutes_offset < 0 or minutes_offset > 59.
+- Combining hours and minutes: the try block that computes hours_in_minutes and then reassigns minutes_offset.
+
+Concrete example that shows the bug
+- Input (-2, -15) (doc says result should be -02:15 = -135 minutes).
+  - hours_in_minutes = -2 * 60 = -120
+  - Code branch: hours_in_minutes < 0 so it does minutes_offset = hours_in_minutes - minutes_offset
+  - With minutes_offset = -15 that becomes -120 - (-15) = -105 minutes → wrong (would be -01:45)
+- Also, the code currently rejects (0, -15) because of the minutes validation, even though doc says (0, -15) => -00:15 is allowed.
+
+Root causes, simply stated
+- The minutes range check is too strict (it shouldn’t forbid negative minutes).
+- The combine logic treats negative minute values incorrectly because it subtracts minutes_offset directly when hours are negative; subtracting a negative minute flips the sign and yields an incorrect total.
+- Reusing the minutes_offset variable to hold the combined total hides the logic error and makes it harder to reason about.
+
+Precise fixes (step-by-step)
+1. Fix minutes range check:
+   - Replace the line that requires minutes_offset >= 0 with a check allowing -59..+59:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce invalid sign combination that the doc forbids:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (the doc refuses positive hours with negative minutes).
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is not allowed")
+
+3. Compute the total minutes unambiguously (don’t overwrite minutes_offset):
+   - Use a separate variable total_minutes and follow these rules:
+     - If hours_offset > 0: total_minutes = hours_offset * 60 + abs(minutes_offset)
+     - If hours_offset < 0: total_minutes = hours_offset * 60 - abs(minutes_offset)
+     - If hours_offset == 0: total_minutes = minutes_offset
+   - Example code sketch:
+       hours_in_minutes = hours_offset * 60
+       if hours_offset > 0:
+           total_minutes = hours_in_minutes + abs(minutes_offset)
+       elif hours_offset < 0:
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+       else:
+           total_minutes = minutes_offset
+
+4. Then convert to milliseconds and call the existing millisecond factory:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   return cls.for_offset_millis(offset)
+
+Why this fixes the failure
+- Allowing minutes in [-59,59] matches the doc and permits (0,-15) and (negative hours, negative minutes) cases.
+- Using abs(minutes_offset) when combining with non-zero hours ensures the minutes component is always added to the magnitude of the hours in the intended direction:
+  - For positive hours we add minutes, for negative hours we subtract minutes magnitude, producing -02:15 for (-2,-15) or (-2,15).
+- Using a separate total_minutes variable removes the confusing reuse of minutes_offset and makes the logic explicit.
+
+That addresses the exact lines and the two root causes so the method will produce correct offsets for all combinations the doc allows.

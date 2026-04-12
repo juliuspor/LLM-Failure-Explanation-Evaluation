@@ -1,0 +1,62 @@
+What happened
+- The code crashes when search_list or replacement_list contains None because the function calls len(...) on those list entries before it ever checks for None.
+- Specifically, in the growth-estimation loop at lines 81–85 the code does:
+  greater = len(replacement_list[i]) - len(search_list[i])  (line 82)
+  That raises TypeError when either replacement_list[i] or search_list[i] is None, so the function crashes there.
+- Later in the code there are checks that try to ignore None entries (lines 102–105), but they run after the length-based calculation. So the safety checks come too late to prevent the earlier crash.
+
+Where it occurs (precise lines)
+- Line 52: search_length = len(search_list) — the outer loops assume both lists are indexed up to this length.
+- Lines 81–85: the loop that estimates how much larger the result buffer might grow:
+  - line 82: greater = len(replacement_list[i]) - len(search_list[i])  <-- crash point when either is None
+  - line 83–85: use greater to compute an increase value
+- Lines 102–105: later logic contains a guard that checks for None:
+  - ... or search_list[i] is None
+  - ... or len(search_list[i]) == 0
+  - ... or replacement_list[i] is None
+  But this guard is executed after the length calculation above, so it cannot prevent the earlier TypeError.
+
+Why this is the root cause
+- The code assumes entries are strings and calls len(...) on them. None has no length, so len(None) raises a TypeError. The later guard that would skip None entries exists but is executed after the offending len(...) call, therefore it does not prevent the crash.
+
+Concrete, step-by-step fixes (what to change and where)
+1. Skip None entries before any len(...) calls:
+   - In the loop at lines 81–85 (the increase-estimation loop) add an immediate check for None:
+     if search_list[i] is None or replacement_list[i] is None:
+         continue
+     Then only call len(...) after that check.
+   - This prevents the len(...) calls from seeing None.
+
+2. Make the guard order robust everywhere:
+   - Wherever you test len(search_list[i]) or len(replacement_list[i]) (including the scan loop and any other place), always check for None first. Example (replace the condition at lines 102–105 with):
+     if (
+         no_more_matches_for_repl_index[i]
+         or search_list[i] is None
+         or replacement_list[i] is None
+         or len(search_list[i]) == 0
+     ):
+         ...
+     The key: check "is None" before len(...).
+
+3. Ensure both lists are at least as long as search_length (or use min length):
+   - The code uses search_length = len(search_list) (line 52) and then indexes replacement_list[i] in several places (e.g., line 82). If replacement_list is shorter than search_list this will raise IndexError.
+   - Fix by deciding intended behavior:
+     - Option A: require replacement_list length == search_list length and validate this at function start, raising a clear ValueError if not.
+     - Option B: use max_index = min(len(search_list), len(replacement_list)) and iterate only to that length.
+
+4. (Optional) When appending replacements (line 92), ensure you don't append None as a replacement unless that is intended. If None should be ignored, append the original substring or skip that replacement.
+
+Minimal code example of the primary change (pseudo-patch)
+- At start of the increase loop (around line 81):
+  for i in range(search_length):
+      if search_list[i] is None or replacement_list[i] is None:
+          continue
+      greater = len(replacement_list[i]) - len(search_list[i])
+      if greater > 0:
+          increase += 3 * greater
+  ...
+- And change guards before any len(...) use as described in step 2.
+
+Summary
+- Crash cause: len(replacement_list[i]) or len(search_list[i]) is called while the element is None (lines 81–85).
+- Fix: check for None before calling len(...) (and validate list lengths), so the function ignores None replacements as intended.

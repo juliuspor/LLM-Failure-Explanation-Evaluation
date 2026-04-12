@@ -1,0 +1,61 @@
+What happened (where & why)
+- This error is raised exactly at the check on lines 346–351 inside the function that "copies the given list and adds the given element at the end" (the code you showed).
+- The variables involved are:
+  - array: the input list (may be None)
+  - element: the element to append (may be None)
+  - expected_type: the optional element type you passed in
+  - inferred_type: a type the function computed for the existing list elements
+- The guard that throws is:
+
+  if inferred_type == object and expected_type != object:
+      raise TypeError(
+          f"Cannot cast object list to {expected_type.__name__} list "
+          f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+          f"[Ljava.lang.{expected_type.__name__};)"
+      )
+
+- So the code fails because inferred_type == object (the list's elements were treated as generic object) while expected_type is a more specific type (for example, str). The function refuses to convert an object-typed list to a List[str] and raises the TypeError with the Java-style ClassCastException message.
+
+Why inferred_type became object
+- inferred_type is object when the function cannot determine a more specific common type for the existing elements. Typical causes:
+  - array is None and element is None, so there is no type information and the function falls back to object.
+  - array contains only None entries.
+  - array contains mixed types so the best common ancestor found was object.
+- With inferred_type == object the function assumes the underlying runtime list would be an Object[] (hence the "[Ljava.lang.Object;" message).
+
+Why expected_type caused the error
+- You supplied expected_type that is not object (for example expected_type = str).
+- The code treats this as an unsafe cast and raises the TypeError rather than attempting to coerce or accept the conversion.
+
+Concrete steps to reproduce
+1. Call the function with array = None, element = None, expected_type = str.
+   - inferred_type becomes object, expected_type != object → error.
+2. Or call with array = [None, None], element = "x", expected_type = str.
+   - array elements give inferred_type object → same error.
+
+Precise fixes (pick one that matches your intent)
+1. If you intended to allow an object-typed list to become a typed list when the new element matches expected_type:
+   - Before the raise, check whether the new element is not None and is an instance of expected_type. If so, allow creation of a new list of expected_type elements.
+   - Example change (conceptual):
+     if inferred_type == object and expected_type != object:
+         if element is not None and isinstance(element, expected_type):
+             inferred_type = expected_type   # allow conversion
+         else:
+             raise TypeError(...)
+
+2. If you want to allow None-only arrays to accept an expected_type:
+   - If array is None or all items are None, and element is not None, set inferred_type = type(element) (or expected_type if provided) instead of object.
+
+3. If you want to keep the strict behavior but avoid surprising errors:
+   - When calling the function, pass expected_type = object if you have unknown/mixed/None-only contents.
+   - Or supply a non-None element that matches expected_type so inferred_type becomes that specific type.
+
+4. If you want safer runtime behavior:
+   - Convert/copy existing elements to the expected_type with explicit checks and clear error messages rather than throwing a ClassCastException style message.
+   - Example sequence:
+     - If expected_type != object:
+         attempt to cast each non-None element: if any element fails isinstance check, raise TypeError listing which index failed.
+
+Summary
+- Root cause: inferred_type was object (no specific element type could be inferred) while expected_type was a specific type — the code explicitly refuses to "cast" an object list to a typed list and raises the TypeError at lines 346–351.
+- Fix: either change the function to accept/convert in the cases above, or call it with expected_type = object or with a non-None element that matches expected_type so inferred_type becomes that type.

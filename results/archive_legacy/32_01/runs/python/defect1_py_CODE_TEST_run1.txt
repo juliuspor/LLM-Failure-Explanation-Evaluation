@@ -1,0 +1,43 @@
+What happened (where)
+- The method raises ValueError at the minutes-range check:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  With the test inputs hours_offset = -2 and minutes_offset = -15, minutes_offset < 0 is true, so the method fails immediately and never returns a zone.
+
+Why it fails (root cause)
+- The code treats minutes_offset as if it must always be non‑negative (0..59), but the test (and the expected semantics) passes a negative minutes value for a negative hour offset. The validation rejects that negative minutes value instead of allowing it.
+- Additionally, even if you change the validation to allow negative minutes, the later arithmetic is confusing/buggy:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  If minutes_offset is negative, subtracting it (hours_in_minutes - minutes_offset) will add the magnitude again, producing the wrong total. The code mixes signs and mutates minutes_offset in place, which makes the logic error‑prone.
+
+Exactly what to change (concrete fixes, step by step)
+1. Decide a clear contract for minutes_offset:
+   - Option A (recommended): require minutes_offset to be a non‑negative magnitude 0..59 and let the sign come only from hours_offset. (This is the simplest.)
+   - Option B: allow minutes_offset to be negative only when hours_offset is negative (i.e., minutes signed), but validate abs(minutes) in 0..59.
+
+2. Implement one of these fixes and simplify the arithmetic. Example (Option A: minutes is magnitude):
+   - Change the minutes validation to require 0 <= minutes_offset <= 59 (keep as is).
+   - Compute total minutes with sign = sign(hours_offset) (or include hours sign for the whole offset):
+       total_minutes = hours_offset * 60 + (1 if hours_offset >= 0 else -1) * minutes_offset
+   - Or better, compute:
+       total_minutes = hours_offset * 60 + (hours_offset >= 0 ? minutes_offset : -minutes_offset)
+   - Multiply total_minutes by MILLIS_PER_MINUTE and return.
+
+3. If you prefer Option B (allow signed minutes), validate abs(minutes) and then compute:
+   - if hours_offset <= 0 and minutes_offset <= 0, total_minutes = hours_offset * 60 + minutes_offset
+   - if hours_offset >= 0 and minutes_offset >= 0, total_minutes = hours_offset * 60 + minutes_offset
+   - reject mixed-sign inputs (e.g., hours negative and minutes positive) or normalize them explicitly.
+
+Test suggestions
+- Add tests for:
+  - for_offset_hours_minutes(-2, 15) -> "-02:15" if you choose minutes as magnitude, or reject if you choose signed minutes.
+  - for_offset_hours_minutes(-2, -15) -> "-02:15" if you accept signed minutes.
+  - for_offset_hours_minutes(2, -15) -> should be rejected or normalized depending on chosen contract.
+  - boundary values: minutes = 0, 59; hours = -23..23.
+
+Summary
+- The immediate failing line is the minutes validation (if minutes_offset < 0 ...). The root cause is a mismatch between the method's validation and the intended input semantics (the test passes a negative minutes). Also the follow-up arithmetic that combines hours and minutes is fragile and miscomputes when minutes are negative. Fix by choosing a clear sign convention for minutes and computing total minutes with explicit, simple logic.

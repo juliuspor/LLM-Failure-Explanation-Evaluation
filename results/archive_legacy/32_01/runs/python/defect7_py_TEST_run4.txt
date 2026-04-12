@@ -1,0 +1,51 @@
+What failed
+- The call ClassUtils.to_class(['Test', None, 99.0]) raises an exception because to_class assumes every list element is a string and immediately calls string operations on each element. That breaks when the method sees None and 99.0.
+
+Where it happens (specifics)
+- In ClassUtils.to_class, inside the for loop that iterates over the input list (the loop starting at line 18 in the current file), the code calls element.strip() (or otherwise treats element as a string) to resolve a class name. The call element.strip() is at line 21 and is the immediate cause of the crash:
+  - When element is None, element.strip() raises AttributeError: 'NoneType' object has no attribute 'strip'.
+  - When element is 99.0, element.strip() raises AttributeError: 'float' object has no attribute 'strip'.
+
+Why that design causes the failure (root cause)
+- The method is written with the implicit precondition “every item is a str containing a class name.” That precondition is not checked or documented in the code path, so mixed-type lists cause attribute access on wrong types. The root cause is missing input validation and incorrect assumptions inside to_class that every input element supports string operations.
+
+Concrete evidence in the code path
+- to_class: line 18 — for element in elements:
+- to_class: line 21 — name = element.strip()  # fails when element is None or a float
+- to_class: line 23 — resolved = _resolve_name(name)  # never reached for the bad items
+
+Steps to fix (exact code changes and checks to add)
+1. Add explicit input validation at the start of to_class (insert at line 16, before the loop):
+   - If the method should accept string names only, raise a clear TypeError for non-strings:
+     if not all(isinstance(e, str) for e in elements):
+         bad = [type(e).__name__ for e in elements if not isinstance(e, str)]
+         raise TypeError(f"ClassUtils.to_class expects list[str]; found non-str types: {bad}")
+
+2. If the method should accept actual types (class objects), None, or other values, implement a conversion policy and handle each case. Replace the current loop body (lines 18–24) with:
+   for element in elements:
+       if isinstance(element, type):
+           result.append(element)
+           continue
+       if element is None:
+           result.append(type(None))
+           continue
+       if isinstance(element, str):
+           name = element.strip()
+           result.append(_resolve_name(name))
+           continue
+       raise TypeError(f"Unsupported element type {type(element).__name__} at to_class; expected str or type or None")
+
+3. If you want to support numeric inputs (like 99.0) mapped to float, add a rule (insert after the None check):
+       if isinstance(element, (float, int, bool)):
+           result.append(type(element))
+           continue
+
+4. Add unit tests covering:
+   - Valid strings -> resolved class
+   - Valid class objects passed through unchanged
+   - None -> type(None)
+   - Numeric values -> type(value) if you choose to support them
+   - Non-supported objects -> raises TypeError with readable message
+
+Summary
+- The immediate failure is an AttributeError from calling .strip() on None/float inside ClassUtils.to_class (lines shown above). Fix by adding explicit type checks or by enforcing input type (and raising a clear TypeError) and update the loop to handle types/None/numbers according to the intended API.

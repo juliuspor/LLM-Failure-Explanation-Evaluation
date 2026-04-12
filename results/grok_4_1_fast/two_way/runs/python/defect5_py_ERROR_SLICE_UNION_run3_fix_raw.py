@@ -1,0 +1,41 @@
+@staticmethod
+def add(array: Optional[List[T]], element: T, expected_type: Optional[Type] = None) -> List[T]:
+    """
+    Return a new list with `element` appended.
+
+    This is a functional-style helper: the input list is not modified. If
+    `array` is None, it is treated as an empty list.
+
+    Args:
+        array: Source list (may be None).
+        element: Element to append.
+        expected_type: Optional expected element type used to mirror Java-style
+            component type checks in this translated code.
+        
+    Returns:
+        A new list containing the original elements followed by `element`.
+        
+    Raises:
+        TypeError: If `expected_type` is provided and the operation simulates a
+            Java array cast failure.
+    """
+    if expected_type is not None:
+        if array is not None:
+            # Check if array elements match expected_type
+            for item in array:
+                if not isinstance(item, expected_type):
+                    raise TypeError(
+                        f"Cannot cast object list to {expected_type.__name__} list "
+                        f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+                        f"[Ljava.lang.{expected_type.__name__};)"
+                    )
+        if element is not None and not isinstance(element, expected_type):
+            raise TypeError(
+                f"Cannot cast object to {expected_type.__name__} "
+                f"(ClassCastException: Ljava.lang.Object; cannot be cast to "
+                f"Ljava.lang.{expected_type.__name__};)"
+            )
+    
+    new_list = ArrayUtils._copy_list_grow1(array, expected_type)
+    new_list[len(new_list) - 1] = element
+    return new_list

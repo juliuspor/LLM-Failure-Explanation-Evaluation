@@ -1,0 +1,49 @@
+What happened (what failed)
+- The method raised ValueError("Minutes out of range: -15") because the local variable minutes_offset had the value -15 when this check ran:
+  - Line 396–397: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why it happened (root cause)
+- The code intends to accept signed time-zone offsets (for example, -1 hour 15 minutes) but performs the minutes-range check before it normalizes or applies the sign to minutes. In your stack slice you can see the normalization logic that should handle negative offsets at lines 402 and 404:
+  - Line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - Line 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because the validation at lines 396–397 runs earlier, a parsed minutes value of -15 (or any negative minutes) triggers the error immediately and the later normalization code is never reached. In short: validation runs too early and rejects a negative minutes value that the later code expects to handle.
+
+Where it occurred (precise points)
+- The erroneous check is at line 396–397.
+- The normalization that would make a negative minutes valid is at lines 402 and 404.
+- The error thrown is ValueError("Minutes out of range: -15") at the validation lines.
+
+How to fix it (concrete steps)
+Choose one of these two concrete fixes.
+
+Fix A — Move the range check until after normalization
+1. Remove or comment out lines 396–397.
+2. After the code that adjusts minutes_offset (after line 404 and any other normalization), add a check that uses the absolute minutes range:
+   - if abs(minutes_offset) > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+3. Keep the rest of logic that computes offset using minutes_offset and multiplies to millis.
+
+Patch example:
+- Delete:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Add (after normalization):
+  - if abs(minutes_offset) > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Fix B — Validate parsed minutes sign separately and allow negative minutes when appropriate
+1. If you want to validate the raw parsed minutes component immediately, change the condition to allow negative values but still limit magnitude:
+   - Replace lines 396–397 with:
+     - if minutes_offset < -59 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Keep the normalization at lines 402/404 as-is.
+
+Which to choose
+- Fix A is safer if the intended semantics are "minutes is a magnitude 0–59 and sign is provided by the hours or a separate sign token", because it defers validation until the sign has been applied.
+- Fix B is appropriate if minutes_offset already encodes sign at parse time and you only need to constrain magnitude.
+
+How to test the fix (steps)
+1. Unit test parsing "-1:15" or equivalent input that produced minutes_offset == -15 and confirm it no longer throws and produces the expected offset (-75 minutes).
+2. Test boundary values:
+   - 0, 59, -59 (should be allowed if semantics permit)
+   - 60 and -60 (should be rejected)
+3. Run existing time-zone parsing tests to ensure no regressions.
+
+Summary
+- The check at lines 396–397 rejects negative minute values prematurely. The normalization logic at lines 402/404 that would make negative minutes valid is executed later, so the validation must be moved after normalization or changed to allow negative minutes magnitude. Make the change described and add tests for -15, -59, and 60 to confirm correct behavior.

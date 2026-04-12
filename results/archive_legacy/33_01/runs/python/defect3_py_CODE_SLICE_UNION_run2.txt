@@ -1,0 +1,47 @@
+What happens
+- The failure is an IndexError thrown from code_point_at when called with index >= len(code_units) (see to_utf16_code_units / code_point_at: the check at "if index < 0 or index >= len(code_units)" raises IndexError).
+- The call that triggers it is inside translate() in this for loop:
+
+      for pt in range(consumed):
+          pos += char_count(code_point_at(code_units, pos))
+
+Why it fails (root cause)
+- translate() treats consumed as "how many codepoints the translator handled" and then runs that many iterations.
+- Inside each iteration it calls code_point_at(code_units, pos) to find how many UTF‑16 code units (char_count) to advance pos.
+- If pos reaches length during the loop (for example because the translator consumed the last codepoint(s) or consumed is larger than the remaining codepoints), the next iteration will call code_point_at with index == length, which triggers the IndexError at the bounds check (line that raises IndexError).
+- In short: the code assumes there are still code units left for every iteration of the loop, but it does not check pos < length before calling code_point_at, so it can call code_point_at with an out-of-range index.
+
+Exactly where it occurs
+- The exception originates from code_point_at's bounds check (lines shown around 35–36 in your slice), because translate() calls code_point_at(...) without guarding pos against length inside the for pt in range(consumed) loop.
+
+Concrete fixes (step-by-step)
+1. Stop calling code_point_at when pos is already at or beyond length. Add a bounds check inside the loop. For example:
+
+      for pt in range(consumed):
+          if pos >= length:
+              break
+          cp = code_point_at(code_units, pos)
+          pos += char_count(cp)
+
+   This prevents calling code_point_at with an out-of-range index.
+
+2. Prefer a while loop that decrements consumed and checks pos, which is clearer:
+
+      remaining = consumed
+      while remaining > 0 and pos < length:
+          cp = code_point_at(code_units, pos)
+          pos += char_count(cp)
+          remaining -= 1
+
+3. Also validate the translator contract: make sure consumed is the number of codepoints consumed (not UTF‑16 code units). If consumed ever exceeds the number of remaining codepoints, either the translator is buggy or translate() must clamp or handle that case robustly (e.g. break and/or raise a clear error).
+
+Minimal change to make it safe
+- Insert the pos >= length guard inside the for loop (see fix #1). That prevents the IndexError and keeps existing semantics.
+
+Why this is the right fix
+- It directly prevents the out-of-range read that causes the exception.
+- It keeps the intended behavior of advancing pos by char_count for each codepoint the translator reported, but stops if there are no code units left.
+
+If you want, I can:
+- Show the exact patched translate() function with the guard applied, or
+- Add an assertion or explicit error when consumed is larger than remaining codepoints so future translator bugs are detected early.

@@ -1,0 +1,55 @@
+What happened
+- The code that combines hours and minutes reverses the minutes sign in some cases, producing an incorrect total minutes value and then failing validation.
+- From the slice you gave, the problematic lines are 402–404:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- For input (-2, -15) (hours_in_minutes = -120, minutes_offset = -15) the code on line 402 executes:
+  - -120 - (-15) = -105
+  - That produces total minutes = -105 (i.e. -1:45) instead of the expected -135 (i.e. -2:15).
+- Later the code sees this wrong minutes value (or its absolute magnitude) and raises ValueError("Minutes out of range: -15") because the combined value no longer matches the expected minute limits or because it confused the original minutes sign while validating.
+- In short: minutes get subtracted when they should have been added (or vice versa) depending on signs — the sign-handling logic is wrong.
+
+Why it fails (root cause)
+- The code uses minutes_offset both for the original minutes argument and for the combined result. It applies subtraction (hours_in_minutes - minutes_offset) unconditionally for one branch, which flips the sign for already-negative minute inputs.
+- The correct approach must treat the minutes with the same sign intent as the hour input (or at least consistently apply the minute sign). The current code only tests the hour sign and then subtracts or adds without considering the original minutes sign properly.
+
+Exactly where (reference names and lines)
+- Variable names: hours_in_minutes, minutes_offset
+- Lines: 402–404 are the combination logic that is wrong; validation happens afterwards (you showed offset = FieldUtils.safe_multiply(... ) on 405 and the ValueError on 407).
+- The error message ("Minutes out of range: -15") is triggered after the wrong combination/normalization of minutes and hours.
+
+Concrete fixes (step-by-step, exact changes)
+1. Do not reuse the input minutes variable for the combined minutes result. Keep the original minute parameter for validation and combine into a new variable (e.g., total_minutes).
+2. Normalize combination using the sign of hours (or explicitly apply the sign of hours to the minute magnitude). A correct and simple formula for the total minutes is:
+   - total_minutes = hours * 60 + (1 if hours >= 0 else -1) * abs(minutes)
+   This ensures the minutes extend the same signed magnitude as hours, matching the documented behavior where (-2, 15) and (-2, -15) both produce -02:15.
+3. Validate minute bounds on the original minutes parameter (abs(minutes) <= 59) before combining, not after a wrong combination that can create absurd minute values.
+
+Exact code replacement suggestion (replace the block at lines ~402–404)
+- Replace the incorrect branching with:
+
+    # validate minute magnitude first (use the original minutes parameter)
+    if abs(minutes_offset) > 59:
+        raise ValueError("Minutes out of range: %r" % minutes_offset)
+
+    # combine hours and minutes so minutes contribute to the same sign as hours
+    sign = -1 if hours < 0 else 1
+    total_minutes = hours_in_minutes + sign * abs(minutes_offset)
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Notes and rationale for this exact change
+- abs(minutes_offset) validation ensures inputs like -15 are valid (| -15 | = 15 <= 59).
+- sign * abs(minutes_offset) guarantees minutes always extend the hours magnitude in the same direction (so (-2, 15) -> -120 + (-15) = -135, and (-2, -15) -> -120 + (-15) = -135).
+- This removes the accidental sign-flip that produced -105 instead of -135, eliminating the puzzling ValueError about minutes being "out of range".
+
+Tests to add/verify after the fix
+- The existing tests you supplied already cover:
+  - (-2, 15) -> -02:15
+  - (-2, -15) -> -02:15
+  - (0, -15) -> -00:15
+  - (2, -15) raises ValueError
+  - out-of-range minute checks (abs(minutes) > 59)
+- Run the full suite; the failing case should now pass.
+
+If you want, I can produce a one-line patch with exact line numbers for your file, or show a minimal complete replacement of the function body that implements the fixes above.

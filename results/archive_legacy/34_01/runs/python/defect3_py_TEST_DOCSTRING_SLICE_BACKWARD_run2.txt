@@ -1,0 +1,49 @@
+What happened
+- The test calls escaper.translate_string('\U0001F630') (U+1F630, a non-BMP emoji).
+- Inside the implementation you convert the Python string into UTF-16 code units with to_utf16_code_units(s). That function builds code_units = [] (line 12) but later you perform an index check against len(code_units) (lines 35–36).
+- The code that supplies index is using the string index (an index into the original Python string), but the check compares that index against the number of UTF‑16 code units. For non‑BMP characters the string length (number of Python characters/code points) and the number of UTF‑16 code units differ (a single non‑BMP code point becomes two UTF‑16 code units). Because of that mismatch the condition if index < 0 or index >= len(code_units): triggers where it should not, and you get IndexError("String index out of range: {index}") at lines 35–36 instead of correctly handling the emoji.
+
+Why this is the root cause (plain language)
+- You have two different sequences you might be indexing: the original Python string s (one element per Unicode code point) and the UTF‑16 code_units list (one element per 16‑bit unit). They are not the same length when s contains characters outside the BMP. The code uses index meant for one sequence but checks it against the other, so valid string indices look invalid against code_units.
+
+Where it occurs (specific references)
+- Function: to_utf16_code_units(s: str) (line 10 in your slice).
+- Variable: code_units (line 12).
+- Failing condition / exception: lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+
+Concrete fixes (steps you can apply)
+1. Decide what the index is supposed to refer to:
+   - If index is a position in the original input string s, then compare against len(s), not len(code_units).
+   - If index is supposed to be a position in the UTF‑16 code_units list, make sure callers pass UTF‑16 indices (and document that).
+
+2. Apply one of these specific changes:
+   - If index is for the original string:
+     Replace the check at lines 35–36 with:
+       if index < 0 or index >= len(s):
+           raise IndexError(f"String index out of range: {index}")
+     and keep using s for bounds checks and any subsequent logic that expects string-position semantics.
+   - If index is for code_units:
+     Ensure the code that creates or iterates indices does so over code_units (not over s). For example, convert callers that loop over range(len(s)) to instead build code_units first and then loop over range(len(code_units)).
+
+3. Ensure to_utf16_code_units itself builds UTF‑16 correctly:
+   - For each character ch in s:
+       cp = ord(ch)
+       if cp <= 0xFFFF:
+           code_units.append(cp)
+       else:
+           # produce surrogate pair
+           cp -= 0x10000
+           high = 0xD800 + (cp >> 10)
+           low  = 0xDC00 + (cp & 0x3FF)
+           code_units.extend([high, low])
+   - This makes code_units have the correct length and content for UTF‑16.
+
+4. Add tests that include both BMP and non‑BMP characters:
+   - e.g. '\u0041' (A) and '\U0001F630' (emoji). Verify both indexing and translation behavior.
+
+Why this will fix your failing test
+- The failing test uses a non‑BMP code point, so the length mismatch is what triggered the exception. Fixing the bounds check (or the indexing semantics) removes the spurious IndexError and lets translate_string return the correct translation for '\U0001F630', so the assertion result == '\U0001F630' will pass.
+
+If you want, paste the body of translate_string and the caller sites that use index and I will give the exact minimal patch.

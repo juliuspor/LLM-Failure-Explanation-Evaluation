@@ -1,0 +1,52 @@
+What happened (what failed)
+- The test run raised an IndexError from the small helper that gets a character from a string. The failure comes from the code shown in SLICE_UNION at lines 30–32:
+  - Line 30 checks the index and raises IndexError if index < 0 or index >= len(s)
+  - Line 32 then executes return s[index]
+- That IndexError is triggered because NumberUtils.create_number (the caller) calls that character-access helper with an index that is out of range for the string passed in. In short: the code tried to read s[index] where index is not a valid position in s.
+
+Where it happened (file / call chain / variables)
+- File: the string-access helper (the snippet labeled SLICE_UNION) at lines 30–32.
+- Caller: NumberUtils.create_number (the test invokes NumberUtils.create_number("123") and earlier loops call NumberUtils.create_number(s) for bad_inputs like "l", "L", "f", "F", "junk", "bobL").
+- Variables involved:
+  - s — the input string passed into the helper.
+  - index — the integer index passed by create_number.
+- Likely scenario: create_number computes an index based on s (for example to examine the last character or a character beyond the last), then calls the helper with index == len(s) or otherwise out-of-range, causing the helper to raise IndexError.
+
+Why that is the root cause (clear, non-jargon)
+- The helper is intended to return s[index] but defensively raises IndexError if the index is invalid. The real bug is that create_number is calling that helper with an invalid index instead of ensuring the index is within 0..len(s)-1. The test expected NumberUtils.create_number to raise ValueError (a parsing error) for bad inputs; instead the helper raised IndexError earlier, so the code fails the test.
+
+Concrete fixes (step-by-step)
+Pick one of these two fixes (prefer the first: fix the caller):
+
+1) Fix create_number so it never calls the helper with an invalid index
+   - Open hit10_numberutils.py and find where you compute and pass index into the string-access helper (the call that reaches SLICE_UNION).
+   - Before calling, ensure the index is in range:
+     - if index < 0 or index >= len(s): do not call the helper; handle this as a parse error (raise ValueError) or branch appropriately.
+   - Example change pattern:
+     - Replace:
+         ch = slice_helper(s, index)
+       With:
+         if index < 0 or index >= len(s):
+             raise ValueError(f"Invalid number format: index {index} out of range for input {s!r}")
+         ch = slice_helper(s, index)
+   - Run tests: python -m unittest. This ensures NumberUtils.create_number raises ValueError for malformed inputs instead of letting a lower-level IndexError escape.
+
+2) (Alternative) Make the helper tolerate out-of-range requests and return a sentinel, letting create_number decide
+   - Modify the helper (SLICE_UNION) so it does not raise IndexError but returns None (or a special value) when index is out of bounds:
+       if index < 0 or index >= len(s):
+           return None
+       return s[index]
+   - Then update create_number to treat None from the helper as a parse error and raise ValueError.
+   - This hides indexing errors inside the helper and centralizes parsing logic in create_number.
+
+Why you should prefer option 1
+- The real parsing rule and error type belong in NumberUtils.create_number. Let create_number decide whether an out-of-range index is a parse failure (ValueError) and produce the error the tests expect. Hiding the failure or converting it silently in the helper may mask other logic mistakes.
+
+How to verify
+- Run the provided tests with pytest or unittest:
+    python -m unittest path.to.test_module
+- Confirm:
+  - For bad_inputs = ["l","L","f","F","junk","bobL"] the test expects ValueError — ensure create_number now raises ValueError.
+  - For "123" ensure create_number returns 123.
+
+If you paste the portion of hit10_numberutils.py where you compute index and call the string-access helper, I can show the exact minimal edit to make create_number behave correctly.

@@ -1,0 +1,59 @@
+What happened (root cause)
+- At line 176 you test "if x == int(x)" to detect whole-number floats. For x == -0.0 this is True because -0.0 == 0.0.
+- At line 177 you do "value = int(x)". int(-0.0) is 0 and this conversion discards the negative-zero sign.
+- Later you call self.add(str(value)) at line 192, which adds "0" (no sign) to whatever output the test checks.
+- The test expected the preserved negative zero representation "-0.0", but your code produced "0", so the assertion failed.
+
+Where it occurs (exact lines)
+- The problematic branch starts at line 176:
+  - 176: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  - 177:     value = int(x)        <-- loses sign for -0.0
+  - 192:     self.add(str(value)) <-- produces "0"
+  - 194: self.add(str(x)) may add "-0.0" but the earlier "0" is already added and is what the test saw
+
+Why this happens (brief technical reason)
+- In IEEE floats, -0.0 compares equal to +0.0, and converting to int yields 0 with no sign. Your branch assumes converting to int is safe for all equalities, but that discards the distinct -0.0 sign.
+
+Concrete fixes (exact steps and code to change)
+Option A — detect negative zero and preserve it (recommended)
+1. Before converting, detect negative zero with math.copysign or 1.0/x:
+   - negative_zero = (x == 0.0 and math.copysign(1.0, x) < 0.0)
+2. If negative_zero is True, avoid using value for string output or explicitly emit "-0.0" (or the representation you want).
+3. Example patch (replace lines 176–178 and adjust uses of value):
+
+    import math
+    ...
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        negative_zero = (x == 0.0 and math.copysign(1.0, x) < 0.0)
+        value = int(x)
+        mantissa = value
+        if negative_zero:
+            # preserve negative zero when emitting integer-equivalent zero
+            self.add("-0.0")    # or self.add("-0") depending on required format
+            continue            # skip the rest of the integer branch if appropriate
+
+Option B — avoid using int() for zero cases
+1. Check for zero first:
+    if x == 0.0:
+        # preserve sign of zero
+        if math.copysign(1.0, x) < 0.0:
+            self.add("-0.0")
+        else:
+            self.add("0.0")
+        continue
+2. Then keep the rest of the integer branch for non-zero integers.
+
+Option C — when adding str(value), replace it with a sign-aware string:
+1. Replace self.add(str(value)) with code that, for value == 0 and x < 0.0, uses "-0" (or "-0.0"):
+    if value == 0 and math.copysign(1.0, x) < 0.0:
+        self.add("-0")
+    else:
+        self.add(str(value))
+
+Which to choose
+- If your output must preserve IEEE sign for zero (the test expects "-0.0"), use Option A or B to handle zero explicitly. Option C is a smaller patch if you only need to fix the integer branch.
+
+Why this explanation is complete
+- Identifies the exact conditional and conversion (lines 176–177, 192)
+- Explains how int(-0.0) -> 0 removes the sign
+- Gives explicit code-level steps and exact checks (math.copysign or x == 0.0) you can add to fix the behavior so the test expecting -0.0 will pass.

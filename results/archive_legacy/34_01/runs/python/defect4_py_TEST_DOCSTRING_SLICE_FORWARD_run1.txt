@@ -1,0 +1,53 @@
+What happened
+- Your test inserts periods out of chronological order into the series:
+  1) SimpleTimePeriod(0,100) value 1.0
+  2) SimpleTimePeriod(100,200) value 2.0
+  3) SimpleTimePeriod(0,50) value 3.0   <-- inserted before some existing items
+  4) SimpleTimePeriod(50,100) value 4.0  <-- inserted before some existing items
+- The series implementation keeps track of two index variables (commonly named something like self.max_middle_index and self.min_middle_index) to remember which element currently has the maximum / minimum middle-time.
+- The failure happens because when you insert a period at an index that is before an already recorded max/min index, the code that updates indexes does not shift the stored index values. In short: stored indices are not adjusted for list insertions.
+
+Why it fails (root cause)
+- The updater method (called from TimePeriodValues.add — e.g. _update_min_max_indices or update_index_values) is treating the argument index as "the last element's index" or is only comparing values, but it never updates existing self.max_middle_index / self.min_middle_index to account for an insert that shifts elements right.
+- Example from your sequence:
+  - After step 2, self.max_middle_index == 1 (the period at index 1 has the largest middle 150).
+  - Step 3 inserts a new element at index 0 (shifting the existing indices: old 0->1, old 1->2).
+  - The code uses the incoming index (0) to test the new element against the stored max index, but never increments the stored index to account for the shift. So self.max_middle_index remains 1 but it now refers to the wrong element (the element that used to be at index 0), or the code may compare against wrong elements and eventually set a wrong value.
+- The symptom you see (assert s.get_max_middle_index() == 1 fails) is exactly what happens when stored indices are stale after insertions: the recorded max index no longer points to the element with the actual maximum middle.
+
+Where it occurs in the code
+- In TimePeriodValues.add(...) where you insert a new period and call the index-update helper.
+- In the method that updates min/max indexes (commonly named _update_min_max_indices, update_index_values, update_bounds_index, etc.). Look for code that sets or compares self.max_middle_index and self.min_middle_index and that takes the insertion index as an argument.
+- The faulty logic is the part that compares middle values without adjusting existing indices, or that assumes append-only behavior.
+
+How to fix (clear step-by-step)
+1. Option A — Adjust stored indices on insert:
+   - Before you compare middle values, if you insert at position new_index then do:
+     - if self.max_middle_index is not None and self.max_middle_index >= new_index:
+         self.max_middle_index += 1
+     - if self.min_middle_index is not None and self.min_middle_index >= new_index:
+         self.min_middle_index += 1
+   - After shifting stored indexes, proceed with the usual comparisons to update max/min based on middle values of the new element.
+   - This keeps existing indices correctly pointing to the same elements after the insertion shifts the list.
+
+2. Option B — Recompute max/min indices after the insertion (safer, simpler):
+   - After inserting the new period, scan the list once and recompute:
+     - find the index with the largest middle-time => set self.max_middle_index
+     - find the index with the smallest middle-time => set self.min_middle_index
+   - This avoids any index-shift bookkeeping and is robust for any insertion order. Do this if the list size is small-to-moderate or correctness is more important than micro-optimizing for speed.
+
+3. Tests to add
+   - Add tests that insert elements at the beginning, middle and end and assert get_max_middle_index and get_min_middle_index remain correct.
+   - Add a test that inserts elements with identical middle-times to specify tie-breaking behavior.
+
+Which fix to pick
+- If your code currently assumes mostly appends and wants minimal change, use Option A.
+- If correctness and simplicity are priorities (and performance is acceptable), use Option B.
+
+Concrete variables/method names to inspect
+- TimePeriodValues.add(...) — the call site that inserts and calls the index updater.
+- self.max_middle_index and self.min_middle_index — the stored indices that become stale.
+- The index-update helper (look for names like _update_min_max_indices, update_index_values, update_bounds_index, update_bounds, etc.) — fix the logic here to either shift indices on insert or recompute them.
+
+Summary
+The failure is not a math error; it's an index bookkeeping error. Inserting a period before existing entries shifts list positions, but the code that updates stored max/min indices does not account for that shift. Either shift the stored indices when inserting, or recompute the indices after insertion.

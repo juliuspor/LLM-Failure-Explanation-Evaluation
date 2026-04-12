@@ -1,0 +1,48 @@
+What happened (root cause)
+- The code allows a search pattern of length 0 (an empty string) to be chosen as a match.
+- At lines 108–112 you call temp_index = text.find(search_list[i], start) and then set replace_index = i and text_index = temp_index when a match is found.
+- At line 94 you advance start with start = text_index + len(search_list[replace_index]).
+- If search_list[replace_index] == "" (length 0) then len(...) == 0, so start does not move forward. The same empty-string match can be found again at the same start on the next iteration.
+- That produces an infinite loop (you keep appending replacement_list[replace_index] at line 92 while start never advances) and eventually the process fails (memory/execution exhaustion).
+
+Where it occurs in the code
+- Detection: lines 108–112 (finding the next match and selecting replace_index).
+- Use of the match: line 92 (parts.append(replacement_list[replace_index])) and line 94 (start update).
+- Failure cause: len(search_list[replace_index]) == 0 makes the start update a no-op.
+
+Why the existing checks don't prevent it
+- The code contains a check list at lines 102–105 intended to skip invalid patterns:
+    no_more_matches_for_repl_index[i]
+    or search_list[i] is None
+    or len(search_list[i]) == 0
+    or replacement_list[i] is None
+  But either:
+  - That guard is not being applied before the find() call (so empty strings still enter the search), or
+  - The guard is inside a different block/loop and does not prevent the zero-length item from being selected, or
+  - The input actually contains a non-None non-empty value that still yields len(...) == 0 only at runtime (unlikely).
+  In short: the code ends up doing text.find("", start) and treating that as a valid match.
+
+Concrete fixes (clear steps)
+1. Reject empty or None search patterns up front
+   - Before the main loop, validate search_list and raise an exception (or drop entries) for any item where search_list[i] is None or len(search_list[i]) == 0.
+   - Example step: build new lists filtering out such indices, or raise ValueError("search_list entries must be non-empty strings").
+
+2. Or skip zero-length matches inside the matching loop
+   - At the top of the loop that tries matches (before calling text.find), add:
+       if search_list[i] is None or len(search_list[i]) == 0:
+           no_more_matches_for_repl_index[i] = True
+           continue
+   - This guarantees you never call text.find with an empty needle and never select replace_index for a zero-length match.
+
+3. As a defensive fallback, ensure progress if a zero-length match somehow slips through
+   - After computing start = text_index + len(...), make sure start increases at least by 1:
+       step = len(search_list[replace_index]) if len(search_list[replace_index]) > 0 else 1
+       start = text_index + step
+   - This prevents an infinite loop but is a workaround; better to reject empty search items.
+
+Which fix to pick
+- Best: use step 1 (validate input) — it expresses the function's precondition directly and avoids surprising behavior.
+- If backward compatibility requires allowing empty patterns, use step 3 as a last-resort safety net.
+
+Summary in one sentence
+The code fails because a zero-length search pattern (empty string) can be found at the same start position repeatedly, so start never advances (line 94 uses len(...) == 0) and the loop appends replacements forever (line 92); prevent or skip empty search_list entries or ensure start always advances.

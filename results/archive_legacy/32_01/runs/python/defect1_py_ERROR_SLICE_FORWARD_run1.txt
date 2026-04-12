@@ -1,0 +1,37 @@
+What happened (where it failed)
+- The ValueError "Minutes out of range: -15" is raised because the code received minutes = -15 and some validation elsewhere rejects that value as out of range.
+- From the slice you gave, the problematic lines are in the offset computation before the final return at line 412:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - line 412: return cls.for_offset_millis(offset)
+- The root cause is that minutes is negative (-15) when the code expects minutes to be a non‑negative value between 0 and 59 (or expects minutes and hours to share the same sign). That negative minutes value propagates into minutes_offset and eventually triggers the "Minutes out of range" validation before or during the offset construction.
+
+Why this is the real problem (concise)
+- The code assumes minutes are in the canonical range 0..59 and that the sign of the offset comes from the hours (or from an explicit sign variable). Negative minutes break that assumption, so the code builds an incorrect minutes_offset and validation throws the ValueError.
+- In short: input includes a negative minutes value, but the code does not normalize or validate minutes before using them in the arithmetic at lines 406–409, so validation later fails.
+
+Exactly where to change it and how (step‑by‑step fixes)
+1. Validate minutes early (before line 406):
+   - Add a check that rejects absolute minutes >= 60.
+   - Decide whether negative minutes are allowed. If you do not allow them, raise a clear error immediately:
+     - if minutes < 0 or minutes >= 60: raise ValueError(f"Minutes must be in 0..59: {minutes}")
+2. Or normalize minutes if negative minutes are intended to be allowed:
+   - Extract the overall sign first (e.g. sign = -1 if hours < 0 or an explicit sign token indicates negative).
+   - Use abs(minutes) for magnitude, ensure 0 <= abs(minutes) < 60.
+   - Combine sign and magnitude into minutes_offset: minutes_offset = sign * (abs(hours_in_minutes) + abs(minutes))
+   - Then compute offset as at line 409 and call for_offset_millis.
+3. Make the error message explicit and local to the validation (so it’s clear which input field was bad and where):
+   - Raise ValueError(f"Minutes out of range: {minutes} (must be 0..59 or normalized to same sign as hours)") rather than letting a downstream routine raise a less informative error.
+
+Concrete example of correction points
+- Before line 406 add:
+  - if not (0 <= abs(minutes) < 60): raise ValueError(f"Minutes out of range: {minutes}")
+  - sign = -1 if hours < 0 or explicit_sign == '-' else 1
+  - minutes_offset = sign * (abs(hours) * 60 + abs(minutes))
+- Then keep line 409 (offset computation) and line 412 (return).
+
+Why this fix resolves the error
+- Ensuring minutes are in 0..59 (and applying the correct sign) prevents a negative minutes value from reaching the offset arithmetic and validation. That removes the condition that triggered "Minutes out of range: -15" and yields a correct, well‑formed offset passed to for_offset_millis.
+
+If you want, paste the function signature and the surrounding 10–15 lines and I’ll show the exact lines to insert or replace.

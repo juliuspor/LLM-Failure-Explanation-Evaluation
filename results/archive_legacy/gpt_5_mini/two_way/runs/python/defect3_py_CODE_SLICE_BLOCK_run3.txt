@@ -1,0 +1,48 @@
+What happened (what failed)
+- The code raises IndexError: "String index out of range" from code_point_at(...). That exception is raised at the lines shown in the slice block (lines 35–36), i.e. inside the call to code_point_at(code_units, pos).
+
+Why it happened (root cause)
+- translate_codepoint(...) returns the number of UTF-16 code units it consumed (variable consumed).
+- The implementation then does:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  That loop calls code_point_at(code_units, pos) while incrementing pos inside the loop.
+- If consumed is 1 or 2 and pos is near the end of code_units, the call code_point_at(code_units, pos) can be invoked with pos == len(code_units) or pos > len(code_units)-1. code_point_at checks index bounds and raises IndexError when index < 0 or index >= len(code_units) (lines 35–36), so the call fails.
+- In short: you're advancing pos by reading further code points inside the loop instead of simply advancing by the number of code units that translate_codepoint already told you it consumed. That makes code_point_at run off the end of the code_units array and trigger the index check.
+
+Where it occurs in your code
+- The crash originates at the code_point_at call inside the for loop:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  This loop is immediately after the branch where consumed != 0. The IndexError is thrown by code_point_at at lines 35–36 in your slice block.
+
+How to fix it (concrete steps)
+You have two safe options; pick the one that matches the intended contract of translate_codepoint:
+
+1) Use consumed directly to advance pos (recommended if consumed is the number of UTF-16 code units consumed):
+- Replace the entire for loop with:
+    pos += consumed
+  Rationale: translate_codepoint already tells you how many code units it consumed; you don't need to re-read code_point_at and char_count and risk stepping beyond the buffer.
+
+2) If translate_codepoint's contract means "it consumed N code points" (not code units), then make the loop advance by one code unit at a time without calling code_point_at at the current pos, or check bounds before calling:
+- Safe one-unit advance:
+    for _ in range(consumed):
+        pos += 1
+  or, if you must compute char_count of the code point at pos, ensure you check bounds before calling:
+    for _ in range(consumed):
+        if pos >= length:
+            break  # or handle as an error
+        pos += char_count(code_point_at(code_units, pos))
+  But this is more complex and unnecessary if consumed already equals code units consumed.
+
+Why those fixes work
+- They stop calling code_point_at with pos values that are out of bounds. Using consumed directly is simplest and matches the comment in your code ("they have to understand codepoints and they just took care of a surrogate pair").
+
+Summary (exact change I recommend)
+- Replace
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+  with
+    pos += consumed
+
+This removes the out-of-range calls to code_point_at and fixes the IndexError at lines 35–36.

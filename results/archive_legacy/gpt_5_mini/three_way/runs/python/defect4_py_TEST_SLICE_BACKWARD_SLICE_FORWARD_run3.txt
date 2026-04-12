@@ -1,0 +1,51 @@
+What happened (root cause)
+
+- The bug is in TimePeriodValues._update_bounds. The method both compares and updates "min/max" index fields, but it contains a stray unconditional assignment that overwrites the result of the comparison logic.
+- In the code slice you provided, look at these lines inside _update_bounds:
+
+  - Line 346: if start < min_start:
+  - Line 347:     self._min_start_index = index
+  - Line 349: self._min_start_index = index
+
+  The assignment at line 349 executes every time _update_bounds runs and therefore always sets _min_start_index to the most recently added index, regardless of the comparison that should determine the true minimum start. That explains tests like test_min_start_index failing: the "min" index is overwritten with the last added item.
+
+Why this causes the observed failures
+
+- The intended flow: compute start (or middle/end), compare it with the currently saved min/max (min_start, max_middle, etc.), and only update the corresponding index (e.g. _min_start_index, _max_middle_index) when the new value is more extreme.
+- The unconditional assignment at line 349 breaks that logic. Even if the comparison on line 346 correctly detects that the new start is not smaller, line 349 still sets _min_start_index to index, so the saved index becomes the last one added. This results in wrong indices returned by get_min_start_index(), get_max_middle_index(), etc.
+- The unit test you included that triggered a "max_middle_index" error is another manifestation of the same class of bug — wrong variable usage / incorrect update logic in _update_bounds (the same pattern appears in other blocks such as max_middle, max_end, min_end). The root pattern is: either comparing/updating the wrong variable, or performing an unconditional assignment that nullifies the comparison.
+
+Exactly where to look (lines & names)
+
+- Method: TimePeriodValues._update_bounds
+- Relevant fields: self._min_start_index (and similar: _max_middle_index, _min_end_index, _max_start_index, ...)
+- Problem lines in the provided slice:
+  - 346: if start < min_start:
+  - 347:     self._min_start_index = index
+  - 349: self._min_start_index = index  <- this line overwrites the correct logic
+
+How to fix it (concrete steps)
+
+1. Remove the stray unconditional assignment(s).
+   - Delete the line 349 assignment (self._min_start_index = index) so the index is only set inside the branch that proves the new value is more extreme.
+
+2. Audit the entire _update_bounds implementation for the same pattern.
+   - For each measured property (min_start, max_start, min_end, max_end, min_middle, max_middle) ensure:
+     - You compute the new value (start, end, middle) correctly for both SimpleTimePeriod and generic TimePeriod.
+     - You compare the new value to the saved extreme (min_start, max_middle, etc.).
+     - You only assign the corresponding index field (e.g. self._max_middle_index = index) inside the branch that determines the new item is more extreme.
+     - You do not accidentally compare/update the wrong variables (e.g. use max_middle when you meant max_middle_index).
+
+3. Add unit tests that exercise the "else" branches (you already have tests with MockTimePeriod — keep them). Add tests that append items in different orders to catch off-by-last assignment bugs.
+
+4. After fixing, run the provided test suite. Specifically verify:
+   - get_min_start_index() returns the index of the data item with the smallest start, not the last-added index.
+   - get_max_middle_index() returns the index of the item with the largest middle, not a wrong index due to overwriting.
+
+Why the test you showed failed (concise)
+
+- Because _min_start_index (and likely other index fields) was being overwritten unconditionally (line 349), so the index returned was the last item added rather than the true min or max index. The same code pattern elsewhere (wrong variable use / unconditional assignment) produced the bad max_middle_index observed.
+
+If you want, I can:
+- Produce the corrected _update_bounds code for you (showing the exact deletions/changes), or
+- Run through the rest of _update_bounds and point to any other lines that mirror the same bug.

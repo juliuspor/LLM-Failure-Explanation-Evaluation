@@ -1,0 +1,45 @@
+What happened (where it fails)
+- At lines 402–404 the code combines the hours and minutes parts into a single minutes total by reusing minutes_offset:
+  - line 402: minutes_offset = hours_in_minutes - minutes_offset
+  - line 404: minutes_offset = hours_in_minutes + minutes_offset
+- The code does not choose which of those two assignments to run based on the sign of the hours. That means sometimes the wrong arithmetic is used (adding when it should subtract, or vice‑versa), producing an incorrect total minute offset and then later causing the function to hit the "Offset is too large" error at line 407 (or to return the wrong offset at line 408).
+- Root cause: minutes_offset is being reused for two different meanings (the minute component initially, and then the combined total). The logic that should pick between "hours_in_minutes + minutes" and "hours_in_minutes - minutes" is missing or incorrect, so negative hour offsets (or positive ones) can be combined incorrectly.
+
+Why that causes the failure (concrete example)
+- Suppose hours = -5, minutes = 30:
+  - hours_in_minutes = -300
+  - correct total minutes = -300 - 30 = -330
+  - if the code instead does hours_in_minutes + minutes (i.e. -300 + 30 = -270), the offset sign and magnitude are wrong and later validation can fail or return the wrong timezone offset.
+- Because the code reuses minutes_offset for both the minute component and the total, the intended sign logic must run before the reassignment. If it doesn't, you get the wrong numeric result.
+
+Exact place to change and a clear fix
+Replace the ambiguous/reused logic at lines 402–404 with a clear sign-based combination and avoid reusing minutes_offset for two meanings.
+
+Concretely:
+- Before combining, compute hours_in_minutes = hours * 60 (this is already present).
+- Use the sign of hours_in_minutes (or of hours) to choose how to combine the minute component.
+
+Replace the current lines 402–404 with:
+
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset   # e.g. -300 - 30 = -330
+    else:
+        total_minutes = hours_in_minutes + minutes_offset   # e.g.  +300 + 30 = +330
+
+Then use total_minutes for the rest of the code (line 405 onward), e.g.
+
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Also:
+- Rename variables so they are not reused: keep minutes_offset as the minute component (0..59) and use total_minutes (or minutes_total) for the combined value. That makes the intent obvious and prevents churn errors.
+
+Suggested additional safety checks
+1. Ensure minutes_offset is non‑negative before combining (you already have 396–397 checks).
+2. Add unit tests that exercise:
+   - positive hours, positive minutes (e.g. +5:30)
+   - negative hours, positive minutes (e.g. -5:30)
+   - boundary values (+14:00, -12:00 if those are domain limits)
+3. If hours_in_minutes can be negative zero (unlikely) or other edge cases, assert correctness explicitly.
+
+Summary (short)
+- The code fails because it mixes the minute component and the combined minute total without properly choosing add vs subtract based on the hour sign (lines 402–404). Fix by computing total_minutes with a sign check (use hours_in_minutes < 0), stop reusing minutes_offset for two meanings, and then multiply total_minutes at line 405.

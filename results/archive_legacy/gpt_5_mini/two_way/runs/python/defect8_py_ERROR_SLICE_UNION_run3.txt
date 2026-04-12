@@ -1,0 +1,42 @@
+What happened (where and why)
+- The input locale string "fr__POSIX" hits to_locale at the branch that assumes a 2-letter language followed by either "_XX" (region) or "_XX_..." (region + variant).
+- At line 237 the code does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+- For "fr__POSIX" the characters are:
+  - locale_str[0:2] = "fr"
+  - locale_str[2] = '_' (first underscore)
+  - locale_str[3] = '_' (second underscore)
+  - locale_str[4] = 'P'
+- The check at line 239 is:
+  - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError(...)
+- Because ch3 is '_' (not an uppercase letter), that condition is true and the method raises ValueError("Invalid locale format: fr__POSIX") — exactly the observed error.
+
+Root cause
+- The code assumes that when there is a separator after the language (locale_str[2] == '_') there must always be a 2-letter region code at positions 3 and 4. It does not handle the valid case where the region is empty and there are two underscores in a row (language + empty region + variant), e.g. "fr__POSIX". That makes ch3 == '_' and triggers the failure.
+
+How to fix it (concrete steps)
+1. At the place where you parse after the language (around lines 237–247), first check for the double-underscore case (empty region + variant).
+2. If locale_str[3] == '_' treat this as "no region" and set variant = locale_str[4:].
+3. Otherwise validate ch3 and ch4 as region letters and continue with the existing behavior.
+
+Example patch (replace the block at lines 237–247 with this logic):
+- Ensure locale_str[2] == '_' before this block (existing code likely already assumes that).
+- Then:
+  - if locale_str[3] == '_':
+      - if len(locale_str) <= 4: raise ValueError(...)  # require non-empty variant
+      - return Locale(locale_str[0:2], None, locale_str[4:])
+  - else:
+      - ch3 = locale_str[3]; ch4 = locale_str[4]
+      - if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+          - raise ValueError(...)
+      - if len(locale_str) == 5:
+          - return Locale(locale_str[0:2], locale_str[3:5])
+      - if locale_str[5] != '_':
+          - raise ValueError(...)
+      - return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fixes it
+- That explicitly recognizes the empty-region pattern "fr__POSIX" (two underscores in a row) and extracts the variant starting at index 4, instead of incorrectly trying to read an uppercase region at index 3 and raising an error.
+
+If you want, I can produce a minimal unit test that demonstrates the failing input and a patch-ready diff for the method.

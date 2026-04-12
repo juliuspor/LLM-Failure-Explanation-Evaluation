@@ -1,0 +1,48 @@
+What happened
+- The code that reads a "UTF‑16 code unit" at a given index (lines 35–44) expects code_units to contain 16‑bit UTF‑16 code units (values in 0x0000–0xFFFF), possibly with surrogate pairs (0xD800–0xDFFF) split into two entries.
+- to_utf16_code_units (starts at line 10) does not actually produce 16‑bit UTF‑16 code units for characters above the Basic Multilingual Plane. Instead it leaves the full code point (e.g. 0x1F630) as a single entry in code_units.
+- At line 38 the code sets high = code_units[index]. For your test input '\U0001F630' that yields high == 0x1F630 (not a high surrogate in 0xD800–0xDBFF). The surrogate-combining logic at lines 39–43 therefore never runs, and the function returns 0x1F630 (a full code point) where the rest of the codebase expects a 16‑bit code unit or a properly split surrogate pair.
+- The mismatch between what to_utf16_code_units produces and what the code at lines 38–44 expects causes translate_string to produce the wrong internal representation (typically two surrogate code units or an unexpected sequence) so the returned string is not equal to '\U0001F630' and the assert fails.
+
+Where it occurs (specific variables / lines)
+- to_utf16_code_units (line 10): this is where code_units is built incorrectly.
+- get/peek code unit logic (lines 35–44): this code expects code_units to be UTF‑16 16‑bit units and attempts to combine a high surrogate and a following low surrogate into a single code point.
+- Variable names: code_units (the list), index (the requested position), high (value at code_units[index]), low (value at code_units[index+1]).
+
+Why that causes the test to fail
+- The codepath assumes code_units contains 16‑bit values so it tries to detect a high surrogate in 0xD800–0xDBFF at line 39. Because high actually contains a full code point 0x1F630 (outside the surrogate range), the combining branch is skipped and the rest of the code treats the wrong values. That leads to an incorrect output string from translate_string and the assertion result == '\U0001F630' fails.
+
+Concrete fixes (step‑by‑step)
+You must make the representation of code_units match the expectations of the code at lines 35–44. Two clear options:
+
+Option A — Make to_utf16_code_units produce real UTF‑16 code units (recommended)
+1. In to_utf16_code_units, for each Python character ch do:
+   - cp = ord(ch)
+   - if cp <= 0xFFFF:
+       append cp to code_units
+     else:
+       cp -= 0x10000
+       high = 0xD800 + (cp >> 10)
+       low  = 0xDC00 + (cp & 0x3FF)
+       append high, then append low to code_units
+2. This ensures characters above U+FFFF become two 16‑bit entries (high surrogate, low surrogate), so the logic at lines 38–44 will find a high surrogate and combine it correctly.
+
+Option B — Make the downstream code work with full code points
+1. Change the code at lines 38–44 (and any other places that treat code_units as UTF‑16 units) so that code_units is a list of full code points (ord(ch)) and you never try to combine surrogates because there aren’t any. Concretely:
+   - Ensure to_utf16_code_units simply appends ord(ch) for each ch
+   - Remove or change the surrogate-detection branch so it treats any single entry <= 0x10FFFF as a complete code point
+2. This requires auditing every use of code_units to ensure no other code assumes UTF‑16 unit layout.
+
+Which to choose
+- If the rest of the code (lines 35–44 and beyond) was written to operate on UTF‑16 code units, implement Option A and generate surrogate pairs at to_utf16_code_units.
+- If you prefer to work in terms of Unicode code points everywhere in your implementation, implement Option B, but be prepared to update all consumers of code_units.
+
+Minimal test to verify fix
+- After Option A, run:
+   escaper = CsvEscaper()
+   result = escaper.translate_string('\U0001F630')
+   assert result == '\U0001F630'
+- That assert should pass because the surrogate pair will be combined correctly at lines 39–43.
+
+Summary in one sentence
+to_utf16_code_units builds code_units as full Unicode code points, but the code at lines 38–44 expects 16‑bit UTF‑16 code units (with surrogate pairs split into two entries), causing the surrogate-combination logic to fail — fix by producing proper UTF‑16 code units (or else change the downstream code to use full code points).

@@ -1,0 +1,56 @@
+What happened (exact place and values)
+- The exception is raised at lines 35–36 inside your bounds check:
+  - index == 2
+  - len(code_units) == 2
+- The code does this test:
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+  Because index >= len(code_units) (2 >= 2) the function raises IndexError with the message you saw.
+
+Why it happened (root cause, not vague)
+- The caller passed index = 2 while code_units has only two entries (valid indices are 0 and 1). In other words, the caller produced an off-by-one index.
+- Likely cause: the caller computed index in the wrong “units” (for example, using the number of Unicode code points or a slice end value instead of the number of UTF-16/UTF-32 code units), or used a length value directly as an index. The function expects a code-unit index into code_units, but the caller passed a value equal to len(code_units).
+- The lines 38–44 (slice_forward) show you work with code_units[index] and sometimes code_units[index+1], so the function must be called only with index in 0..len(code_units)-1. Passing index == len(code_units) always fails the explicit check at line 35.
+
+Where to look in your code (exact places to inspect)
+1. The call site that calls this function: find where index is computed or passed in. Check if that code can produce index == len(code_units). Common places:
+   - If you used a loop like for index in range(len(code_units)+1): that will produce the out-of-range value.
+   - If you converted from a code-point index to a code-unit index and forgot to translate correctly.
+   - If you used a slice end value (which is allowed to equal length) directly as an index.
+2. Any code that decrements or increments index before calling this function—off-by-one errors are a likely source.
+
+Concrete fixes (step-by-step)
+Pick the one that matches your intention:
+
+A) Caller should never pass len(code_units)
+- Before calling, validate the index at the call site. Example steps:
+  1. Replace calls like f(code_units, index) with:
+     if 0 <= index < len(code_units):
+         f(code_units, index)
+     else:
+         handle-out-of-range-case()  # skip, return None, raise with context, etc.
+  2. If the index was coming from a loop, change the loop bound from range(len(code_units)+1) to range(len(code_units)).
+
+B) If the index represents a slice boundary (end index) rather than a position to read
+- Don’t call this function for an end-of-range value. Use index-1 to refer to the last element when you intended to examine the previous code unit:
+  - If you really wanted the previous code unit, call f(code_units, index-1) after checking index > 0.
+
+C) If you mixed code-point and code-unit indexing (surrogates)
+- Translate correctly between code-point indices and code-unit indices before calling. Example:
+  - If you used Python str code points but this function expects UTF-16 code units, adjust your conversion logic so the index refers to code_units, not code points.
+
+D) Make the error clearer (optional)
+- If you want a clearer exception showing both index and len, change the raise to:
+  raise IndexError(f"String index out of range: {index} (len={len(code_units)})")
+  This won’t fix the bug but makes diagnosis easier.
+
+Minimal patch suggestion (call-site fix)
+- If your caller can legitimately pass len(code_units) and you only want to skip in that case:
+  if index >= len(code_units):
+      # skip or handle boundary
+  else:
+      value = slice_forward(code_units, index)
+
+Summary
+- The code fails because index == 2 while code_units has length 2 — index is out of range.
+- Fix the caller so it never passes index == len(code_units) (or translate indices between code-point and code-unit spaces), or explicitly handle the boundary before calling the function.

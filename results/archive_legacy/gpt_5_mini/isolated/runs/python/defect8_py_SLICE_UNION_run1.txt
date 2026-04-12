@@ -1,0 +1,63 @@
+What happened (where it failed)
+- The failure occurs in to_locale(cls, locale_str: str) around lines 237–247.
+- The code reads characters by index: ch3 = locale_str[3] and ch4 = locale_str[4] (lines 237–238) and later checks locale_str[5] and slices locale_str[6:] (lines 245–247).
+- Those index reads happen without ensuring locale_str is long enough. If locale_str has length less than 5 (for example length == 3 or 4), accessing locale_str[3] or locale_str[4] raises an IndexError.
+
+Why it failed (root cause)
+- At line 222 the code sets length = len(locale_str).
+- At line 231 there is a branch that only explicitly checks length == 2. There is no earlier guard that ensures length >= 5 before reading locale_str[3] and locale_str[4].
+- Because the code tries to access positions 3, 4 and 5 on strings shorter than that, Python raises IndexError. The logic assumes a longer length but never enforces it before the indexed access.
+
+Exact places to change
+- Problematic accesses:
+  - ch3 = locale_str[3] (line 237)
+  - ch4 = locale_str[4] (line 238)
+  - if locale_str[5] != '_' (line 245)
+  - return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:]) (line 247)
+- These lines must not run unless length is at least the required number of characters (5 for indices 0–4, 7 for checking index 5 and slice from 6).
+
+Concrete fixes (step-by-step)
+Option A — Minimum edits to keep current structure:
+1. Replace the single check at line 231 with explicit length ranges before doing indexed reads:
+   - if length == 2:  # keep existing branch for 2-letter locale
+   - elif length == 5:  # handle language+country like "en_US" without variant
+       - perform ch3/ch4 checks and return Locale(locale_str[0:2], locale_str[3:5])
+   - elif length >= 7:  # handle language+country+variant like "en_US_POSIX"
+       - perform ch3/ch4 checks, check locale_str[5] == '_', and return Locale(...)
+   - else:
+       - raise ValueError(f"Invalid locale format: {locale_str}")
+2. Ensure the ch3/ch4 checks (lines 239–240) remain inside the branches that only run when length >= 5.
+
+Option B — Use safe parsing rather than index math:
+1. Split on underscore once: parts = locale_str.split('_', 2)
+2. Validate parts[0] exists and len(parts[0]) == 2 (language)
+3. If len(parts) == 1: return Locale(parts[0])
+4. If len(parts) >= 2: verify parts[1] length == 2 and is uppercase (country), then:
+   - if len(parts) == 2: return Locale(language, country)
+   - else: return Locale(language, country, parts[2]) after checking parts[2] non-empty
+This avoids direct positional indexing and is clearer.
+
+Example minimal code to replace the failing section (option A):
+- after computing length:
+  if length == 2:
+      return Locale(locale_str[0:2])
+  elif length == 5:
+      ch3 = locale_str[3]; ch4 = locale_str[4]
+      if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+          raise ValueError(f"Invalid locale format: {locale_str}")
+      return Locale(locale_str[0:2], locale_str[3:5])
+  elif length >= 7:
+      ch3 = locale_str[3]; ch4 = locale_str[4]
+      if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+          raise ValueError(f"Invalid locale format: {locale_str}")
+      if locale_str[5] != '_':
+          raise ValueError(f"Invalid locale format: {locale_str}")
+      return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+  else:
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+Why these fixes work
+- They guarantee we only access locale_str[3], locale_str[4], locale_str[5], and locale_str[6:] when the string is long enough, preventing IndexError.
+- Option B additionally makes parsing more robust and readable by using split instead of fixed indexes.
+
+That is the exact cause (missing length guard before indexed access) and the explicit changes needed to fix it.

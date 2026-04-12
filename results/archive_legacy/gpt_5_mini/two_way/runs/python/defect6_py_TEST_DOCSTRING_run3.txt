@@ -1,0 +1,48 @@
+What failed
+- The test test_negative_zero expected the consumer to output "-0.0" when add_number(-0.0) is called, but the actual output was "0".
+- That means the negative sign on the floating-point negative zero was lost inside CodeConsumer.add_number.
+
+Why it happened (root cause)
+- The code in add_number treats “whole” floats as integers and converts them to an integer representation. Typical checks are value.is_integer() or value == int(value). For example:
+  - if value.is_integer(): append(str(int(value)))
+- int(-0.0) evaluates to 0, which loses the sign bit. So when add_number sees -0.0 as a whole number and uses the integer path, it writes "0" (or "0" without a decimal point) instead of preserving the negative zero sign.
+- In short: the integer-conversion branch runs before any detection of negative zero, so the sign is discarded by int(value).
+
+Where it occurs
+- Inside CodeConsumer.add_number, in the branch that detects whole numbers and converts them to integer form (the code that uses int(value) or value.is_integer() and then appends str(int(value))).
+- That branch is executed for -0.0 because -0.0 == 0.0 and value.is_integer() is True, so the code treats negative zero as a plain zero.
+
+What happened step-by-step
+1. Test calls cc.add_number(-0.0).
+2. add_number checks whether the value is a whole number (value.is_integer() or value == int(value)).
+3. The check succeeds for -0.0.
+4. Code converts the float to an int: int(-0.0) -> 0.
+5. Code appends "0" (or "0" without sign/decimal) to the output.
+6. The negative sign is lost; test expected "-0.0" but got "0".
+
+How to fix it (concrete steps)
+1. Detect negative zero before any integer-conversion branch. Add a guard at the start of add_number:
+
+   if self.is_negative_zero(value):
+       self.append("-0.0")
+       return
+
+   - self.is_negative_zero should return True only when the value is exactly zero and has a negative sign bit (common implementations use math.copysign or inspect the IEEE-754 bits). Example:
+       @staticmethod
+       def is_negative_zero(x):
+           return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+2. After the negative-zero guard, continue with the existing logic (integer branch, float formatting, scientific notation, infinities, NaN, etc.). This guarantees -0.0 never takes the int-path that destroys the sign.
+
+3. Ensure tests for positive zero and integers still pass:
+   - For 0.0, is_negative_zero returns False, so integer branch remains unchanged and will produce "0" as expected.
+   - For -0.0, the new guard will emit "-0.0" exactly once and return, preserving the sign and decimal as the test requires.
+
+Why this fix is safe and minimal
+- It only changes behavior for the special case of negative zero. It does not alter formatting for other whole numbers, positive zero, infinities, or NaN.
+- It is placed early to prevent integer conversion from stripping the sign bit.
+
+Extra note about related test test_negative_after_minus
+- That test appends "-" then calls add_number(-5.0). The negative-zero fix above doesn't affect spacing rules or minus-handling logic around operators. It only changes the negative-zero handling, as intended by the test comments.
+
+If you want, I can produce a minimal patch for add_number and a correct is_negative_zero implementation based on the code you have.

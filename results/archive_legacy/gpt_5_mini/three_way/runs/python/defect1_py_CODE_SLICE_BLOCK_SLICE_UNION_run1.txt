@@ -1,0 +1,51 @@
+What fails
+- The method validates the input minutes (lines 396–397) but then reuses the parameter minutes_offset as a working variable to hold the total minutes (lines 402 and 404).
+- Reassigning minutes_offset makes the earlier range check meaningless for the value you actually multiply on line 405. That allows a much larger (or much more negative) value to reach FieldUtils.safe_multiply, which then throws ArithmeticError and the method returns "Offset is too large" (line 407) or otherwise produces an incorrect offset.
+
+Where it happens (exact lines)
+- Validation: lines 396–397
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Reuse / mutation: lines 402 and 404
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- Multiplication of the mutated value: line 405
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why that causes the failure (root cause)
+- The variable minutes_offset is used for two different concepts:
+  1) the input minutes component (must be 0..59), and
+  2) the computed total minutes (hours_in_minutes ± minutes).
+- After you validate the input minutes (0..59), you overwrite minutes_offset with the total minutes. The validated range applied only to the original small minutes component, not to the total minutes that is later multiplied.
+- That lets a large/more-negative total minutes reach safe_multiply, which can overflow and cause an ArithmeticError or produce a wrong offset. In short: you validated the wrong quantity but then multiplied the wrong variable.
+
+Concrete consequence for a call
+- Example: hours_offset = -23, minutes_offset = 59
+  - hours_in_minutes = -1380
+  - code computes minutes_offset = -1380 - 59 = -1439
+  - safe_multiply(-1439, MILLIS_PER_MINUTE) may overflow or be far outside intended bounds
+  - the method then raises ValueError("Offset is too large") or returns an incorrect zone
+
+How to fix (explicit steps)
+1. Do not overwrite the input parameter. Introduce a new variable for the total minutes, e.g. total_minutes.
+2. Compute total_minutes as:
+   - hours_in_minutes = hours_offset * 60
+   - if hours_in_minutes < 0:
+       total_minutes = hours_in_minutes - minutes_offset
+     else:
+       total_minutes = hours_in_minutes + minutes_offset
+   (this preserves the intended sign behavior)
+3. Keep the input validation as-is for minutes (0..59). After computing total_minutes, use FieldUtils.safe_multiply(total_minutes, MILLIS_PER_MINUTE) and pass that to for_offset_millis.
+4. Optionally clamp or validate total_minutes range before safe_multiply if you want a clearer error message instead of catching ArithmeticError.
+
+Fixed sketch (replace the mutation with a new var)
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+This removes the confusion caused by mutating minutes_offset and ensures the validated input and the multiplied value are distinct.

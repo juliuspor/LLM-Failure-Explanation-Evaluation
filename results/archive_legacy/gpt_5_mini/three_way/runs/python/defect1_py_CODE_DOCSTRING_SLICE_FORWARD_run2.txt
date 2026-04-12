@@ -1,0 +1,58 @@
+What happens
+- The code produces the wrong total offset (or an incorrect/no error) because it treats the sign of minutes incorrectly and then performs the wrong arithmetic when the hours are negative.
+- The bug lies in the lines shown in the slice and the prior validation logic:
+
+  - Line 402:
+    minutes_offset = hours_in_minutes - minutes_offset
+    This subtracts minutes_offset when hours_in_minutes is negative. If minutes_offset is negative (e.g. hours = -2, minutes = -15), this becomes -120 - (-15) = -105, but the correct total minutes should be -120 + (-15) = -135.
+
+  - Line 404:
+    minutes_offset = hours_in_minutes + minutes_offset
+    This adds minutes_offset for non-negative hours. That is fine when minutes_offset has the correct sign, but there is no check preventing an invalid combination such as hours > 0 and minutes < 0. For (2, -15) this produces 120 + (-15) = 105 (+01:45) instead of raising the ValueError the docstring and API promise.
+
+Why it fails (root cause)
+1. The code assumes minutes_offset has the same sign convention in both branches (effectively treating minutes_offset as always non-negative), but minutes_offset is passed in signed. The branch for negative hours uses subtraction where it should add the signed minutes.
+2. The code does not enforce the documented rule that minutes must not be negative when hours is positive. So invalid inputs like (2, -15) are silently turned into the wrong offset (+01:45) instead of raising ValueError.
+
+Exactly where to change (precise fixes)
+1. Add the sign-combination validation before arithmetic:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError("Minutes must be non-negative when hours are positive")
+   You already validate general ranges for hours and minutes earlier; add this check before you compute hours_in_minutes.
+
+2. Fix the arithmetic and avoid mutating minutes_offset:
+   - Compute a new variable total_minutes = hours_in_minutes + minutes_offset
+     (do not do different +/- branches based on the sign of hours_in_minutes).
+   Example replacement for the block at lines ~401–405:
+     hours_in_minutes = hours_offset * 60
+     total_minutes = hours_in_minutes + minutes_offset
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   This uses the signed minutes correctly for all cases:
+     - (2, 15) -> 120 + 15 = 135
+     - (2, -15) -> 120 + (-15) = 105 (but you will already have raised for this case)
+     - (0, -15) -> 0 + (-15) = -15
+     - (-2, -15) -> -120 + (-15) = -135
+     - (-2, 15) -> -120 + 15 = -105
+
+3. Optional improvement: use a distinct variable name (total_minutes) rather than overwriting minutes_offset to avoid confusion.
+
+Suggested final code sketch (minimal patch)
+- Insert after minutes range check:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours are positive")
+- Replace the try block arithmetic with:
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The sign-combination validation enforces the documented constraint and prevents (2, -15) producing an incorrect offset.
+- Adding the signed minutes to the signed hours-in-minutes handles all allowed cases correctly; there is no need for a sign branch that misapplies subtraction.
+
+Tests to add
+- for_offset_hours_minutes(2, -15) should raise ValueError
+- for_offset_hours_minutes(-2, -15) -> -02:15 (i.e. total_minutes = -135)
+- for_offset_hours_minutes(0, -15) -> -00:15
+- for_offset_hours_minutes(2, 15) -> +02:15
+
+This explains the exact lines at fault (402 and 404), why they fail, and gives precise actionable fixes and tests.

@@ -1,0 +1,16 @@
+The code fails because negative zero (-0.0) is being converted to a Python float string representation in a branch that calls str(x) (line 203 in the slice). In Python, str(-0.0) yields '0.0' which loses the sign, and later code trims '.0' to '0' (line 186/201 behavior), so the final output becomes '0' (or '0.0') instead of '-0.0'. Specifically:
+
+- Where it detects integer-valued floats (line 185: if x == int(x) ...), it converts x to int(value) at line 186. That conversion loses the distinction between -0.0 and 0, so value becomes 0, and any sign information is discarded.
+- The special-case handling for integer-like values then prints value via self.add(str(value)) (line 201), producing '0' for negative zero.
+- The fallback that calls self.add(str(x)) (line 203) would still call str(-0.0) which returns '0.0' (no negative sign for the -0.0 float), so the sign is lost there as well.
+
+Root cause: the code uses equality x == int(x) and int(x) conversion (lines 185-186) which collapses -0.0 to 0, and it uses str(x) later which also does not preserve the negative zero sign. The tests expect preservation of the negative zero sign (CodeConsumer.is_negative_zero exists and should be used). The loss happens specifically at lines 185-186 (value = int(x)) and at line 203 (self.add(str(x))).
+
+How it leads to the observed failure: when add_number(-0.0) runs, execution hits the integer-valued branch (x == int(x)), takes value = int(x) which becomes 0, and then adds '0' (via str(value)) instead of '-0.0'. The test expected '-0.0' but got '0', producing the AssertionError: Expected -0.0, got 0.
+
+Concrete fix steps:
+1. Before converting x to int or calling str(x), check for negative zero: use CodeConsumer.is_negative_zero(x). If true, emit '-0.0' directly (self.add('-0.0')) and return.
+2. Alternatively, avoid using int(x) for exact zeros: handle x == 0.0 separately to preserve sign using math.copysign or checking math.copysign(1.0, x) < 0.
+3. Ensure any code path that prints x uses a representation that preserves negative zero sign (formatting like '-0.0' when detected), including the integer branch and the fallback str(x) branch.
+
+Relevant lines: 185-186 (x == int(x); value = int(x)) and 201/203 (self.add(str(value)) and self.add(str(x))). These are where sign is lost. Implement the negative-zero guard at the start of add_number to fix the bug.

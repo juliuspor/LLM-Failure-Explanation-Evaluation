@@ -1,0 +1,65 @@
+What happened (where it fails)
+- The IndexError comes from the bounds check at line 35:
+  if index < 0 or index >= len(code_units):
+  raise IndexError(f"String index out of range: {index}")
+- That check uses len(code_units) (the UTF‑16 code unit list), but the index being passed is an index into the original Python string (a sequence of Python chars/code points), not an index into the code_units list. When the original string contains a surrogate pair (two UTF‑16 code units for one Unicode code point), the lengths diverge and the check can fail. This is exactly what your failing test demonstrates: the translate routine advances and calls code_point_at with a string index that is valid for s but out of range for code_units, causing the IndexError.
+
+Why it happens (root cause)
+- to_utf16_code_units builds a list of UTF‑16 code units. For characters above U+FFFF (emoji like U+1F630), that becomes two code units in code_units.
+- code_point_at (lines 35–44) assumes the index argument indexes code_units, and therefore checks against len(code_units). But the translator that calls code_point_at uses an index into the original Python string (s), not into the code_units list. The mismatch between "index space" for s and for code_units causes the out‑of‑range condition when a surrogate pair reduces the code_units index range relative to s, or more commonly vice versa depending on how index is advanced.
+- Concretely: for input "\U0001F630A" the translator advances index over the emoji expecting it to be one character, but code_units contains two units for the emoji; a subsequent call to code_point_at with the same numeric index can fall outside code_units length or otherwise read the wrong units, producing IndexError or incorrect decoding.
+
+Where in the code
+- to_utf16_code_units: builds code_units (line numbers not given for the build, but referenced).
+- code_point_at: lines 35–44 implement the bounds check and surrogate detection. The problematic check is at line 35 (index vs len(code_units)), and the surrogate detection uses code_units[index] and code_units[index + 1] (lines 38–41).
+
+Exact fix steps (clear, actionable)
+Option A — Keep code_point_at working on the Python string index (recommended):
+1. Change code_point_at to operate on the original string s (sequence of Python characters) using ord(s[index]) instead of first converting to a code_units list and indexing into that list.
+2. Replace the bounds check to use len(s) (the string length), not len(code_units).
+3. Detect surrogate pairs by testing the ord of the current char and the next char:
+   - high = ord(s[index])
+   - if 0xD800 <= high <= 0xDBFF and index + 1 < len(s):
+       low = ord(s[index + 1])
+       if 0xDC00 <= low <= 0xDFFF:
+           return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+   - else return high
+4. Ensure the translator's loop advances index by 2 when a surrogate pair is consumed (i.e., when code_point_at returns a code point > 0xFFFF), otherwise by 1.
+
+Option B — Make index consistently an index into code_units:
+1. Keep to_utf16_code_units and code_point_at operating on code_units, but change every caller to:
+   - Convert s -> code_units once (call to_utf16_code_units).
+   - Iterate an index over code_units, not over s.
+   - When emitting characters back to output, reconstruct code points from code_units properly.
+2. This is more invasive in the translator logic and error‑prone (must keep mapping consistent).
+
+Minimal concrete patch (Option A, change in code_point_at around lines 35–44)
+- Replace the bounds check and indexing into code_units with indexing into the original string s and using ord(), for example:
+
+  # old (problematic)
+  if index < 0 or index >= len(code_units):
+      raise IndexError(...)
+  high = code_units[index]
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+      low = code_units[index + 1]
+      ...
+  return high
+
+  # new (works with Python str index)
+  if index < 0 or index >= len(s):
+      raise IndexError(...)
+  high = ord(s[index])
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(s):
+      low = ord(s[index + 1])
+      if 0xDC00 <= low <= 0xDFFF:
+          return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  return high
+
+And in the calling code (the translator) make sure you advance index by 2 after returning the combined code point, or by 1 otherwise.
+
+Why this fix works
+- It removes the fragile conversion/index mismatch between the Python string and the UTF‑16 code_units list. Python str is already Unicode code points; using ord() and checking for surrogate code unit values lets you detect UTF‑16 surrogate pairs without keeping a separate code_units index space. Advancing the loop by 2 when you consumed a surrogate pair prevents skipping or re‑reading halves of the pair.
+
+Summary
+- Root cause: index space mismatch — code_point_at checks index against len(code_units) but callers supply an index into the Python string (s). That leads to IndexError when surrogate pairs are present.
+- Fix: make code_point_at use ord(s[index]) and len(s), and ensure the translator advances the index by 2 when a surrogate pair is consumed (or else consistently iterate over code_units).

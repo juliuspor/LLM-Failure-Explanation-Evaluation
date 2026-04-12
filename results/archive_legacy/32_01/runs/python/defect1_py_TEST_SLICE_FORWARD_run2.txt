@@ -1,0 +1,50 @@
+What happened (the root cause)
+- The method DateTimeZone.for_offset_hours_minutes mixes the sign of hours and minutes incorrectly when it builds the total offset in minutes.
+- In the failing case for_offset_hours_minutes(-2, -15) you expect -135 minutes (i.e. "-02:15"), but the code branches at lines 406 and 408 combine hours and minutes using the raw minutes value rather than a normalized magnitude. That means a negative minutes value is sometimes subtracted when it should be added (or vice versa), producing the wrong total offset.
+
+Where it occurs (exact lines and method)
+- Method: DateTimeZone.for_offset_hours_minutes
+- Faulty lines shown in your slice:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The bug is in the logic that decides whether to add or subtract the minute component. The code assumes minutes_offset already has the correct sign or magnitude, but callers can pass a negative minutes value (as in your test), so those additions/subtractions produce the wrong combined minutes total.
+
+Why that produces the wrong result
+- For hours = -2 and minutes = -15:
+  - hours_in_minutes = -120
+  - If minutes is treated as negative in the wrong branch, you end up doing -120 - (-15) = -105 (wrong) or -120 + 15 = -105 (wrong), instead of the correct -120 - 15 = -135.
+- In short: the code uses the minutes parameter directly instead of combining the absolute magnitude of minutes with the sign that should come from the hours (or from a consistent rule), so the sign of the minute component can be applied twice or applied incorrectly.
+
+Precise fixes (step-by-step changes you can apply)
+1. Normalize minutes to a magnitude and validate sign consistency
+   - At the start of for_offset_hours_minutes, compute:
+     - minutes_abs = abs(minutes)
+     - if minutes_abs >= 60: raise ValueError("Minutes out of range")
+   - If hours is zero, decide the offset sign from the minutes parameter (allow negative minutes to mean a negative offset when hours == 0).
+   - If hours is non-zero and minutes has a different sign than hours, raise ValueError (or decide a policy and document it). Mixing signs should be rejected or normalized explicitly.
+
+2. Combine hours and minutes deterministically
+   - Compute hours_in_minutes = hours * 60
+   - If hours < 0 (offset should be negative): total_minutes = hours_in_minutes - minutes_abs
+   - Else: total_minutes = hours_in_minutes + minutes_abs
+   - Replace the two lines (406 and 408) with a single deterministic calculation that uses minutes_abs and the sign of hours to decide add/subtract.
+
+3. Multiply and return
+   - Keep line 409: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - Then proceed to return cls.for_offset_millis(offset).
+
+Example replacement for the problematic region (replace lines 406–409)
+- Compute minutes_abs = abs(minutes)
+- Validate 0 <= minutes_abs < 60
+- hours_in_minutes = hours * 60
+- if hours < 0:
+    total_minutes = hours_in_minutes - minutes_abs
+  else:
+    total_minutes = hours_in_minutes + minutes_abs
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fix works
+- It separates magnitude (minutes_abs) from sign (hours sign or explicit minutes sign when hours == 0), so the minute component cannot accidentally flip sign or be applied twice. For your test (-2, -15) this produces total_minutes = -120 - 15 = -135, so zone.id becomes "-02:15" as expected.
+
+If you want, I can produce a concrete patch/diff that updates the exact lines in the source file.

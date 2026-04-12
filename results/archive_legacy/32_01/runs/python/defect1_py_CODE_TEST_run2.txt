@@ -1,0 +1,61 @@
+What happened (where it fails)
+- The call zone = DateTimeZone.for_offset_hours_minutes(-2, -15) fails on the minutes validation at this line:
+  if minutes_offset < 0 or minutes_offset > 59:
+because minutes_offset is -15, which causes a ValueError("Minutes out of range: -15").
+
+Why it fails (root causes)
+1) Wrong assumption about minutes sign (primary cause)
+   - The method treats minutes_offset as required to be between 0 and 59. The test, however, passes a negative minutes_offset to express -2 hours 15 minutes. That violates the minutes range check and so the method rejects a valid intent.
+   - In short: the code assumes minutes must be non-negative, but the test uses a negative minutes value.
+
+2) Even if the validation were changed, the signed-minute handling is incorrect (secondary bug)
+   - The calculation block later assumes minutes_offset is non-negative and implements:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           minutes_offset = hours_in_minutes - minutes_offset
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+     With hours_offset = -2 and minutes_offset = -15 this becomes:
+       hours_in_minutes = -120
+       minutes_offset = -120 - (-15) = -105
+     That yields -105 minutes (i.e. -1 hour 45 minutes) instead of the intended -135 minutes (i.e. -2 hours 15 minutes). So the arithmetic flips the sign of the minutes when both parts are negative, producing the wrong total offset.
+
+Where to look in the code
+- Validation line: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Computation lines:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+
+Concrete fixes (step-by-step, pick one)
+Option A — Accept signed minutes and compute total consistently (recommended)
+1. Change the minutes validation to allow -59..59:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(...)
+2. Compute total minutes explicitly, making minutes follow the sign of hours if needed. For example:
+     hours_in_minutes = hours_offset * 60
+     total_minutes = hours_in_minutes + minutes_offset
+   (If you want to enforce a consistent sign — e.g. reject hours and minutes with opposite signs — add a check and raise if sign mismatch is not allowed.)
+3. Multiply total_minutes by MILLIS_PER_MINUTE as before and continue.
+
+Option B — Require minutes be non-negative and document it
+1. Keep validation requiring 0..59, but update the API docs and the tests so callers must pass minutes as a non-negative magnitude and use the sign in hours_offset to indicate negative offsets.
+2. Remove or simplify the signed arithmetic so total_minutes = hours_offset * 60 + minutes_offset, assuming minutes_offset >= 0 and hours_offset carries the sign.
+
+Minimal corrected code example (Option A):
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The validation change lets callers express offsets like -2:-15.
+- Computing total_minutes by simple addition produces -135 for (-2, -15) instead of the incorrect -105.
+
+Summary
+- The immediate failure is because minutes_offset is rejected for being negative.
+- There is a second logic bug: the arithmetic flips the minute sign when hours are negative.
+- Fix by allowing signed minutes and computing total_minutes = hours*60 + minutes (or require caller to pass minutes as a non-negative magnitude and document it), and then multiply by MILLIS_PER_MINUTE.

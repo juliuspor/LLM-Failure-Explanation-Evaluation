@@ -1,0 +1,50 @@
+What happened (exact symptom)
+- The code raised ValueError: Invalid locale format: fr__POSIX.
+- That comes from the check at lines 237–240 where ch3 = locale_str[3] and ch4 = locale_str[4], and the code requires both to be letters between 'A' and 'Z'.
+
+Why it happened (root cause, exact variable and line)
+- The input string is "fr__POSIX". Indexing for that string is:
+  - locale_str[0] = 'f'
+  - locale_str[1] = 'r'
+  - locale_str[2] = '_'
+  - locale_str[3] = '_'    <- this is ch3 (line 237)
+  - locale_str[4] = 'P'    <- this is ch4 (line 238)
+- Lines 237–240 check that ch3 and ch4 are uppercase letters. ch3 is '_' so the condition fails and the code raises ValueError at line 240 with the message shown.
+- In other words, the parser assumes position 3–4 always contains a two-letter country/region code (e.g. "FR_CA"), but "fr__POSIX" uses a double underscore to indicate an empty region and a variant ("POSIX"). The code does not handle the empty region case, so it rejects the valid format.
+
+Where to change the code (precise fix)
+- Modify the parsing branch that runs when length > 2 (the code around lines 231–247). After you detect locale_str[2] == '_' you must handle two cases:
+  1. A non-empty country code at positions 3–4 (the current check).
+  2. An empty country followed by a variant, which shows up as a second underscore at position 3 (e.g. "fr__POSIX").
+
+Concrete steps to fix
+1. At or just before line 237, add an explicit check for the double underscore case:
+   - If locale_str[2] == '_' and locale_str[3] == '_', treat everything after position 3 (or 4 depending on your slicing) as the variant and return Locale(language=locale_str[0:2], country=None, variant=locale_str[4:]).
+2. Otherwise keep the existing validation for ch3/ch4 being uppercase letters and the existing branches that handle country-only and country+variant formats.
+3. Make sure you guard string indexing with length checks so you don't access out-of-range indices.
+
+Example patch (conceptual; insert near lines 234–239)
+- Replace the current sequence that immediately reads ch3/ch4 with:
+
+  if locale_str[2] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+
+  # handle empty country and variant, e.g. "fr__POSIX"
+  if len(locale_str) >= 4 and locale_str[3] == '_':
+      # variant starts at index 4
+      return Locale(locale_str[0:2], None, locale_str[4:])
+
+  # now expect two-letter country at positions 3 and 4
+  if len(locale_str) < 5:
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  # continue with existing returns for country and country+variant
+
+Why this fix works
+- It explicitly recognizes the "language__variant" form (double underscore) and avoids rejecting it by the uppercase-letter check. It preserves existing validation for the common "language_COUNTRY" and "language_COUNTRY_VARIANT" forms.
+
+Summary
+- The code fails because it assumes positions 3–4 always contain a two-letter country code. The input "fr__POSIX" uses an empty country with a variant (double underscore), which the parser doesn't handle. Add a branch to detect locale_str[3] == '_' and treat the remainder as the variant (return Locale(language, None, variant)).

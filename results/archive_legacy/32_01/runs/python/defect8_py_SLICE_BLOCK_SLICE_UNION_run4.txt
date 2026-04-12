@@ -1,0 +1,49 @@
+What happened (what failed and where)
+- The method Locale.to_locale (starting at line 193) computes length = len(locale_str) on line 227.
+- The code then enters the branch guarded by "if length == 2:" at line 236 but immediately accesses locale_str[3] and locale_str[4] on lines 242–243.
+- When locale_str really has length 2, indexing at [3] and [4] is out of range and raises IndexError (string index out of range). The crash happens at line 242/243.
+
+Why it failed (root cause)
+- The branch condition is wrong. The code checks "if length == 2:" but the code inside that branch assumes the string is longer (it expects characters at indices 3 and 4). That mismatch between the guard and the body causes an out-of-bounds index access.
+- In short: guard says "this is a 2-character string" but body treats it as if it's >=5 characters.
+
+Where in the code this occurs
+- Locale.to_locale, lines shown in your slice:
+  - length computed: line 227
+  - branch: line 236 ("if length == 2:")
+  - out-of-range access: lines 242–243 (ch3 = locale_str[3], ch4 = locale_str[4])
+  - subsequent lines (244–252) also assume longer length (slicing [3:5], checking locale_str[5], etc.), so they are part of the same incorrect assumption.
+
+Concrete fixes (step-by-step, exact changes)
+1. Decide the intended behavior. Based on the body, it looks like the branch should handle locale forms like "en_US" or "en-US" (two-letter language + separator + two-letter region), not a pure 2-char locale.
+2. Change the condition to match the assumptions. For the code as written the smallest length it expects is 5 (indices 0..4), and later there’s a check of index 5 for a variant (so variant requires length >=6). Replace the wrong guard "if length == 2:" with something like:
+   - if length == 2:
+       return Locale(locale_str[0:2])
+   - elif length >= 5:
+       (then keep the existing logic that reads ch3/ch4 and possibly checks locale_str[5])
+
+3. A minimal corrected fragment (replace lines 236–252) — keep the same line numbers conceptually:
+   - if length == 2:
+       return Locale(locale_str[0:2])
+   - elif length >= 5:
+       ch3 = locale_str[3]
+       ch4 = locale_str[4]
+       if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+           raise ValueError(f"Invalid locale format: {locale_str}")
+       if length == 5:
+           return Locale(locale_str[0:2], locale_str[3:5])
+       if locale_str[5] != '_':
+           raise ValueError(f"Invalid locale format: {locale_str}")
+       return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+4. Add tests:
+   - to_locale("en") -> Locale("en")
+   - to_locale("en_US") and to_locale("en-US") -> Locale("en","US")
+   - to_locale("en_US_POSIX") -> Locale("en","US","POSIX")
+   - to_locale("") or malformed strings -> should raise ValueError (add tests for IndexError-free failure modes)
+
+Why this fix works
+- The new guards ensure the code only accesses indices that exist (no out-of-range indexing).
+- It separates the pure 2-letter language case from the longer language+region/variant cases the body was written for.
+
+If you want, I can produce a complete patched version of to_locale with exact line numbers or run through edge cases and produce unit tests.

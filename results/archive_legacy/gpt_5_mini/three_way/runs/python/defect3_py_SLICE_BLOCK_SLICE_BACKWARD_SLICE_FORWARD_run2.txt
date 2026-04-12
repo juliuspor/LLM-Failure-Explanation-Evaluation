@@ -1,0 +1,56 @@
+What happened (where it fails)
+- The function raises IndexError at line 36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+- That means the caller passed an index that is too large compared with len(code_units).
+
+Why it happened (root cause)
+- The code builds code_units inside to_utf16_code_units(s) (lines shown around 10–12), but it does not produce the sequence of UTF‑16 code units that the rest of the code expects.
+- The rest of the code (lines 38–44) treats code_units as a UTF‑16 code‑unit array: it reads code_units[index], then (if that unit is a high surrogate) looks at code_units[index + 1] to assemble a single Unicode code point.
+- However, to_utf16_code_units(s) produces one entry per Python string character (one Unicode code point), not one entry per UTF‑16 code unit. For characters outside the Basic Multilingual Plane (code points > 0xFFFF, the “astral” characters) a single Python character corresponds to two UTF‑16 code units (a surrogate pair). Because to_utf16_code_units did not split those characters into two code units, len(code_units) is smaller than the number of UTF‑16 code units. The caller passes an index measured in UTF‑16 code units, so that index can be >= len(code_units) and trigger the IndexError at line 36.
+- In short: mismatch of indexing units. index is a UTF‑16 code‑unit index, but code_units is a list of code points (not code units), so the bounds check is wrong and the later code that expects a surrogate at index+1 breaks.
+
+Exactly where it goes wrong (variables and lines)
+- to_utf16_code_units builds code_units (lines ~10–12).
+- The bounds check at line 35–36 uses len(code_units) which reflects whatever to_utf16_code_units produced.
+- The consumer code at lines 38–44 expects UTF‑16 code units (accesses code_units[index] and code_units[index+1]).
+
+How to fix (clear, actionable steps)
+Option A — Make code_units actual UTF‑16 code units (recommended)
+1. Replace the implementation of to_utf16_code_units(s) so it emits 16‑bit UTF‑16 units, splitting astral code points into a high and low surrogate each. Example algorithm:
+   - For each code point cp = ord(ch):
+     - If cp <= 0xFFFF: append cp to code_units.
+     - Else (cp > 0xFFFF): compute
+         cp_minus = cp - 0x10000
+         high = 0xD800 + (cp_minus >> 10)
+         low  = 0xDC00 + (cp_minus & 0x3FF)
+       append high, then append low.
+2. Then len(code_units) will count UTF‑16 code units and the check at line 36 will be correct; the code at lines 38–44 will work (it can still detect and combine surrogate pairs).
+
+Option B — Use bytes from UTF‑16 encoding
+1. Encode the string to UTF‑16 little-endian: bytes16 = s.encode('utf-16-le').
+2. Convert bytes16 into 16‑bit integers: for i in range(0, len(bytes16), 2): code_units.append(bytes16[i] | (bytes16[i+1] << 8))
+3. That yields the same UTF‑16 code units as Option A without manual surrogate math.
+
+Option C — Keep code_units as code points, but change indexing and caller logic
+1. If you intend index to be a Python code‑point index (not UTF‑16), then callers must pass code‑point indexes and the check at line 36 is fine. You must also remove the surrogate-pair handling (lines 39–44) because there will never be surrogate halves in code_units.
+2. This is only appropriate if every place that calls this code uses code‑point (Python char) indexes.
+
+Which to choose
+- If the rest of the code (lines 38–44) expects UTF‑16 units and callers supply UTF‑16 indexes, choose Option A or B.
+- If you control callers and they should be using Python code‑point indexes, choose Option C and remove surrogate logic.
+
+Concrete minimal fix (replace to_utf16_code_units body)
+- Implement Option A surrogate splitting (pseudocode here so you can paste into your function):
+  code_units = []
+  for ch in s:
+      cp = ord(ch)
+      if cp <= 0xFFFF:
+          code_units.append(cp)
+      else:
+          cp_minus = cp - 0x10000
+          code_units.append(0xD800 + (cp_minus >> 10))
+          code_units.append(0xDC00 + (cp_minus & 0x3FF))
+  return code_units
+
+That will make len(code_units) match the UTF‑16 indexing used later, preventing the IndexError at line 36 and allowing the surrogate pair logic at lines 39–44 to work as intended.

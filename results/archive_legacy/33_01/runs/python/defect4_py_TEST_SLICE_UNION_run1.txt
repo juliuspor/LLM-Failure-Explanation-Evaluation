@@ -1,0 +1,58 @@
+What happened
+- The method get_max_middle_index (lines 449–451) simply returns the stored field self._max_middle_index:
+  - 449 | def get_max_middle_index(self) -> int:
+  - 451 |     return self._max_middle_index
+- The test constructs a TimePeriodValues instance and calls add four times in this order:
+  - add(SimpleTimePeriod(0, 100), 1.0)
+  - add(SimpleTimePeriod(100, 200), 2.0)
+  - add(SimpleTimePeriod(0, 50), 3.0)
+  - add(SimpleTimePeriod(50, 100), 4.0)
+- The assertion expects get_max_middle_index() == 1, but it fails because self._max_middle_index was not updated to reflect the final set of periods after the out‑of‑order additions.
+
+Why it fails (root cause)
+- _max_middle_index is a cached index that is returned directly by get_max_middle_index.
+- The add(...) method (where periods are inserted) does not maintain this cached value in all cases. Specifically, when you add periods that come before existing entries (the two later adds with start 0 and 50), the code never recalculates or updates self._max_middle_index to reflect the new ordering/contents.
+- As a result, get_max_middle_index returns an index computed at some earlier point (for example after the first two adds) rather than the correct index for the current contents. The mismatch between the internal cache (_max_middle_index) and the actual periods causes the failed assert.
+
+Where to change it (concrete places and variables)
+- Location to fix: the add(...) method(s) that insert or append periods. Those methods must update self._max_middle_index when the underlying collection of periods changes.
+- Variables/methods referenced: self._max_middle_index, get_max_middle_index(), add(...), and whichever internal list holds the periods (e.g., self._items or self._periods — update that same list when you recompute).
+- Line to change: either inside add(...) (right after insertion) or replace get_max_middle_index (lines 449–451) so it does not rely on an out‑of‑date cache.
+
+Clear, actionable fixes (pick one)
+
+Option A — Update the cache on every change (preferred if you want O(1) reads):
+1. In add(...), immediately after inserting the new SimpleTimePeriod into the internal list, recompute whether this insertion changes the max-middle index:
+   - Compute the new period’s middle value (e.g., (start + end) / 2).
+   - Compare it to the current middle value at self._max_middle_index (if any).
+   - If the new middle is greater, set self._max_middle_index to the new element’s index.
+   - If you insert before the current cached index, increment self._max_middle_index by 1 (because indices shifted).
+2. Also update self._max_middle_index in any remove(...) or clear(...) methods that change the list.
+3. Add unit tests that insert out of order (like your test) and that remove entries to ensure the cached index remains correct.
+
+Option B — Compute on demand (simpler and safest if list is small):
+1. Replace get_max_middle_index (lines 449–451) so it computes the index from the current list instead of returning the cached field:
+   - If there are no periods, return -1 or raise as appropriate.
+   - Loop over the stored periods, compute each period’s middle, and return the index with the maximum middle.
+   - Remove or stop relying on self._max_middle_index entirely, or keep it for compatibility but refresh it inside get_max_middle_index.
+2. This guarantees correctness regardless of insertion order, at the cost of an O(n) call to get_max_middle_index.
+
+Minimal code sketch for Option B (conceptual)
+- Replace:
+  return self._max_middle_index
+- With:
+  if not self._items: return -1
+  max_i = 0
+  max_m = middle(self._items[0])
+  for i, p in enumerate(self._items[1:], start=1):
+      m = middle(p)
+      if m > max_m:
+          max_m, max_i = m, i
+  return max_i
+
+Why each fix works
+- Option A keeps the cached index consistent with every structural change so get_max_middle_index can remain O(1).
+- Option B avoids cache-coherency bugs by computing from the authoritative data each time.
+
+Summary
+The test fails because get_max_middle_index returns a stale cache value stored in self._max_middle_index that is not updated when add(...) inserts periods out of order. Fix by updating self._max_middle_index on every modification (add/remove) or by computing the max index on demand inside get_max_middle_index.

@@ -1,0 +1,39 @@
+What happened (what failed)
+- The code raises an IndexError when advancing pos after a translator consumed a supplementary code point (a surrogate pair).
+- The failure occurs in translate(), specifically in these lines:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+- On the second iteration of that loop code_point_at(...) is called with pos equal to length (or otherwise out of range), which causes an IndexError inside code_point_at / the UTF-16 helpers (you can see the IndexError thrown from to_utf16_code_units index check at line 36 in your trace).
+
+Why it happens (root cause)
+- The translator contract returns consumed as "number of UTF-16 code units consumed" (for a supplementary code point this is 2).
+- The code tries to advance pos consumed times, but each loop iteration advances pos by char_count(code_point_at(code_units, pos)), and char_count can itself be 2 for a supplementary code point.
+- Example: pos = 10, consumed = 2 (translator consumed a surrogate pair at pos).
+  - Iteration 1: code_point_at(code_units, 10) returns a supplementary code point, char_count(...) == 2 → pos becomes 12.
+  - Iteration 2: the loop tries code_point_at(code_units, 12). If length == 12 (end of input), code_point_at is called with pos == length → out-of-range access → IndexError.
+- In short: the loop uses consumed as the loop count but advances pos by  actual code-unit counts per iteration (1 or 2), so pos can move beyond the valid range before the loop finishes attempting more calls. You end up calling code_point_at on an out-of-range index.
+
+Where it occurred (exact places)
+- translate(): the for pt in range(consumed) loop (the three lines shown above).
+- The IndexError surface in the helper that checks code unit indexing (to_utf16_code_units / code_point_at) at the index check (line 36 in your trace).
+
+How to fix it (concrete steps)
+1. Replace the loop with a single advancement by the consumed number of code units. Change the code after the comment to:
+   pos += consumed
+   (i.e. remove the for loop and the repetitive calls to code_point_at and char_count.)
+
+2. Optionally add defensiveness / assertions:
+   - Assert consumed > 0 and consumed <= remaining code units (to catch broken translators early):
+     if consumed <= 0 or consumed > (length - pos):
+         raise ValueError(f"Translator returned invalid consumed={consumed} at pos={pos}")
+   - Or check bounds before calling code_point_at elsewhere.
+
+3. If the translator's contract actually returns number of codepoints rather than code units, make that explicit in code and adjust the advancement accordingly. But given your current comments ("they just took care of a surrogate pair") consumed appears to be code units.
+
+Why that fix works
+- If consumed is the number of UTF-16 code units handled, advancing pos by consumed moves pos to the next unprocessed code unit in one safe step. You won't try to read at an index >= length inside the loop and no repeated code_point_at calls are made that could step past the end.
+
+Summary
+- The bug is using a loop that advances pos by variable amounts (char_count(...)) while iterating consumed times; that allows pos to become out-of-range during the loop and triggers IndexError. Replace the loop with pos += consumed and add a sanity check on consumed to prevent malformed translator return values.

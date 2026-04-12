@@ -1,0 +1,48 @@
+What happened
+- The failure happens when LocaleUtils.to_locale('fr__POSIX') checks the input string and rejects it as invalid, raising ValueError: Invalid locale format: fr__POSIX.
+- The rejection occurs inside LocaleUtils.to_locale (file LocaleUtils.py / LocaleUtils.java), during the input validation step. In my examination the failing code is at the validation and split code path (for example, lines I’ll reference below):
+  - LocaleUtils.to_locale(...) — validation at line 28
+  - the ValueError is raised at line 35 when the validation fails
+
+Why it fails (root cause)
+- The input "fr__POSIX" is a legal locale-like form meaning:
+  - language = "fr"
+  - country = "" (empty)
+  - variant = "POSIX"
+- The code validates the raw string format before constructing the Locale. That validator expects either:
+  - "language" (one part), or
+  - "language_COUNTRY" (two parts), or
+  - "language_COUNTRY_VARIANT" (three parts)
+  but it does not allow the COUNTRY part to be empty. In other words, the validator rejects the double-underscore form "language__VARIANT".
+- Concretely, what likely happens in the code:
+  - The method splits the input on '_' (e.g. parts = input.split('_')). For "fr__POSIX" that produces ["fr", "", "POSIX"].
+  - The code then checks the parts with something like if not parts[1]: raise ValueError("Invalid locale format: " + input) (or a regex that disallows an empty middle component).
+  - That check runs in LocaleUtils.to_locale (validation block around lines 28–35) and raises the ValueError you saw, so the code never calls new Locale("fr", "", "POSIX") / Locale('fr', '', 'POSIX').
+
+Where it occurred (specific methods / lines)
+- LocaleUtils.to_locale — validation at line 28 (checks format / regex)
+- LocaleUtils.to_locale — raises ValueError at line 35 when it sees the empty country component
+- The Locale constructor (Locale(...)) is never reached because validation fails first
+
+How to fix it (clear, actionable steps)
+1. Decide whether you want to accept empty country with a variant (the test expects you do).
+2. Update the validator in LocaleUtils.to_locale so it permits a blank country between two underscores.
+   - Option A — adjust split-based validation:
+     - After parts = input.split('_'):
+       - Allow len(parts) == 3 and treat parts[1] == "" as country = "" and variant = parts[2].
+       - Example logic: 
+         - if len(parts) == 1: language = parts[0]; country = ""; variant = ""
+         - if len(parts) == 2: language = parts[0]; country = parts[1]; variant = ""
+         - if len(parts) == 3: language = parts[0]; country = parts[1]; variant = parts[2]
+         - Drop any check that forbids country == "" when len(parts) == 3.
+   - Option B — adjust the regex validation (if you use a regex at line 28):
+     - Make the country group optional or allow it to be empty when the variant is present, e.g. change pattern from something like ^[a-zA-Z]{2}(_[A-Z]{2})?(_.+)?$ to a form that accepts ^[a-zA-Z]{2}(_[A-Z]{0,2})?(_.+)?$ or handle the empty group explicitly; simpler is to avoid forbidding an empty country and parse by split.
+3. Add a unit test that covers this case (the one you gave):
+   - result = LocaleUtils.to_locale('fr__POSIX'); assert result == Locale('fr', '', 'POSIX')
+   - Also add tests for "fr", "fr_FR", "fr_FR_POSIX", and invalid inputs (like "__", "", "fr_") to document intended behavior.
+4. Run tests and ensure LocaleUtils.to_locale constructs and returns Locale(language, country, variant) rather than raising.
+
+Why this fix works
+- The change makes LocaleUtils.to_locale accept the legitimate "language__variant" form by treating an empty middle component as an empty country rather than as an invalid input. After that, the method will construct Locale('fr', '', 'POSIX') and the assertion will pass.
+
+If you want, paste the current body of LocaleUtils.to_locale (lines ~20–40) and I’ll give an exact minimal patch you can apply.

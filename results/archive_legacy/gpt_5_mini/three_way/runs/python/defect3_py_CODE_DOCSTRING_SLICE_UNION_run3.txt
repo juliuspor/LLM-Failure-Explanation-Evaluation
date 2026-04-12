@@ -1,0 +1,52 @@
+What happens
+- The failure is an IndexError thrown by code_point_at when the for loop tries to read past the end of code_units.
+- This occurs in the block that handles consumed > 0:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why it fails (root cause)
+1. consumed is the number of code points the translator consumed starting at the current pos.
+2. The for loop runs exactly consumed iterations and each iteration calls code_point_at(code_units, pos).
+3. char_count(...) will advance pos by either 1 or 2 (UTF‑16 code units) depending on whether the code point is in a surrogate pair.
+4. If any iteration advances pos to length (the end of the code_units array) before the final iteration, the next iteration still executes and calls code_point_at(code_units, pos) with index == length. Per the implementation shown (lines 35–36), code_point_at raises IndexError for index < 0 or index >= len(code_units).
+5. So the code attempts to read a code point at index == length and fails.
+
+Where it occurs (specific lines/variables)
+- The for loop after "if consumed == 0:" uses pos and consumed and calls code_point_at(code_units, pos). The code_point_at function raises IndexError when index >= len(code_units) (see the check at lines 35–36 shown in the slice union).
+- The problematic expressions are: for pt in range(consumed): pos += char_count(code_point_at(code_units, pos))
+
+Why the logic is incorrect
+- The code assumes that running the loop consumed times is safe, but it does not account for the fact that each iteration advances pos by a variable number of code units (1 or 2). That makes it possible to try to read a code point starting at index == length on a later iteration.
+- There is no guard against calling code_point_at when pos >= length.
+
+Exact, actionable fixes (pick one)
+
+A. Safer loop that checks pos before calling code_point_at
+Replace the for loop with a counted while that checks bounds before reading:
+
+    # after consumed > 0
+    count = 0
+    while count < consumed and pos < length:
+        cp = code_point_at(code_units, pos)   # safe because pos < length
+        pos += char_count(cp)
+        count += 1
+
+This prevents calling code_point_at when pos >= length and advances by the real char_count each time.
+
+B. If you expect translate_codepoint to guarantee there are enough code units,
+add an explicit assertion and a clearer failure message:
+
+    if pos + consumed > length:
+        raise IndexError(f"translate_codepoint claimed to consume {consumed} codepoints at pos {pos}, but only {length - pos} remain")
+    # then use A's loop (defensive check still useful)
+
+C. If translate_codepoint can tell you how many code units it consumed instead of code points,
+change translate_codepoint to return the number of UTF‑16 code units consumed (1 or 2 per code point). Then you could advance pos directly by that many code units without iterating.
+
+Recommendation
+- Implement fix A immediately (safe, minimal change) so you won't ever call code_point_at with pos >= length.
+- If you control translate_codepoint, consider changing its contract (fix C) so the caller can advance pos in code units directly; that removes the need to call code_point_at/char_count here.
+
+Summary in one line
+The for loop iterates consumed times but advances pos by 1 or 2 each iteration; that can cause the next iteration to call code_point_at with pos == length, which triggers the IndexError. Fix by checking pos < length before calling code_point_at or by changing translate_codepoint to return code unit count.

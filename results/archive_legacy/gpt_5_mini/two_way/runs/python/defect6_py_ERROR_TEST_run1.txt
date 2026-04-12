@@ -1,0 +1,55 @@
+What happened
+- The test fails because CodeConsumer.add_number(-0.0) produced "0" instead of "-0.0".
+- The root cause is that add_number treats the input as numeric equality to 0.0 (or as an integer-valued float) and then formats/short-circuits to a plain "0" string before the negative-zero check is applied (or without checking sign). In Python, -0.0 == 0.0 is True, so any code that does "if n == 0.0: write('0')" or "if n.is_integer(): write(str(int(n)))" will lose the negative sign.
+- There is already a utility method CodeConsumer.is_negative_zero(value) (the tests call it), but add_number is either not calling it or calls it too late — after code has already turned the value into "0" via integer formatting or an equality check. That is why the expected "-0.0" is not produced.
+
+Where it happens (what to look for)
+- Open hit06_codeconsumer.py and find the add_number method.
+- Look for any of these patterns early in add_number (before any negative-zero handling):
+  - if value == 0.0: append("0")
+  - if value.is_integer(): append(str(int(value))) or append("%d" % value)
+  - any branch that converts the float to an integer string (int(value), format with no decimal places) without first checking for negative zero
+- Also look for an is_negative_zero helper in that file and see whether add_number calls it. If it does, it must be called before converting zero to an integer string.
+
+Why this exact code loses the sign
+- In Python float equality and integer conversion treat -0.0 as 0.0 and int(-0.0) gives 0. Those operations discard the sign bit. Because add_number uses one of those operations/branches before detecting negative zero, the negative sign is lost and "0" is appended.
+
+Concrete fixes (step-by-step)
+1. In add_number, check for negative zero first, before any equality or integer conversion:
+   - Call CodeConsumer.is_negative_zero(value) near the top of add_number and, if True, append("-0.0") and return.
+2. If you prefer to preserve all other behavior, only special-case negative zero, then proceed with the rest of formatting for other values.
+3. If there is no is_negative_zero, implement it like:
+   - Using math.copysign: return value == 0.0 and math.copysign(1.0, value) < 0.0
+   - Or using struct to inspect sign bit. The math.copysign approach is simple and reliable.
+
+Minimal patch example for add_number (pseudo-Python to drop into hit06_codeconsumer.py)
+- At top of add_number (before any int() or value == 0 checks):
+
+    import math  # ensure math is imported at file top
+
+    def add_number(self, value):
+        # Preserve negative zero
+        if CodeConsumer.is_negative_zero(value):
+            self.append("-0.0")
+            return
+
+        # ... existing formatting logic follows ...
+
+- Implement is_negative_zero if missing or confirm it is equivalent to:
+
+    @staticmethod
+    def is_negative_zero(value):
+        # True only for -0.0
+        return value == 0.0 and math.copysign(1.0, value) < 0.0
+
+Why this fix works
+- math.copysign inspects the sign bit and distinguishes -0.0 from +0.0, so checking this first prevents later integer/equality formatting from erasing the sign.
+- Returning immediately after appending "-0.0" ensures no other branch overwrites or replaces the output.
+
+Where to change (lines)
+- Modify hit06_codeconsumer.py in the add_number method at the very beginning of that method, before any code that does integer conversion or equality checks against 0.0.
+- If there is already an is_negative_zero method, ensure add_number calls it before other branches. If is_negative_zero doesn't use math.copysign, change it to the implementation above.
+
+Summary
+- Cause: add_number converts -0.0 by an equality or integer formatting branch that treats -0.0 as 0.0, losing the sign.
+- Fix: detect negative zero first (use is_negative_zero or math.copysign), append "-0.0", and return before any integer/equality formatting runs.

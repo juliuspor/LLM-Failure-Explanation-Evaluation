@@ -1,0 +1,71 @@
+I can’t point to a specific line in your source because you didn’t paste the code, but I can explain exactly what the error means, where to look, and several concrete, line-level fixes you can apply.
+
+What the error means (root cause)
+- The Python datetime code that raised ValueError("Minutes out of range: -15") was given a minutes value of -15. The datetime/time API requires minutes be an integer 0..59.
+- This error is raised by constructors or mutators that set minutes, e.g. datetime.time(...), datetime.datetime(...), or a call to .replace(minute=...), when the minute argument is outside 0–59.
+
+Where this happened in your program
+- Look at the full traceback that accompanied the ValueError. The last user-code file/line shown in the traceback is where your code passed the invalid minute into a datetime function. Example stack trace excerpt:
+  File "/path/to/your/file.py", line 42, in some_function
+    t = datetime.time(hour, minute)      # <- check this line
+- Open that file and go to the indicated line number and you will find one of these patterns:
+  - datetime.time(h, m)
+  - datetime.datetime(YYYY, M, D, h, m, ...)
+  - dt.replace(minute=m)
+  - something that calls those functions indirectly (a helper that builds a time)
+
+Why the minute became -15
+- You or your code computed minute as an offset and didn’t normalize it. Common causes:
+  - Subtracting minutes: minute = original_minute - 15, without adjusting if it goes negative.
+  - Converting a signed timezone offset string into minutes incorrectly.
+  - Parsing a malformed input where a negative sign ended up applied to minutes field.
+  - A library returned a negative minute and your code passed it straight to datetime.*.
+
+Concrete fixes (pick one, and change the exact line where the invalid minute is passed)
+1) Normalize minutes and adjust hours using divmod (recommended when you intend to shift a time by an amount):
+   - Replace code like:
+       dt = dt.replace(minute=minute)           # line X
+     with:
+       # compute total minutes, normalize into hours and minutes
+       total_minutes = hour * 60 + minute
+       hour, minute = divmod(total_minutes, 60)
+       hour = hour % 24                          # if you want to wrap day
+       dt = dt.replace(hour=hour, minute=minute)
+   - This ensures minute is in 0..59 before calling .replace(...).
+
+2) Use timedelta arithmetic (simpler when shifting overall time):
+   - Instead of computing negative minutes and calling .replace, do:
+       dt = dt + datetime.timedelta(minutes=offset)   # where offset can be negative
+   - This avoids invalid minute values entirely and handles day rollovers.
+
+3) Validate/clamp user input before calling datetime APIs:
+   - On the line where you build the time:
+       if not (0 <= minute <= 59):
+           raise ValueError(f"minute must be 0..59, got {minute}")
+       t = datetime.time(hour, minute)
+   - Use this if negative minutes are semantically invalid input.
+
+4) Fix parsing logic that produced the negative value:
+   - If you parse a string like "+01:-15" or split a timezone offset incorrectly, fix the parser so minutes are always parsed as non-negative and applied as an offset (e.g., sign applies to total minutes, not the minute field alone).
+   - Example correction:
+       sign = -1 if s[0] == '-' else 1
+       hours, minutes = map(int, s[1:].split(':'))
+       offset_minutes = sign * (hours * 60 + minutes)
+
+How to quickly find the exact line in your code
+- Open the traceback and go to the top-most frame that is inside your project (the first file path that’s not in the Python stdlib). That line is where you passed the -15 minute value.
+- Add temporary logging or a breakpoint immediately before that line to inspect the hour and minute variables:
+    print("DEBUG", "hour=", hour, "minute=", minute)
+
+Minimal example that reproduces the error and the two fixes shown
+- Failing code:
+    # file: example.py line 10
+    dt = datetime.datetime(2023,1,1, 10, -15)  # ValueError: Minutes out of range: -15
+- Fix A (normalize):
+    total = 10*60 + (-15)
+    h, m = divmod(total, 60)   # h=9, m=45
+    dt = datetime.datetime(2023,1,1, h, m)
+- Fix B (timedelta):
+    dt = datetime.datetime(2023,1,1, 10, 0) + datetime.timedelta(minutes=-15)
+
+If you want, paste the small snippet around the line reported in your traceback (the file and line number shown), and I’ll point exactly what to change on that line.

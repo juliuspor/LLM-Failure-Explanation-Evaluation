@@ -1,0 +1,39 @@
+What happened (where, exactly)
+- The failure happens in LocaleUtils.to_locale when parsing strings like "fr__POSIX".
+- The relevant code is at the snippet you showed: the check at lines 239–240 and the returns at 243–247.
+  - At line 239 you read ch3 and ch4 (locale_str[3] and locale_str[4]) and require both to be 'A'..'Z':
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+  - Later you return the country via locale_str[3:5] or the variant via locale_str[6:].
+
+Why it fails (root cause)
+- The code assumes that if there is a second underscore at all, there must be a two-letter country code in positions 3–4 (indices 3 and 4). That is true for "en_US" and "en_US_WIN" but not for the language__variant form where the country is empty.
+- For "fr__POSIX" the characters are:
+  index 0 = 'f', 1 = 'r', 2 = '_', 3 = '_', 4 = 'P', ...
+  So ch3 (locale_str[3]) is '_' — not an uppercase letter. The check at line 239 fails and raises ValueError ("Invalid locale format: fr__POSIX").
+- In short: the code does not handle an empty country (the double-underscore case). It treats the character at index 3 as if it must be an uppercase country letter, but in the language__variant format that position is '_' and the variant starts at index 4.
+
+What to change (clear, actionable steps)
+1. Detect the double-underscore case before enforcing country-letter checks:
+   - If locale_str[2] == '_' and locale_str[3] == '_', then this means language + empty country + variant. Return Locale(locale_str[0:2], "", locale_str[4:]) (variant begins at index 4).
+2. Only validate ch3/ch4 as uppercase letters when you know the country is present (i.e., locale_str[3] != '_').
+3. Also adjust the indices used for slicing the variant accordingly (variant index is 4 when country is empty, 6 when country present).
+
+Example patch (conceptual, showing exact indices/variables to change)
+- Before the current ch3/ch4 validation, add:
+
+    # handle language__variant (empty country) e.g. "fr__POSIX"
+    if len(locale_str) >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+        return Locale(locale_str[0:2], "", locale_str[4:])
+
+- Then keep/perform the existing ch3/ch4 checks only for the case where locale_str[3] != '_'.
+
+Why this fix works
+- It explicitly recognizes the empty-country form and returns the correct Locale(language, "", variant). It prevents the code from incorrectly demanding uppercase letters at index 3 when the second underscore indicates empty country.
+
+Concrete pointers to variables/lines
+- The failing check is ch3 = locale_str[3] and ch4 = locale_str[4] tested at lines 239–240.
+- The incorrect branch that assumes a present country returns Locale(locale_str[0:2], locale_str[3:5]) at line 243 (and the variant branch uses indices starting at 6).
+- The fix adds a branch before those checks to handle the locale_str[3] == '_' case.
+
+That change will make LocaleUtils.to_locale accept "fr__POSIX" (and the other tests like "en__UNIX") by returning Locale("fr", "", "POSIX") instead of raising ValueError.

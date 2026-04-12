@@ -1,0 +1,59 @@
+What happened (root cause)
+- In _update_bounds the code compares and assigns the wrong thing. It mixes up "index" variables (the integer index into the list) and the numeric bound values (start, end, middle in milliseconds), and in at least one place it also unconditionally overwrites the index after the comparison.
+- Concretely, when deciding whether the newly-added period should become the max (or min) for a bound, the code compares against the stored index or assigns the wrong index variable instead of comparing/assigning against the stored numeric bound. That produces the wrong index being returned by get_max_middle_index() (the test shows expected 1 but got 3).
+
+Where it occurs (lines and variables)
+- The slice you provided shows the min-start logic around lines 331–349:
+  - line 331: code checks SimpleTimePeriod vs general TimePeriod to compute start (start is set correctly there).
+  - lines 340–346: if self._min_start_index >= 0: min_start_period = self.get_data_item(self._min_start_index).get_period()
+    - min_start is computed from min_start_period (lines 342–345).
+    - line 346 does: if start < min_start: self._min_start_index = index
+  - line 349 (unindented) then does: self._min_start_index = index
+    - That unindented assignment always runs and thus always overwrites the stored min-start index regardless of the comparison result.
+- The same pattern (wrong variable used or unconditional overwrite) is present in the middle/max/min bound handling (the bug you reported for max_middle_index). There the code ends up using the wrong index variable in the comparison/assignment, so the stored best-index can be set to the newest index unconditionally or compared against an index instead of the numeric midpoint.
+
+Why that causes the test failure
+- For max_middle_index the algorithm should:
+  1. compute numeric mid for the new period,
+  2. if there is already a max, compute numeric mid for the current max index,
+  3. compare numeric mids and only replace the stored index if the new mid is larger.
+- Instead, because the code compares/assigns the wrong thing (index vs numeric bound) and/or always assigns the index (see the stray unconditional assignment at line 349), the stored "max middle index" ends up being the last item added (index 3 in the failing test), not the actual item with the largest numeric middle (index 1). That is why get_max_middle_index() returns 3 instead of 1.
+
+How to fix it (concrete steps)
+1. Compute a numeric bound for the new period and name it clearly. Example:
+   - mid = computed middle in milliseconds
+2. If there is an existing best index (e.g. self._max_middle_index >= 0) compute the numeric bound of that stored best:
+   - best_period = self.get_data_item(self._max_middle_index).get_period()
+   - best_mid = (compute numeric mid for best_period)
+3. Compare numeric values, not indices:
+   - if mid > best_mid:
+       self._max_middle_index = index
+   - else:
+       leave self._max_middle_index unchanged
+4. Remove any stray unconditional assignments that overwrite the index after the comparison (the assignment at line 349 must be removed or indented properly to be inside an else branch only if intended).
+5. Repeat the same approach for min_start_index, max_start_index, min_end_index, max_end_index, min_middle_index to ensure consistent numeric comparison and only update the stored index when the numeric bound warrants it.
+6. Ensure the code handles both SimpleTimePeriod and generic TimePeriod consistently (you already branch to compute millis differently; reuse that logic to compute the numeric bound for the stored best in the same way).
+
+Minimal example patch pattern (illustrative)
+- Replace the current comparison/assignment with:
+
+    # compute mid for new period
+    if isinstance(period, SimpleTimePeriod):
+        mid = (period.get_start_millis() + period.get_end_millis()) // 2
+    else:
+        mid = int((period.get_start().timestamp() + period.get_end().timestamp()) * 500)
+
+    if self._max_middle_index >= 0:
+        best = self.get_data_item(self._max_middle_index).get_period()
+        if isinstance(best, SimpleTimePeriod):
+            best_mid = (best.get_start_millis() + best.get_end_millis()) // 2
+        else:
+            best_mid = int((best.get_start().timestamp() + best.get_end().timestamp()) * 500)
+        if mid > best_mid:
+            self._max_middle_index = index
+    else:
+        self._max_middle_index = index
+
+Notes
+- The key points: always compare numeric bound values (mid, start, end), and only assign the index when the comparison says so. Remove any unconditional indexing that overwrites the correct index after the comparison.
+- After applying those changes, re-run the unit tests you supplied (test_max_middle_index_simple and the others). They should pass because the correct index values are computed and preserved.

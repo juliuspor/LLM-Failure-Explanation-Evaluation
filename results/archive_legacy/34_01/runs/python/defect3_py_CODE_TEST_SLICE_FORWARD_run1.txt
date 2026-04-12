@@ -1,0 +1,49 @@
+What went wrong (short): translate_codepoint and the loop that advances pos use different units (code units vs. code points). That mismatch makes pos jump past the end of code_units and triggers an out-of-range access in code_point_at for surrogate-pair characters (like U+1F630).
+
+Concrete walk-through with the example
+- input_seq '\U0001F630' becomes code_units = [high_surrogate, low_surrogate] (length = 2).
+- translate_codepoint(code_units, pos, out) returns consumed. Two possible conventions exist:
+  - consumed = number of code units consumed (2 for a surrogate pair), or
+  - consumed = number of code points consumed (1 for one astral code point).
+- The loop in your code treats consumed as "how many times to advance by the char_count of the code point at pos":
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+If translate_codepoint returned 2 (it consumed two code units), the loop runs twice:
+- 1st iteration: code_point_at(code_units, 0) returns U+1F630, char_count(...) == 2 → pos += 2 → pos == 2
+- 2nd iteration: code_point_at(code_units, 2) tries to read code_units[2] and raises IndexError (out of range)
+
+So the failure occurs because consumed was measured in code units but the loop treats it as a count of code points (causing repeated, excessive advancement and an out-of-bounds read).
+
+Where it happens
+- translate_codepoint(...) returns consumed
+- the for pt in range(consumed): ... pos += char_count(code_point_at(code_units, pos)) loop advances pos incorrectly when consumed counts code units
+- code_point_at (slice_forward lines 38–44) attempts to read code_units[index] and raises when index >= len(code_units)
+
+How to fix (clear, step-by-step)
+Choose one consistent convention and implement it in both places.
+
+Option A — consumed is a count of code units (simple, minimal change)
+1. Treat consumed as code-unit count. Replace the whole for-loop with a direct advance:
+   pos += consumed
+   (Remove the for pt in range(consumed): ... block.)
+2. Leave translate_codepoint returning the number of code units it consumed (1 or 2).
+3. Rationale: you already have code_units array; advancing by consumed code units is correct and avoids repeatedly calling code_point_at while skipping over already-consumed units.
+
+Option B — consumed is a count of code points (alternate)
+1. Ensure translate_codepoint returns number of code points consumed (1 when it handled a surrogate pair).
+2. Keep your current loop but guarantee translate_codepoint uses code point counts.
+3. This is less straightforward because translate_codepoint must compute code points (not code units) in all cases.
+
+Which to pick
+- Option A is the simplest and least error-prone: replace the loop with pos += consumed. It directly matches many existing translator contracts where “consumed” is the number of code units processed.
+
+Exact code change (where to edit)
+- Current code block:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- Replace with:
+    pos += consumed
+
+Result
+- With this change, a surrogate pair (consumed == 2) advances pos from 0 to 2 exactly once and code_point_at is never called with an out-of-range index. The IndexError goes away and the translator correctly handles astral characters.

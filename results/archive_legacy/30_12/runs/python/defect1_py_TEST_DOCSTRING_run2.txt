@@ -1,0 +1,54 @@
+What you passed is legal by the doc: for_offset_hours_minutes(-2, -15) should produce "-02:15". The failure means the method is combining the hour and minute sign incorrectly.
+
+Root cause (what happened)
+- The method for_offset_hours_minutes builds a single offset from the two parameters, but it does not correctly apply the intended sign to the minutes part when both hour and minute are negative.
+- Concretely, the implementation adds the raw minutes value instead of applying the same sign as the hour. That causes a negative hour and a negative minute to cancel/flip incorrectly, so the resulting offset is wrong (for example producing -01:45 or +02:15 depending on the bug) instead of -02:15.
+
+Why it happens (why)
+- The code is doing something like:
+  offsetSeconds = hours * 3600 + minutes * 60;
+  without first normalizing the sign relationship between hours and minutes.
+- The contract in the doc is that if hours is negative the minutes parameter is interpreted as negative as well (or at least the two together form a negative offset). The code treats hours and minutes as independent signed values or treats minutes as an absolute quantity in some paths, so the sign gets applied wrongly.
+
+Where it occurs (where)
+- In DateTimeZone.for_offset_hours_minutes (the factory method you called). Look for the lines that compute the combined offset seconds from hours and minutes (the arithmetic that multiplies hours by 3600 and minutes by 60). That is the exact place the sign is mishandled.
+
+How to reproduce (exact steps)
+1. Call DateTimeZone.for_offset_hours_minutes(-2, -15).
+2. Inspect zone.getId() (or zone.id). It will not equal "-02:15".
+
+Precise fix (step-by-step)
+1. Replace the direct combination of hours and minutes with a normalized computation that ensures minutes carry the same sign intent as hours. Example replacement logic (pseudo-code you can drop into the method):
+
+    // Normalize inputs:
+    if hours < 0:
+        totalSeconds = hours * 3600 - abs(minutes) * 60
+    else if hours > 0:
+        // minutes must be non-negative per spec; reject negative minutes here
+        if minutes < 0:
+            throw new ValueError("minutes negative when hours positive")
+        totalSeconds = hours * 3600 + minutes * 60
+    else: // hours == 0
+        // sign of the offset comes from minutes
+        totalSeconds = (minutes >= 0 ? 1 : -1) * abs(minutes) * 60
+
+2. Alternatively, compute by first turning the pair into a signed minute count:
+    signedMinutes = abs(hours) * 60 + abs(minutes)
+    if (hours < 0 || minutes < 0) and not (hours > 0 && minutes < 0):
+        signedMinutes = -signedMinutes
+    totalSeconds = signedMinutes * 60
+
+   (Pick the variant that matches your language/error semantics; the key is to construct a single signed magnitude, not add two signed parts that may cancel incorrectly.)
+
+3. Add unit tests for the edge cases:
+   - (2, -15) should raise ValueError (minutes negative when hours positive).
+   - (-2, -15) should produce "-02:15".
+   - (0, -15) should produce "-00:15".
+   - (-2, 15) should produce "-02:15".
+
+Why this fix fixes it
+- It forces the minutes to be combined with hours as a single signed offset, matching the documented rules and preventing sign-cancellation or accidental sign flips.
+
+If you want I can:
+- Propose the exact line-by-line change in the actual source file if you paste the current implementation of for_offset_hours_minutes, or
+- Write unit tests you can add to your test suite to catch this and similar sign bugs.

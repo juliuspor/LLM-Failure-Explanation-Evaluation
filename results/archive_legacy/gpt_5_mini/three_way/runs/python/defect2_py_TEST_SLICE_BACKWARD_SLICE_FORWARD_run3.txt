@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The failure occurs inside GrayPaintScale.get_paint (see slice lines 54–75).
+- At line 71 the code computes
+  g = int((value - self._lower_bound) / (self._upper_bound - self._lower_bound) * 255.0)
+  then at lines 74–75 it checks if g is outside [0,255] and raises a ValueError:
+  if g < 0 or g > 255:
+      raise ValueError(...)
+- When the test calls get_paint(-0.5) (or get_paint(1.5)), (value - lower_bound) produces a ratio < 0 (or > 1), so g becomes negative (or > 255). That triggers the if at line 74 and causes a ValueError to be raised.
+- The tests expect out-of-range inputs to be clamped to the lower/upper bound (black/white), not to raise an exception. So the code raises an exception at line 75 instead of clamping the value.
+
+Why it happens (root cause)
+- The code never clamps the incoming value to the valid range before converting to a gray channel integer. It computes g directly from the raw value and then treats an out-of-range g as an error rather than performing clamping.
+- As a result, negative values or values > upper_bound produce g outside [0,255] and cause the ValueError at line 75.
+- (Also: there is no explicit guard against upper_bound == lower_bound; that would produce a division-by-zero at line 71. Tests don’t hit that, but it’s a separate risk.)
+
+Precise fixes (step-by-step, with lines to change)
+1. Clamp the input value before computing g (insert before line 71):
+   - value_clamped = min(max(value, self._lower_bound), self._upper_bound)
+
+2. Handle the degenerate bounds case (insert before the ratio computation):
+   - if self._upper_bound == self._lower_bound:
+         raise ValueError("upper_bound must be different from lower_bound")
+
+3. Compute ratio and g using the clamped value (replace line 71):
+   - ratio = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+   - g = int(ratio * 255.0)
+   (If you prefer nearest integer, use int(round(...)), but the tests expect truncation to 127 for 127.5, so plain int(...) is acceptable.)
+
+4. Remove the current raise at lines 74–75 (delete the if g < 0 or g > 255: raise ...). After clamping, g will always be within [0,255], so this check is unnecessary.
+
+5. Return the RGB triple (g, g, g).
+
+Example replacement for the relevant block (pseudocode tied to line numbers)
+- Before line 71:
+    if self._upper_bound == self._lower_bound:
+        raise ValueError("upper_bound must be different from lower_bound")
+    value_clamped = min(max(value, self._lower_bound), self._upper_bound)
+    ratio = (value_clamped - self._lower_bound) / (self._upper_bound - self._lower_bound)
+    g = int(ratio * 255.0)
+- Remove the if/raise that follows.
+
+Why this fix works
+- Clamping the incoming value ensures negative inputs map to lower_bound (black) and inputs > upper_bound map to upper_bound (white), matching the tests.
+- Removing the post-hoc exception prevents raising for expected out-of-range inputs.
+- The division-by-zero check prevents a runtime ZeroDivisionError for invalid instantiation where bounds are equal.
+
+Summary
+- Root cause: value is not clamped before mapping to the 0–255 gray channel; an out-of-range g triggers an exception at line 75.
+- Fix: clamp the input value, guard against equal bounds, compute g from the clamped value, and remove the exception check.

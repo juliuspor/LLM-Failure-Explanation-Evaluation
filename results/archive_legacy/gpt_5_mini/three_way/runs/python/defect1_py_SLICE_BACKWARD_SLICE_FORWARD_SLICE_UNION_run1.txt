@@ -1,0 +1,43 @@
+What happened (where it fails)
+- At line 396 the code refuses any negative minute value:
+  - 396: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later, the code at lines 402 and 404 treats the minute value as if its sign could be applied relative to the hour sign:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because the minutes were forced to be non‑negative at line 396, the later arithmetic computes the wrong total minutes for offsets where the hour sign and the minute value must interact (for example negative hour with non‑zero minutes). That leads to an incorrect large minutes value, which then causes FieldUtils.safe_multiply(...) to produce a too‑large offset and the code to hit the "Offset is too large" error at line 407.
+
+Why that is the root cause (simple)
+- The code must represent time zone offsets like "-03:30" (negative hours, positive minutes). The validation at line 396 disallows the minute component ever being negative, but the later logic assumes minutes will be combined with hour sign. By banning negative minutes early, the sign logic becomes inconsistent and produces a wrong absolute minutes total.
+
+Concrete example to reproduce
+- Suppose hours = -3 and minutes = 30:
+  - The code currently forces minutes_offset >= 0 (passes because 30 is non‑negative), but later when it tries to combine sign and pieces it uses arithmetic that expects to adjust the minute contribution based on hour sign, producing hours_in_minutes - minutes_offset (line 402) or hours_in_minutes + minutes_offset (line 404) incorrectly. The result can be a very large minutes value and trigger the "Offset is too large" path at line 407.
+
+How to fix it (step‑by‑step, specific edits)
+1. Stop treating minute sign separately; validate only the absolute minute magnitude:
+   - Replace the check at line 396 with a check that minutes_offset is between 0 and 59 in absolute terms (i.e., allow minutes_offset to be nonnegative and <= 59; don't reject a negative minute just because it is negative if your intended representation relies on hour sign).
+   - Preferable approach: require minutes_offset be between 0 and 59 (non‑negative) and apply the sign from the hour when computing the total offset. Do not expect negative minutes.
+
+2. Compute total offset minutes using the hour sign explicitly and consistently. Example algorithm to put where you currently do the hour/minute combination:
+   - Determine sign = +1 if hours >= 0 else -1
+   - total_minutes = sign * (abs(hours) * 60 + minutes_offset)
+   - Then convert to millis: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+3. Replace lines 402/404 with the explicit sign logic:
+   - Remove the branches that do hours_in_minutes - minutes_offset / + minutes_offset and use the single formula above.
+
+4. Keep the bounds check after the total is computed if you need to enforce a maximum offset magnitude; use absolute(total_minutes) when checking.
+
+Minimal code sketch to implement the changes (where to put it)
+- At/around line 396:
+  - if not (0 <= minutes_offset <= 59):
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- After computing hours_in_minutes and sign:
+  - sign = 1 if hours >= 0 else -1
+  - total_minutes = sign * (abs(hours) * 60 + minutes_offset)
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The minute component is validated only for its magnitude (0–59), and the sign for the whole offset is handled in a single place. There is no contradictory expectation that minutes might already be signed. This prevents forming an incorrect large minutes value and avoids the "Offset is too large" error caused by wrong sign handling.
+
+If you want, paste the surrounding function and I will show exactly which lines to change and produce a ready‑to‑drop replacement.

@@ -1,0 +1,47 @@
+What fails
+- The code throws an uncaught exception when FieldUtils.safe_multiply(...) overflows (or otherwise signals a problem). The try/except block is intended to convert an arithmetic overflow into a ValueError("Offset is too large"), but it doesn't catch the exception actually raised by FieldUtils.safe_multiply, so the original exception propagates instead of being converted.
+
+Why that happens (root cause)
+- The surrounding code and helper names (FieldUtils, DateTimeConstants) come from Joda-Time (Java). In Java an overflow check in FieldUtils.safe_multiply will throw an ArithmeticException (a Java exception).
+- In this function the code is written in Python style (type hints, cls) and the try block catches ArithmeticError (a Python built-in). ArithmeticError is not the same as Java's ArithmeticException, so the catch never runs for the exception thrown by FieldUtils.safe_multiply. The result is the overflow/ArithmeticException escapes instead of being caught and rethrown as the intended ValueError.
+- Concretely: when FieldUtils.safe_multiply triggers its overflow failure you expect the code on line 407 (the except) to run and raise ValueError("Offset is too large"), but it doesn't because the caught exception type is wrong. The uncaught exception bubbles up and causes the caller to see the original error and stack, not the clear ValueError.
+
+Other problems that make diagnosis harder
+- The method reuses the parameter minutes_offset to hold the computed total minutes. That makes the code harder to read and can hide mistakes; it also makes logging/diagnosis of bad inputs less clear.
+- Mixing Java helper code with Python exception handling produces this class of mismatch bugs.
+
+Where it occurs in the snippet
+- The unsafe call is at line 405:
+    offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- The except that is supposed to catch the overflow is at line 407:
+    except ArithmeticError:
+but Object thrown by FieldUtils.safe_multiply is not a Python ArithmeticError, so that except doesn't run.
+
+How to fix it (explicit steps)
+1. Stop reusing the input parameter. Compute and store total minutes in a new local variable:
+   - hours_in_minutes = hours_offset * 60
+   - total_minutes = hours_in_minutes + minutes_offset  (use subtraction only when you deliberately want to treat minutes as negative; clearer to compute total using sign logic)
+2. Make the exception handling match the exception that FieldUtils.safe_multiply actually raises:
+   - If this is a Python-only implementation (no Java), safe_multiply should raise a Python exception such as OverflowError or ValueError; catch that specific Python exception: except (OverflowError, ValueError): ...
+   - If FieldUtils.safe_multiply is a Java bridge that raises a Java ArithmeticException, ensure your wrapper translates that to a Python exception before it gets here, or catch the proper exception object that your runtime produces.
+3. After computing total_minutes, multiply and call for_offset_millis:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Minimal corrected pseudocode (showing names and lines to change)
+- Replace the block around lines 402–405 with:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    try:
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except (OverflowError, ValueError):   # choose the actual exception type your safe_multiply raises
+        raise ValueError("Offset is too large")
+
+Why this will fix it
+- Using total_minutes avoids overwriting the input and is clearer.
+- Catching the actual exception ensures the function will convert arithmetic overflow into the intended ValueError("Offset is too large") instead of leaking a lower-level exception.
+
+If you tell me whether FieldUtils.safe_multiply is a Java method being called from Python or a pure-Python function, I will give the exact exception class(s) you should catch and a precise corrected patch.

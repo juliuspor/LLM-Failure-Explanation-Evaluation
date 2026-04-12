@@ -1,0 +1,47 @@
+What happens
+- At lines 396–397 the code unconditionally rejects negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Later the method treats minutes_offset as possibly having the same sign as hours_offset:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+
+Because of the unconditional validation at lines 396–397, a caller who passes a negative minutes_offset together with a negative hours_offset (for example hours_offset = -1, minutes_offset = -30 to mean -1 hour 30 minutes) gets rejected at line 396 even though the intent (a negative total offset) is valid and the later arithmetic expects a signed minutes value. In short: the validation forbids negative minutes, but the arithmetic and callers may legitimately use negative minutes when hours_offset is negative.
+
+Where it occurs
+- The rejection happens at line 396–397 (minutes validation).
+- The code that assumes signed minutes is at the lines computing hours_in_minutes and updating minutes_offset right after (the if hours_in_minutes < 0 ... block).
+
+Why this is the root cause
+- The validation and the arithmetic disagree about whether minutes_offset may be negative. That mismatch makes valid inputs (negative minutes with negative hours) fail early.
+
+How to fix (concrete steps)
+Pick one of these consistent behaviours and implement it:
+
+Option A — require non-negative minutes and document that callers must pass minutes as a positive number
+- Keep or tighten current validation, but change the negative-hours branch to subtract the positive minutes (current code already does this). Ensure your API docs state minutes_offset must be between 0 and 59 and the sign comes from hours_offset only.
+
+Option B — accept signed minutes and validate sign consistency
+- Allow minutes_offset in the range -59..59, and require minutes_offset to have the same sign as hours_offset (or be zero). Concretely:
+  - Replace the validation at lines 396–397 with:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(...)
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("minutes must be non-negative when hours is positive")
+    if hours_offset < 0 and minutes_offset > 0:
+        raise ValueError("minutes must be non-positive when hours is negative")
+  - Then compute total minutes as hours_in_minutes + minutes_offset (no special-case subtraction).
+
+Option C — normalize input by taking absolute minutes and applying sign of hours
+- If you want callers to pass only a magnitude for minutes (always 0..59) but allow negative total by giving hours_offset negative, keep the current check but do not allow callers to pass negative minutes (document that requirement). If callers still pass negative minutes, normalize them: minutes_abs = abs(minutes_offset); total_minutes = hours_in_minutes - minutes_abs if hours_offset < 0 else hours_in_minutes + minutes_abs.
+
+Which to choose
+- If the API should accept -1 hour 30 minutes as (hours_offset=-1, minutes_offset=-30), use Option B.
+- If the API should accept -1 hour 30 minutes as (hours_offset=-1, minutes_offset=30) (minutes always positive), use Option A or C and document it.
+
+Summary
+The method fails because it rejects negative minutes at lines 396–397 while later code and callers may expect minutes_offset to be signed when hours_offset is negative. Either allow signed minutes (validate sign consistency) or require minutes to be non-negative and normalize/ document accordingly.

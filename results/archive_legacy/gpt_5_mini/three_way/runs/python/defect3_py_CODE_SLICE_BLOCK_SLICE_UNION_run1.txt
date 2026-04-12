@@ -1,0 +1,53 @@
+What happened (where it fails)
+- The crash happens inside the for-loop that runs when translate_codepoint(...) returns a positive consumed value (the loop begins at the last three lines you pasted).
+- The call to code_point_at(code_units, pos) can be made with pos == len(code_units). That triggers the IndexError raised at line 35 of code_point_at ("String index out of range: {index}").
+
+Why it happens (root cause)
+- translate_codepoint(...) returns consumed as a count of codepoints processed.
+- The code then tries to advance pos by the number of UTF-16 code units for each consumed codepoint using:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+- Inside that loop, pos is updated iteratively. After some iterations pos may reach len(code_units). The next iteration then calls code_point_at(code_units, pos) with pos == len(code_units), which is out of bounds and raises the IndexError at line 35.
+- In short: the code calls code_point_at(...) with an out-of-range index because it computes the index inside the loop after prior increments, without guarding the bounds.
+
+Where exactly to look
+- The offending call is code_point_at(code_units, pos) inside the for pt in range(consumed) loop (the last three lines you posted).
+- The IndexError is raised at line 35 in code_point_at (the bounds check).
+
+Concrete fixes (step-by-step, with exact change options)
+
+Option A — compute and use code units consumed directly (preferred if you can change translate_codepoint contract)
+1. Change translate_codepoint to return the number of UTF-16 code units consumed (not the number of codepoints). If it already can be adapted, then simply replace the for loop with:
+    pos += consumed
+   This removes the repeated calls to code_point_at and avoids the out-of-range call entirely.
+
+Option B — keep consumed as codepoint count but compute each codepoint safely before advancing pos
+1. Replace the for loop with a loop that checks bounds and reads the codepoint before incrementing pos, for example:
+    for pt in range(consumed):
+        if pos >= length:
+            break   # avoid calling code_point_at with pos == length
+        cp = code_point_at(code_units, pos)   # safe because pos < length
+        pos += char_count(cp)
+2. This guarantees code_point_at is only called with valid indices.
+
+Option C — compute all required char_counts up front
+1. If you trust consumed but want to avoid repeated bounds checks, compute the codepoints (or char counts) for the next consumed codepoints before modifying pos:
+    offsets = []
+    tmp_pos = pos
+    for _ in range(consumed):
+        if tmp_pos >= length:
+            break
+        cp = code_point_at(code_units, tmp_pos)
+        offsets.append(char_count(cp))
+        tmp_pos += char_count(cp)
+    pos += sum(offsets)
+2. This also prevents any out-of-range calls because you check tmp_pos < length.
+
+Which to choose
+- If translate_codepoint can be changed, Option A is simplest and fastest.
+- If you must keep translate_codepoint returning codepoint count, use Option B (simple and safe).
+- Option C is fine when you want to compute the advance in a single step and validate input length first.
+
+Summary
+- Root cause: code_point_at gets called with pos == len(code_units) inside the for-loop and raises IndexError (line 35).
+- Fix: do not call code_point_at with an out-of-range index — either advance pos by code units directly, or check bounds and read the codepoint before incrementing pos.

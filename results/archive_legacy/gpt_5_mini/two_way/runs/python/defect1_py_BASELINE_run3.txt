@@ -1,0 +1,67 @@
+What happened (where it fails)
+- The failure occurs in DateTimeZone.for_offset_hours_minutes at the minutes validation near lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That code rejects any negative minutes (minutes_offset < 0). The test calls DateTimeZone.for_offset_hours_minutes(0, -15) and expects a -00:15 offset, but the method raises ValueError("Minutes out of range: -15") immediately at that check. So the root cause is the overly-strict minutes validation.
+
+Why it happened (root cause)
+- The docstring and tests allow minutes in the range -59..+59. The code instead enforces 0..59, disallowing negative minutes altogether. Because of that, valid inputs such as (0, -15) or (-2, -15) are rejected incorrectly.
+- (Secondary note) The later arithmetic (lines ~402–405) tries to combine hours and minutes using hours_in_minutes and minutes_offset, but that logic only makes sense if minutes can be negative and the validation permits them. The primary immediate bug is the validation rejecting negative minutes.
+
+Exact lines / variables involved
+- Method: for_offset_hours_minutes(cls, hours_offset, minutes_offset)
+- Validation that fails: lines 396–397:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Input that triggers failure: minutes_offset == -15 in the test test_zero_hours_negative_minutes.
+
+How to fix it (concrete steps and code)
+1. Allow minutes in -59..+59 by changing the validation to:
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the sign rules described in the docstring: positive hours cannot be paired with negative minutes (e.g. (2, -15) must raise). Add this explicit check:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes not allowed")
+
+3. Compute the total minutes correctly for all sign combinations. Replace the current mixing of hours_in_minutes and minutes_offset with this explicit logic:
+
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0 and minutes_offset > 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+
+4. Convert minutes to milliseconds as before:
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Complete replacement (drop-in) for the validation + computation block (lines ~396–405):
+
+    # validate minutes allow negative values per docstring
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+    # disallow positive hours combined with negative minutes (docstring rule)
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Positive hours with negative minutes not allowed")
+
+    try:
+        hours_in_minutes = hours_offset * 60
+        if hours_offset < 0 and minutes_offset > 0:
+            total_minutes = hours_in_minutes - minutes_offset
+        else:
+            total_minutes = hours_in_minutes + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    except ArithmeticError:
+        raise ValueError("Offset is too large")
+
+Why this fix works
+- It permits minutes in the full documented range -59..+59 so (0, -15) and (-2, -15) are accepted.
+- It preserves the documented rule that positive hours cannot be paired with negative minutes.
+- The total_minutes formula handles all combinations explicitly:
+  - (0, -15): hours_in_minutes = 0 -> total_minutes = 0 + (-15) = -15
+  - (-2, 15): hours_in_minutes = -120 -> total_minutes = -120 - 15 = -135 (-02:15)
+  - (-2, -15): total_minutes = -120 + (-15) = -135 (-02:15)
+  - (2, 15): total_minutes = 120 + 15 = 135 (+02:15)
+
+If you want, I can produce a full patched version of for_offset_hours_minutes with line numbers adjusted to your file.

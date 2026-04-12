@@ -1,0 +1,48 @@
+What happened
+- At lines 346–351 the code raises a TypeError whenever inferred_type == object and expected_type != object.
+- That check is too broad and fires in a common, valid case: when both array and element are None (so there is no element type to infer), inferred_type becomes object, and the code then raises because expected_type is not object.
+- The result: the function fails with an exception even though the docstring promises that when the element is None the function should return a List[object].
+
+Where it occurs (exact lines)
+- The failing check is here:
+  - Line 346: if inferred_type == object and expected_type != object:
+  - Lines 347–351: raise TypeError(...)
+
+Why it fails (root cause)
+- inferred_type == object means "we couldn't determine an element type" (for example because array is None and element is None).
+- expected_type != object is interpreted as "caller expects a specific element type" and the code treats that combination as an illegal cast from List[object] to List[expected_type] and raises.
+- But when both array and element are None, the correct behavior (per the docstring) is to return a one-element list whose component type is the same as the element, unless the element itself is None, in which case the return type is List[object]. In other words, when element is None there is no reason to raise just because expected_type was provided (or because expected_type != object).
+- The check conflates two different situations:
+  1. A real type mismatch where array contains elements of type object and the caller wants List[SpecificType], which should raise.
+  2. The unknown-type case (no array and element is None) where we should return List[object] (not raise).
+
+How to reproduce (example)
+- Call the function with array = None, element = None, expected_type = str (or any non-object type). The code reaches that check and raises the TypeError described at lines 347–351 even though the element is None and the docstring says the return type should be List[object].
+
+Concrete fixes (steps and exact code changes)
+Option A — Only raise when expected_type is explicitly provided and there is an actual inferred element type different from object:
+- Replace the condition at line 346 with:
+  if inferred_type == object and expected_type is not None and expected_type != object:
+    raise TypeError(...)
+
+- Rationale: only block the cast when the caller explicitly gave an expected_type (not when expected_type is omitted/None), and keep the special-case behavior when the element is None.
+
+Option B — If expected_type is provided, use it to set the inferred_type before checking:
+- Before the current check, add:
+  if expected_type is not None:
+      inferred_type = expected_type
+- Then change the check to compare the actual array component type (if any) vs inferred_type. This ensures that when both array and element are None and expected_type is None, inferred_type remains object and no error is raised.
+
+Option C — Distinguish the unknown-type path explicitly:
+- If array is None and element is None:
+    return [None]  # with declared/annotated type List[object]
+- Else perform the existing type checks.
+
+Which to pick
+- Use Option A if you want minimal change: do not raise when expected_type is unspecified (None) or when the only reason for inferred_type==object is absence of element data.
+- Use Option B if you want to honor expected_type as the canonical element type when the caller provides it.
+- Use Option C if you want to follow the docstring exactly for the element-is-None case.
+
+Summary (what to change)
+- Stop raising at lines 346–351 for the case where inferred_type == object because there was no element to infer (element is None).
+- Change the condition to consider whether expected_type was actually supplied (expected_type is None vs not None), or set inferred_type from expected_type before the check. This removes the improper TypeError when array and element are None while preserving real type-mismatch errors.

@@ -1,0 +1,61 @@
+What happened
+- In MockCodeConsumer.add_number you detect "integral" floats and convert them to integers before writing. That code path turns -0.0 into int(-0.0) which is 0, and then str(0) becomes "0". That loses the negative sign carried by the IEEE -0.0 value, so the method outputs "0" instead of "-0.0".
+- The failure happens inside MockCodeConsumer.add_number (the branch that does int(number) or otherwise normalizes integral floats). The assertion expected the original string form "-0.0" but got "0".
+
+Why this is the root cause
+- Converting a float to int discards the sign bit for negative zero: int(-0.0) == 0 and str(int(-0.0)) == "0".
+- Python's float still represents -0.0 as distinct from 0.0 at the binary/sign-bit level; str(-0.0) and repr(-0.0) preserve the minus sign. The conversion to int is what collapses them.
+
+Where to change (concrete)
+- In MockCodeConsumer.add_number, find the lines that do something like:
+  if number.is_integer():
+      text = str(int(number))
+  else:
+      text = str(number)
+  self._buf.append(text)
+
+- That int(number) call (or any explicit integer coercion) is the offending line.
+
+How to fix (step-by-step options)
+Choose one of these fixes depending on desired output rules:
+
+1) Preserve exact float string form (simplest, typically correct)
+- Replace the integral-branch conversion with str(number) or repr(number), which preserves "-0.0".
+  Example change:
+    # before
+    if number.is_integer():
+        text = str(int(number))
+    else:
+        text = str(number)
+    # after
+    text = repr(number)   # or str(number)
+    self._buf.append(text)
+
+2) Keep compact integers but preserve negative zero explicitly
+- If you want "0" for +0.0 but "-0.0" for -0.0, detect negative zero before converting:
+    import math
+    if number == 0.0 and math.copysign(1.0, number) < 0:
+        text = "-0.0"
+    elif number.is_integer():
+        text = str(int(number))
+    else:
+        text = str(number)
+    self._buf.append(text)
+
+3) Use formatting that preserves sign for negative zero
+- Use repr(number) or format(number, 'g') carefully; repr(-0.0) -> '-0.0'. If you need a particular decimal precision use format(number, '.1f') which will also keep the sign:
+    text = format(number, '.1f')   # yields '-0.0' for -0.0
+
+Which to pick
+- If you expect to round/normalize numbers to integers for non-negative zeros only, use option 2.
+- If you only need to serialize floats so round-tripping preserves sign/meaning, use option 1 (repr or str).
+
+Quick test to verify fix
+- After applying one of the fixes, run:
+    cc = MockCodeConsumer()
+    cc.add_number(-0.0)
+    result = cc.get_code()
+    assert result == '-0.0'
+
+Summary
+The bug is caused by converting the float to int in add_number, which discards the negative-zero sign bit. Preserve the float string (repr/str) or detect negative zero with math.copysign before converting to int to fix it.

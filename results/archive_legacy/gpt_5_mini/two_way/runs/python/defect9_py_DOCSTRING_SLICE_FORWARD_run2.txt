@@ -1,0 +1,36 @@
+What happened (root cause)
+- At line 92 the code unconditionally does parts.append(replacement_list[replace_index]). If replacement_list[replace_index] is None this later causes a crash when the code tries to build/join the output (''.join(parts) fails on a None), because join requires strings.
+- The intent was to ignore None entries in search_list/replacement_list, but the code that marks those entries as “no more matches / ignored” is inside the match-finding loop (lines 102–105). That check runs after a replacement index has already been chosen and used at line 92.
+- In short: the code chooses a replace_index, immediately uses replacement_list[replace_index] (line 92), and only afterward marks entries with replacement_list[i] is None as ignorable (lines 102–105). The order is wrong — the None-check happens too late.
+
+Where it happens (specific lines / variables)
+- Crash occurs at line 92: parts.append(replacement_list[replace_index])
+- The decision that would have prevented using that replacement (the checks at lines 102–105:
+  no_more_matches_for_repl_index[i]
+  or search_list[i] is None
+  or len(search_list[i]) == 0
+  or replacement_list[i] is None
+) happens in the later match-search code (lines 108–114). That is after the append.
+
+Why that causes a crash
+- If replacement_list[replace_index] is None, parts contains a None. Later when code attempts ''.join(parts) (or otherwise expects strings) Python raises TypeError. The None was supposed to be ignored, but it wasn’t because the code checked for None only in the next phase of the loop instead of before using the replacement.
+
+Concrete fixes (exact steps you can apply)
+1. Prevent using a None replacement at the point of use (before line 92). Replace line 92 with a guarded append:
+   - if replacement_list[replace_index] is None:
+       parts.append('')   # or skip appending entirely
+     else:
+       parts.append(replacement_list[replace_index])
+   This ensures no None gets into parts.
+
+2. Or, make the “ignore” logic run earlier so replace_index is never set to an index whose replacement is None:
+   - When you initialize no_more_matches_for_repl_index (the flags array), set no_more_matches_for_repl_index[i] = True whenever search_list[i] is None or len(search_list[i]) == 0 or replacement_list[i] is None. That prevents those indices from ever being selected as replace_index later.
+
+3. Also add a safety check that replace_index is valid before using it:
+   - if replace_index is None or replace_index < 0: break or continue the outer loop
+   This guards against accidental -1/None values being used.
+
+Which of the two fixes I recommend
+- Best: combine (2) and (1). Mark unusable slots up-front (so they are never considered in the find loop), and keep the guarded append as a defensive programming measure. That both fixes the bug and prevents regressions if future changes reorder logic again.
+
+That fixes the root problem: replacements with value None will be ignored (not appended into parts), and the match-selection logic will not pick indices whose replacement is None.

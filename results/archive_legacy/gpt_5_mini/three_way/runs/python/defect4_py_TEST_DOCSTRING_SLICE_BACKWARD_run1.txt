@@ -1,0 +1,74 @@
+What happened (root cause)
+- The bug is in TimePeriodValues._update_bounds when updating the “max middle” (and a related logic problem for min_start). The method uses the wrong variable/assignment so the computed max_middle_index gets overwritten by the current index instead of keeping the index of the item that actually has the largest middle value.
+- Concretely, the code is comparing the new period’s middle value against the wrong thing and/or writing the index unconditionally. That causes the final self._max_middle_index to be the last-added index (or some other wrong index) instead of the index that actually holds the maximum middle.
+
+Where it occurs (file + lines)
+- The problematic code is in TimePeriodValues._update_bounds. From the provided slice we can see the pattern and related mistakes:
+  - Lines 331–335 handle getting start for SimpleTimePeriod vs generic periods.
+  - Lines 340–349 show the min-start logic. At 346 there is a conditional:
+      if start < min_start:
+          self._min_start_index = index
+    but then at 349 there is an unconditional
+          self._min_start_index = index
+    That unconditional assignment always overwrites the intended value, so min_start_index will always become the most recently added index. This is a clear, exact example of the same kind of mistake that causes the max_middle_index failure.
+- The same pattern is present for the “middle” bounds: the code that is supposed to compare the new middle to the current max middle is comparing or assigning using the wrong variable (an index instead of a stored middle value) or performs an unconditional assignment after the conditional. That is why your test expecting get_max_middle_index() == 1 got 3 instead.
+
+Why that produces the observed failure
+- In your test_max_middle_index_simple you add four items with mids 50 (idx 0), 150 (idx 1), 25 (idx 2), 75 (idx 3). The correct max middle is 150 at index 1.
+- Because _update_bounds either:
+  - compares the new middle to the existing stored index (self._max_middle_index) instead of the stored max middle value, or
+  - sets self._max_middle_index inside the conditional then immediately overwrites it with index unconditionally,
+  the logic ends up setting _max_middle_index to the last index that was processed (index 3) instead of leaving it at 1.
+
+Exact variable names to look for
+- self._max_middle_index — the wrong final value you observe
+- Possibly a named stored value such as self._max_middle or a computed local variable like max_middle that should be used for numeric comparisons (check for a numeric variable used to hold the current max middle)
+- index — the loop/item index that should be used only when a new max/min is found
+- start, min_start — shown in the slice and demonstrates the same mistaken pattern
+
+How to fix it (step-by-step)
+1. Open TimePeriodValues._update_bounds and find the section that updates the max middle bound. It will look similar in structure to the min_start section shown in the slice.
+2. Ensure you compute the numeric middle value for the new period and the numeric middle value for the existing candidate (the current max). For example:
+      middle = computed middle of period (ms)
+      if self._max_middle_index >= 0:
+          current_middle = get middle of self.get_data_item(self._max_middle_index).get_period()
+      else:
+          current_middle = None
+3. Compare numeric values (middle and current_middle). Do NOT compare middle against self._max_middle_index. Use the numeric values in the comparison:
+      if current_middle is None or middle > current_middle:
+          self._max_middle_index = index
+4. Remove any unconditional assignment that follows the conditional. For example, do not have:
+      if middle > current_middle:
+          self._max_middle_index = index
+      self._max_middle_index = index
+   The final unconditional assignment must be removed.
+5. Apply the same pattern to min_start (and other bounds). For the snippet you showed, remove the stray unconditional assignment at line ~349 so min_start_index is only set when start < min_start.
+6. Add unit tests (you already have these) and run them to verify:
+   - test_max_middle_index_simple should pass
+   - test_min_start_index should pass
+   - other bounds tests should pass
+
+Suggested small patch (pseudo-code)
+- Replace the mistaken block that currently looks like:
+      if self._max_middle_index >= 0:
+          max_middle_period = self.get_data_item(self._max_middle_index).get_period()
+          max_middle = ...  # compute numeric middle of max_middle_period
+          if middle > max_middle:
+              self._max_middle_index = index
+      self._max_middle_index = index
+  with:
+      if self._max_middle_index >= 0:
+          max_middle_period = self.get_data_item(self._max_middle_index).get_period()
+          max_middle = ...  # compute numeric middle of max_middle_period
+          if middle > max_middle:
+              self._max_middle_index = index
+      else:
+          # first item becomes the max
+          self._max_middle_index = index
+
+Why this will fix it
+- Using numeric comparisons against the stored numeric value ensures you pick the item with the largest middle value.
+- Removing the unconditional overwrite prevents the last-seen item from always becoming the stored index.
+
+Summary
+- The code overwrites the index variables (like self._max_middle_index and self._min_start_index) either by comparing the new numeric value to the wrong thing (an index) or by unconditionally assigning index after the conditional. That is why get_max_middle_index() returned 3 instead of 1. Fix by comparing numeric middle/start values and only assign the index when the conditional is true (or initialize when first item).

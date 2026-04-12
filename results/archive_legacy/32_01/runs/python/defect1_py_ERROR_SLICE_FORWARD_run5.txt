@@ -1,0 +1,61 @@
+What happened (where it failed)
+- The error raised is "ValueError: Minutes out of range: -15".
+- The failure happens while computing an offset in minutes and converting to milliseconds (see lines you supplied):
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+  - line 409: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+  - line 412: return cls.for_offset_millis(offset)
+- The negative minute value (-15) is coming from minutes_offset before conversion to milliseconds, so minutes_offset was allowed to become negative when it should have been in the range 0..59 (or the total minutes should have a correct sign).
+
+Why it failed (root cause)
+- The code mixes signs and subtraction incorrectly when building the total offset in minutes from hour and minute parts.
+- Specifically, the branch that sets minutes_offset uses both subtraction and addition of the minute component (lines 406 and 408). That logic produces a negative minute value for some inputs (for example when the hours part is negative but the minute part is handled the wrong way), so minutes_offset ends up being -15 instead of a valid 0..59 minute part or the correct total signed minute count.
+- The downstream code expects either:
+  - the minute component to be validated as a positive 0..59 before forming the total, or
+  - a correctly signed total minutes value (hours*60 ± minutes),
+  but the current code does neither reliably. As a result, you end up multiplying a negative minute count and later raising "Minutes out of range" (the immediate symptom).
+
+Concrete example to make it obvious
+- Suppose the parsed parts are hours = -1 and minutes = 15.
+- Correct total signed minutes should be -75 (i.e. -1*60 - 15).
+- What your code does instead (given the subtraction/addition lines) leaves the minute component as -15 at some point or forms minutes_offset incorrectly, producing the runtime error "Minutes out of range: -15".
+
+Exact fixes (step-by-step)
+1. Decide one clear convention: either compute a signed total minutes, or keep hour and minute components separate and validate minute as 0..59.
+2. Replace the current mixed subtraction/addition logic with a single correct computation. Two correct options:
+
+Option A — compute signed total minutes (recommended):
+- Compute sign = -1 if hours < 0 else +1
+- Use absolute hours and minutes for the math:
+  - total_minutes = sign * (abs(hours) * 60 + minutes)
+- Then:
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+  - return cls.for_offset_millis(offset)
+- This guarantees minutes are applied with the same sign as hours.
+
+Option B — validate minute component and combine:
+- Validate minutes in 0..59 right after parsing; if outside that range, raise a clear error.
+- Compute minutes_offset = hours * 60 + (hours >= 0 ? minutes : -minutes)
+  (equivalently, minutes_offset = hours*60 + sign*minutes where sign depends on hours)
+- Then proceed to multiply and return as above.
+
+3. Replace the problem lines (406–408) with one of the above implementations. Concretely, change
+   minutes_offset = hours_in_minutes - minutes_offset
+   ...
+   minutes_offset = hours_in_minutes + minutes_offset
+to a clear single assignment. Example code for Option A (pseudo-Python replacing those two lines):
+
+   sign = -1 if hours < 0 else 1
+   total_minutes = sign * (abs(hours) * 60 + minutes)
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Add explicit validation to give a clearer error message if minutes are out of range (e.g. raise ValueError("Minutes must be in 0..59, got: %d" % minutes)) instead of delaying to a later generic error.
+
+Why this change fixes it
+- It avoids mixing subtraction and addition that caused the minute value to flip sign alone.
+- It ensures minutes are applied consistently with the hour sign, so "-1:15" becomes -75 minutes (correct), not an intermediate -15 that triggers "Minutes out of range".
+
+Where to change it
+- Edit the method that contains lines 406–412 (the offset-building routine). Replace the two-line mix of subtraction/addition with the single, signed total-minutes computation shown above, and validate minutes immediately after parsing.
+
+If you want, paste the few lines around 400–412 and I’ll provide the exact one-line replacement for your code.

@@ -1,0 +1,71 @@
+What happened (where it failed)
+- The IndexError is raised inside substring_java when it calls the slice-check in SLICE_UNION (lines 32–34). That function raises because the end index passed to it (the variable upper from abbreviate) can be greater than len(text).
+- Concretely this happens because of the order of the bounds adjustments in abbreviate:
+
+  Relevant lines from your function:
+  - You first do:
+      if upper == -1 or upper > len(text):
+          upper = len(text)
+  - Then you do:
+      if upper < lower:
+          upper = lower
+
+  If lower is greater than len(text), the second if sets upper = lower, making upper > len(text). The previous clamp of upper to len(text) is undone. That results in substring_java(text, 0, upper) being called with end > len(text), triggering the IndexError in SLICE_UNION.
+
+Example that reproduces the problem
+- text length = 5, lower = 10, upper = 3
+  - First if: upper == -1 or upper > 5 ? No → upper stays 3
+  - Second if: upper < lower ? 3 < 10 → yes → upper = 10
+  - Now upper (10) > len(text) (5). Calling substring_java(text, 0, 10) causes SLICE_UNION to raise IndexError.
+
+Why this is the root cause (no guesswork)
+- The code explicitly allows upper to be set to lower after the clamp to len(text). If lower > len(text), that makes upper > len(text). substring_java enforces end ≤ len(s) and so throws. The exception location (SLICE_UNION lines 32–34) and the fact that the message uses end confirm the end value is the offending out-of-range argument.
+
+How to fix it (clear steps)
+Pick one of these correct fixes:
+
+1) Clamp upper after you ensure it is at least lower (simple reorder and re-clamp)
+   - Do:
+       if upper == -1 or upper > len(text):
+           upper = len(text)
+       if upper < lower:
+           upper = lower
+       if upper > len(text):
+           upper = len(text)
+   - That guarantees upper never exceeds len(text).
+
+2) Prefered clear approach: clamp both bounds explicitly
+   - Ensure lower is in [0, len(text)] and set upper = min(len(text), max(upper, lower))
+   - For example:
+       lower = max(0, min(lower, len(text)))
+       if upper == -1:
+           upper = len(text)
+       upper = max(upper, lower)
+       upper = min(upper, len(text))
+   - Or simpler:
+       if lower > len(text):
+           lower = len(text)
+       if upper == -1:
+           upper = len(text)
+       upper = max(lower, min(upper, len(text)))
+
+3) Another simple fix: check lower > len(text) up-front and treat as no space (or return substring(0,len(text))) depending on intended behavior:
+   - if lower >= len(text):
+         return substring_java(text, 0, len(text)) + StringUtils.default_string(append_to_end) if needed
+
+Which to choose
+- If the intent is that lower cannot refer past the end of the string, clamp lower down to len(text) first (option 2).
+- If the intent is to allow lower to push upper but want to keep upper within the string, use option 1 or 2.
+
+Minimal code change I recommend
+- Clamp lower first, then clamp upper:
+
+    if lower > len(text):
+        lower = len(text)
+    if upper == -1 or upper > len(text):
+        upper = len(text)
+    if upper < lower:
+        upper = lower
+    # now safe to call substring_java(...)
+
+This guarantees substring_java is always called with end ≤ len(text), avoiding the IndexError.

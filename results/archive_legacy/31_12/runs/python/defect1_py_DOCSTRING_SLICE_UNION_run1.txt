@@ -1,0 +1,40 @@
+What happened (where it fails)
+- In DateTimeZone.for_offset_hours_minutes (lines shown around 359–412), the code rejects any negative minutes at line 400–401:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because of that early check, calls that should be valid (for example hours_offset == 0 and minutes_offset == -15, which per the docstring should produce -00:15) are rejected immediately.
+- The later code (lines 406–408) contains logic to handle negative minutes together with a negative hours sign, but that logic never runs for negative minutes because they were already rejected at line 400.
+
+Why it fails (root cause)
+- The minutes validation is too strict. The docstring allows negative minutes when hours_offset is zero or negative; the code, however, treats any negative minutes as out-of-range unconditionally.
+- In short: the early validation at line 400 incorrectly forbids valid inputs and short-circuits later conversion logic.
+
+Exact locations
+- Method: DateTimeZone.for_offset_hours_minutes (starts at line ~359 in the slice)
+- Problematic check: lines 400–401 (minutes < 0 or > 59)
+- Unreachable/blocked handling: lines 406–408 (adjusting minutes based on sign of hours)
+- Resulting effect: callers like for_offset_hours_minutes(0, -15) fail with ValueError even though the docstring says (0, -15) -> -00:15.
+
+How to fix it (concrete steps)
+1. Replace the single unconditional negative check with two checks:
+   - Validate that minutes_offset is within the allowed absolute range (0..59 or -59..59 depending on chosen convention).
+   - Disallow the specific invalid combination: positive hours with negative minutes.
+2. Concretely, change the code at lines 400–401 to something like:
+
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Positive hours with negative minutes is not allowed")
+
+   (Or, if you prefer to keep minutes non-negative and adjust later code, invert the approach — but the above follows the docstring semantics.)
+
+3. Keep the subsequent logic at lines 406–408 that normalizes minute sign when hours are negative (it will now run for valid negative-minute cases).
+
+Tests to add (explicit examples)
+- for_offset_hours_minutes(0, -15) -> should succeed and return -00:15
+- for_offset_hours_minutes(-2, -15) -> should succeed and return -02:15 (or equivalent)
+- for_offset_hours_minutes(2, -15) -> should raise ValueError (invalid combination)
+- for_offset_hours_minutes(2, 15) and for_offset_hours_minutes(-2, 15) -> succeed
+- boundary tests: minutes = -59, +59 and hours = -23..23; also test offsets exceeding +/- 23:59:59 to hit the "Offset is too large" branch
+
+This pinpoints the exact faulty check (lines 400–401) and gives a concrete replacement and tests so the method will conform to the documented behavior.

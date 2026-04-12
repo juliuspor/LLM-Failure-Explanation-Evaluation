@@ -1,0 +1,42 @@
+What failed
+- Root cause: the code reuses the parameter minutes_offset for a different meaning (first "the minutes part" 0..59, then "total minutes offset"). That reuse makes the arithmetic hard to read and is the reason the method produces wrong results in some cases and triggers the catch at line 406 (the ArithmeticError -> "Offset is too large") unexpectedly.
+- Where it happens: lines 402–405:
+  - line 402: hours_in_minutes = hours_offset * 60
+  - line 403–404: minutes_offset = hours_in_minutes - minutes_offset  (when hours_in_minutes < 0) or minutes_offset = hours_in_minutes + minutes_offset
+  - line 405: offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Why that is wrong: the local variable minutes_offset starts life as the minute component (0..59). After lines 403–404 it is repurposed to mean "total minutes offset". Reusing the same name hides the change of meaning and makes the arithmetic fragile:
+  - It makes the code harder to reason about and easy to get the sign wrong.
+  - If someone later changes validation or order of operations, the reused name can cause the wrong value to be multiplied at line 405, or the wrong thing to be checked earlier (the validation at lines 396–397 checks the minute component while the same name later holds the total).
+  - Any exception or overflow reported at line 406 is therefore confusing: it looks like the minute check passed, but the value that gets multiplied at line 405 is not the same value that was validated at 396–397.
+
+Concrete example showing the confusion (where the bug appears):
+- Suppose hours_offset = -1, minutes_offset = 30
+  - line 402 computes hours_in_minutes = -60
+  - line 403 assigns minutes_offset = -60 - 30 = -90 (now minutes_offset no longer means "minutes part")
+  - line 405 multiplies -90 by 60000 to get offset in millis
+  - The code works here, but the repurposing is what causes the unexpected failures in real changes/tests: if validation or other logic moves or if the variable is inspected for logging/debugging it will be misleading.
+
+What happened in your failing run
+- The value that gets multiplied in line 405 is not the original minute component that you validated at 396–397; it is the combined total minutes constructed at 402–404. The code therefore reports failures (the ArithmeticError caught and converted to "Offset is too large") for values that passed the minute-component check, because the checked value and the multiplied value are two different things.
+
+How to fix it (step-by-step)
+1. Stop reusing the parameter minutes_offset. Introduce a clearly named local variable for the combined total minutes, e.g. total_minutes.
+2. Keep minutes_offset only as the validated minutes component (0..59).
+3. Compute total_minutes from hours_in_minutes and minutes_offset with clear sign handling.
+4. Pass total_minutes to safe_multiply.
+
+Suggested replacement for lines 402–405 (explicit steps)
+- hours_in_minutes = hours_offset * 60
+- if hours_in_minutes < 0:
+    total_minutes = hours_in_minutes - minutes_offset
+  else:
+    total_minutes = hours_in_minutes + minutes_offset
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- The minute component remains validated and unchanged.
+- The variable total_minutes has a single meaning (total offset in minutes) and is clearly what gets multiplied to millis.
+- The code is easier to read and less likely to produce hidden sign/validation bugs or confusing exceptions.
+
+Notes
+- This explanation references the exact lines: the minute validation at 396–397, the hours_in_minutes calculation at 402, the reassignment at 403–404, and the multiplication at 405.

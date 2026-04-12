@@ -1,0 +1,38 @@
+What happened
+- The failure is in TimePeriodValues._update_bounds: when updating a "max" or "min" index (for middle/start/end), the code compares the value correctly but then assigns the wrong index variable instead of the current loop index. That makes the stored index point to some unrelated entry (e.g. index 3) even though the compared value came from index 1.
+
+Where it occurs (specific places)
+- Look at the pattern in _update_bounds around lines 340–349 in your slice: the code computes start (lines 331–335), then retrieves min_start_period and min_start (lines 340–345), compares start < min_start (line 346), and then sets self._min_start_index = index (line 347) — and falls back to self._min_start_index = index (line 349) for initialization. That pattern shows how the comparison and assignment should work.
+- The same pattern is used for all four bounds (min/max start, min/max end, min/max middle). The bug is that, for at least the "max_middle" case, the code uses the wrong variable on assignment (or uses the wrong index variable in the comparison/assignment). The test failure you saw — expected max_middle_index = 1 but got 3 — is exactly what happens if the code uses the wrong index variable when storing the new maximum middle index.
+
+Why that causes your failing test (concrete example)
+- In test_max_middle_index_simple you add four periods with mids: index 0→50, 1→150, 2→25, 3→75. The largest middle is 150 at index 1.
+- During the loop inside _update_bounds, when the code finds middle = 150 it correctly detects middle > current_max_middle. But instead of setting self._max_middle_index to the current loop variable index (1), the code sets it to the wrong variable (for example an unrelated variable that still holds 3), so after finishing the loop the stored _max_middle_index is 3 — exactly the observed wrong result.
+
+Root cause summary
+- A copy/paste / variable mix-up in _update_bounds: correct comparisons are made, but the assignment stores the wrong index variable (not the current loop index). This bug is repeated for different bound types because the method repeats the same pattern for start/end/middle. The slice you showed (lines ~331–349) demonstrates the correct pattern, and the failing case comes from an instance where that pattern was implemented incorrectly for max_middle.
+
+Precise fix (step-by-step)
+1. Open TimePeriodValues._update_bounds.
+2. Find the block(s) that update max_middle (search for max_middle, _max_middle_index, or "middle > max_middle").
+3. In the branch where you detect a new maximum (e.g. if middle > max_middle:), change the assignment so it sets self._max_middle_index = index (where index is the loop variable you use to examine the current period).
+   - Do the same for min_middle, min_start, max_start, min_end, max_end: always assign the current loop variable index to the corresponding _*index field when that period becomes the new min or max.
+4. Make sure you initialize the *_index variables only when they are negative (first entry) — e.g. if self._max_middle_index < 0: set max_middle to current middle and self._max_middle_index = index.
+5. Run the provided unit tests.
+
+Example patch (pseudo-diff)
+- Wrong (example of the bug):
+    if middle > max_middle:
+        self._max_middle_index = some_other_index_variable  # wrong variable used
+- Correct:
+    if middle > max_middle:
+        max_middle = middle
+        self._max_middle_index = index
+
+Why this fix is safe
+- The loop already computes the candidate value (start/end/middle) from the current period and compares it to the stored current min/max. Assigning the current loop index (index) is the only thing that keeps the stored index and stored value consistent. The fix simply restores that intended invariant.
+
+Tests to add or rerun
+- The tests you included (test_max_middle_index_simple and test_generic_time_period_support) will catch this mistake. Add an assertion after each add() verifying that the stored min/max values and indices remain consistent (value at returned index matches computed min/max).
+
+If you want, paste the exact _update_bounds implementation here and I will produce a one-line patch showing the exact variable name replacements.

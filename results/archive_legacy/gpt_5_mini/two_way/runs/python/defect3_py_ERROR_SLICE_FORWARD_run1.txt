@@ -1,0 +1,38 @@
+What happened (root cause)
+- The function reads high = code_units[index] on line 38 before any bounds check. That access fails when index is equal to the length of code_units (or otherwise >= len(code_units)). The IndexError "String index out of range: 2" means index was 2 while the string/list had length 2 (valid indices are 0 and 1).
+- The later check on line 39 (index + 1 < len(code_units)) only protects the access to the low surrogate at index+1. It does not protect the first access at line 38, so you can still crash before that check is reached.
+
+Where it occurred
+- Line 38: high = code_units[index] — this read is unguarded.
+- Line 39: if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units): — the index+1 check is useful but too late.
+
+Why it happened
+- The caller passed an index that is out of range (index == len(code_units) in your failing case). The function assumes the caller always passes a valid index, but that assumption was violated.
+- Typical cause: a loop or caller that iterates up to and including len(code_units) instead of stopping at len(code_units)-1, or a wrong index increment.
+
+Concrete fixes (explicit steps)
+Option A — Fix this function to guard the first access (recommended if the function should be robust):
+1. Add a bounds check at the top before line 38:
+   - if index >= len(code_units): raise IndexError("index out of range")  OR return a sentinel/error value as your API requires.
+2. Keep the existing index+1 check for the low surrogate.
+Example patch (replace lines 38–44):
+  if index >= len(code_units):
+      raise IndexError("index out of range")
+  high = code_units[index]
+  if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+      low = code_units[index + 1]
+      if 0xDC00 <= low <= 0xDFFF:
+          return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  return high
+
+Option B — Fix the caller (recommended if callers should never pass out-of-range indexes):
+1. Inspect where this function is called and ensure callers only call it with index < len(code_units).
+2. For loops, make the loop condition use index < len(code_units) (not <=), or adjust the end index.
+3. Add unit tests that call the function at the boundary values (0, len-1) to catch regressions.
+
+Which to choose
+- If this function is a low-level helper and you want it to fail fast on bad input, add the explicit top check (Option A).
+- If the function is always expected to be called only with valid indexes and you want the error to indicate a caller bug, fix the caller loop/logic (Option B).
+
+Summary
+- The immediate crash is caused by accessing code_units[index] without first verifying index < len(code_units). Either add that check inside the function (line 38) or ensure callers never pass an out-of-range index.

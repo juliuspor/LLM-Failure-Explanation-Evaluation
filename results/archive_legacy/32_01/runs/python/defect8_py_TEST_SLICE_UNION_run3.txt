@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The bug is in LocaleUtils.to_locale (method header at line 193). The code computes length = len(locale_str) (line 227) and then uses a wrong length test at line 236: it uses "if length == 2:" but immediately after that it accesses characters at indexes 3, 4 and 5 (lines 242–251). Those index reads assume the string is longer than 2, so the condition is wrong for every branch that follows.
+- For the input "fr__POSIX" the function never correctly recognizes the empty country and variant because it is using incorrect length checks and index positions. That causes either an IndexError or the function to reject the format (raise ValueError) instead of returning Locale('fr', '', 'POSIX').
+
+Why it fails (root cause)
+- The code's length test at line 236 doesn't match the indexing that follows. The branch that reads ch3 = locale_str[3] and ch4 = locale_str[4] can only make sense when length >= 5, not when length == 2. In other words the condition at line 236 is inverted/incorrect, so the subsequent code attempts to use characters that don't exist for many inputs or simply never executes for inputs that do.
+- In particular, "fr__POSIX" has:
+  - index 0:'f', 1:'r', 2:'_', 3:'_', 4:'P'...
+  - The correct logic must detect that locale_str[2] == '_' and locale_str[3] == '_' means the country is empty and the variant starts at index 4. The current code never tests for that pattern correctly because of the wrong length checks and indexing assumptions.
+
+Where to change it (concrete steps)
+1. Fix the length checks around line 236 so they match the indexes you use:
+   - Replace the incorrect "if length == 2:" with proper branching based on required minimum lengths, for example:
+     - if length == 2: return Locale(locale_str[0:2])
+     - elif length >= 5: handle language + country (and possibly variant)
+     - elif length >= 4: handle language + empty country + variant etc.
+2. Explicitly handle the empty-country form "lang__variant" (two consecutive underscores):
+   - After confirming language is present (indexes 0..1), check:
+     - if locale_str[2] == '_':
+       - if locale_str[3] == '_': // empty country
+         - return Locale(locale_str[0:2], '', locale_str[4:])
+       - else: // country present (2 letters) or malformed — validate indexes 3/4 before using
+3. Add bounds checks before accessing locale_str[3], locale_str[4], locale_str[5] (so you never index out of range) and check that country characters are A–Z only when country exists.
+
+Minimal explicit example patch (illustrative)
+- Replace the block beginning at line 236 with logic like:
+  - if length == 2:
+      return Locale(locale_str[0:2])
+    if length >= 3 and locale_str[2] == '_':
+      # empty country + variant: "fr__POSIX"
+      if length >= 4 and locale_str[3] == '_':
+          return Locale(locale_str[0:2], '', locale_str[4:])
+      # country present: need at least two letters for country
+      if length >= 5:
+          ch3 = locale_str[3]; ch4 = locale_str[4]
+          if not ('A' <= ch3 <= 'Z' and 'A' <= ch4 <= 'Z'):
+              raise ValueError(...)
+          if length == 5:
+              return Locale(locale_str[0:2], locale_str[3:5])
+          if locale_str[5] != '_':
+              raise ValueError(...)
+          return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+    raise ValueError(...)
+
+Why this will fix the test
+- That change explicitly recognizes the "fr__POSIX" pattern (two underscores -> empty country, variant follows) and avoids wrong indexing and wrong length tests, letting to_locale return Locale('fr', '', 'POSIX') as the test expects.

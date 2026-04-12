@@ -1,0 +1,72 @@
+What happened (root cause)
+- At line: if array is not None: inferred_type = type(array)
+  - type(array) returns the Python class of the list object (always list), not the element/component type you want. So inferred_type becomes list, not the element type.
+- When both array and element are None, your code sets inferred_type = object (lines in that elif/else branch).
+- Later you call new_list = ArrayUtils._copy_list_grow1(array, inferred_type) and then check:
+  if expected_type is not None:
+      if inferred_type == object and expected_type != object:
+          raise TypeError(...)
+
+  Because inferred_type is object when both array and element are None, and expected_type was passed as str in the failing test, that condition is true and you raise the TypeError that the test sees:
+  "Cannot cast object list to str list..."
+
+Why that is wrong
+- The code is trying to infer the array component type, but:
+  - type(array) is the wrong thing to ask for — it gives you the list object type, not the element type.
+  - when array is None and element is None you should respect expected_type (if provided) instead of defaulting to object and treating that as an unrecoverable mismatch.
+- In short: wrong source for inferred_type (type(array) is incorrect), and wrong fallbacks (defaulting to object rather than using expected_type when available).
+
+Where it occurs (exact variables/lines)
+- Wrong inference: inferred_type = type(array) (the if array is not None branch).
+- Bad default: inferred_type = object when both array and element are None.
+- The TypeError is raised by the block that checks inferred_type == object and expected_type != object after creating new_list.
+
+Concrete fixes (step-by-step)
+1. When array is not None, infer the component type from the contents of the list (an element), not from type(array). For example:
+   - Find the first non-None element in array and use type(first_non_none).
+   - If all elements are None and expected_type is provided, use expected_type.
+   - If all elements are None and expected_type is None, fall back to object.
+
+2. When array is None and element is not None, use type(element) (you already do this — keep it).
+
+3. When both array and element are None but expected_type is provided, use expected_type instead of object.
+
+4. Only raise the TypeError when you truly cannot satisfy the caller's expected_type (e.g., you inferred object and expected_type is stricter), but prefer to use expected_type if it was provided.
+
+Minimal corrected logic (replace your inference block)
+- Replace:
+
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+  With something like:
+
+    if array is not None:
+        # infer from array elements (component type), not from the list object itself
+        first_non_none = next((x for x in array if x is not None), None)
+        if first_non_none is not None:
+            inferred_type = type(first_non_none)
+        elif expected_type is not None:
+            inferred_type = expected_type
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+Why this fixes the failing test
+- For the failing test where array is None, element is None, expected_type=str:
+  - The new logic sets inferred_type = expected_type (str) instead of object, so the check inferred_type == object is false and you will not raise the TypeError. _copy_list_grow1 will then be told the intended component type str and the returned list will be [None] as the test expects.
+
+Additional notes
+- If your _copy_list_grow1 relies on component type to create a typed array (mimicking Java), ensure it accepts expected_type when available.
+- If arrays can contain mixed types, you may choose a conservative policy (object) but still respect expected_type when the caller requested it.
+
+This pinpoints the exact bug (using type(array) instead of element/component type and defaulting to object rather than using expected_type) and gives concrete replacement code to fix it.

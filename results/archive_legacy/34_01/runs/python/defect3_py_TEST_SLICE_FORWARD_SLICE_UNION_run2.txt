@@ -1,0 +1,41 @@
+What happened (what failed)
+- The test calls escaper.translate_string('\U0001F630') with a single supplementary character (U+1F630).
+- Inside your code you convert the Python string into "UTF‑16 code units" (function to_utf16_code_units) and then call the code that reads a code point at an index:
+  - At line 38 you read high = code_units[index].
+  - At lines 39–43 you try to detect a surrogate pair (high in 0xD800..0xDBFF and low in 0xDC00..0xDFFF) and combine them into a single code point.
+- The test fails because the indexes you pass to that code are not indexed the same way the code_units list is built. In short: you mixed two different indexing/representation models (Python code points vs. UTF‑16 code units).
+
+Why it fails (root cause)
+- Python str is a sequence of Unicode code points. A single character U+1F630 is one element in the Python string.
+- UTF‑16 represents U+1F630 as two 16‑bit code units (a surrogate pair). to_utf16_code_units is supposed to produce those UTF‑16 code units, and the code at lines 38–44 expects to be working on a list of UTF‑16 code units.
+- The code that calls this function, however, passes an index that was computed over Python code points (the original string), not over UTF‑16 code units. For BMP characters the two index spaces match; for supplementary characters like U+1F630 they do not.
+- As a consequence, when you pass the Python-string index for U+1F630 into the UTF‑16-based reader:
+  - either index points to the first code unit and the code reads a surrogate pair incorrectly, or
+  - index points beyond or into the second surrogate unit unexpectedly,
+  - producing the wrong code point or an incorrect output string. That mismatch is the direct cause of the failing assertion.
+
+Exactly where it happens (lines/variables)
+- to_utf16_code_units builds code_units (line 12).
+- The code that reads a code point uses index, high = code_units[index] (line 38).
+- It checks for a high surrogate and a following low surrogate (lines 39–41) and returns the combined value (line 43) or returns high unchanged (line 44).
+- The bug is that the caller supplies index based on the original Python string positions, not the positions inside code_units, so the branch at lines 39–43 gets the wrong inputs or is skipped when it should run.
+
+Concrete fixes (step‑by‑step)
+Pick one consistent representation and stick to it. Two concrete options:
+
+Option A — Work in Python code points (recommended)
+1. Remove any UTF‑16 code unit conversion. Operate directly on the Python str where each character is one code point.
+2. Replace to_utf16_code_units and the surrogate‑pair combining logic with ord(s[i]) to get the code point for character i.
+3. Change any callers so they index and iterate over the Python string (0 .. len(s)-1). This avoids surrogate pairs entirely.
+
+Option B — Work in UTF‑16 code units explicitly
+1. If you truly need UTF‑16 code units, build code_units by encoding: code_units = list(s.encode('utf-16-le')) interpreted as 16‑bit words — or compute surrogate pairs deterministically from code points > 0xFFFF.
+2. Make sure every piece of code that uses code_units also uses indexes into UTF‑16 code units (not Python string indexes). That means callers must count code units (each surrogate is a separate index).
+3. Document the index space and convert indices at the boundaries: when a caller has a Python-string index i, convert it to the corresponding UTF‑16 code‑unit index before calling the UTF‑16 routines.
+
+Which one to choose
+- If translate_string is meant to operate on Python strings (typical in Python code), use Option A and remove surrogate handling: simpler and less error‑prone.
+- If you must match an external UTF‑16 index convention (e.g. interoperating with a system that uses UTF‑16 indices), use Option B but be explicit and convert indices at call sites.
+
+Summary
+The failure is caused by mixing Python code‑point indexing with UTF‑16 code‑unit indexing: the index passed to the code at lines 38–44 does not refer to the same sequence (code_units) that those lines expect. Fix by choosing one representation and keeping indexes and conversions consistent; the simplest fix is to operate directly on Python code points (use ord/chr) and remove the UTF‑16 surrogate logic.

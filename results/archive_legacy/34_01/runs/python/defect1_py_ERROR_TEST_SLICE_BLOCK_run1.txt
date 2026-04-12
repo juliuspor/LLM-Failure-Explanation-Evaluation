@@ -1,0 +1,48 @@
+What happened (what failed)
+- The test called DateTimeZone.for_offset_hours_minutes(-2, -15).
+- Inside for_offset_hours_minutes the function assigns the parameter to minutes_offset and immediately checks:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15, the check at line 396 triggers and raises ValueError("Minutes out of range: -15").
+
+Why it happened (root cause)
+- The function is validating minutes_offset as if it must be in the range 0..59. The test passed a negative minutes value (-15) to indicate -2 hours and -15 minutes, but the validation rejects negative minutes.
+- The code treats hours and minutes as separate signed parts instead of normalizing them into a single signed offset. Passing a negative minutes value is not accepted by the current validation even though the intended meaning (offset -2 hours and -15 minutes) is valid.
+
+Where it occurs
+- In DateTimeZone.for_offset_hours_minutes, at the validation block shown in the slice (lines 396–397):
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Two clear fixes (pick one)
+
+A) Fix the caller (simplest)
+- Pass a non-negative minutes value and put the sign on hours:
+  - Replace DateTimeZone.for_offset_hours_minutes(-2, -15) with DateTimeZone.for_offset_hours_minutes(-2, 15)
+- Reason: the method expects minutes in 0..59 and uses the sign of the hours parameter to determine the overall sign.
+
+B) Make the method accept signed minutes (change inside DateTimeZone.for_offset_hours_minutes)
+- Normalize hours and minutes into a single signed total_minutes before validating, for example:
+  1. Compute sign = -1 if (hours < 0) else 1
+  2. total_minutes = sign * (abs(hours) * 60 + abs(minutes))
+  3. Validate that abs(minutes) is in 0..59 (or validate after normalizing)
+  4. Use total_minutes to construct the zone id and internal offset
+- Concrete change example (pseudo-code showing where to adjust):
+  - Instead of:
+      if minutes_offset < 0 or minutes_offset > 59:
+          raise ValueError(...)
+    do:
+      if abs(minutes_offset) > 59:
+          raise ValueError(f"Minutes out of range: {minutes_offset}")
+      # apply sign from hours (or a combined sign if hours == 0)
+      sign = -1 if hours_offset < 0 else 1
+      total_minutes = sign * (abs(hours_offset) * 60 + abs(minutes_offset))
+      # then proceed using total_minutes
+- Reason: this accepts calls like (-2, -15) and normalizes to -135 minutes, producing the expected id '-02:15'.
+
+Which to choose
+- If this method is intended to require minutes be 0..59 and callers always pass a non-negative minutes component, choose fix A (update the test/call site).
+- If callers reasonably might pass a signed minutes (as in your test), choose fix B to make the method robust and normalize sign handling.
+
+Summary
+- The immediate failure is caused by the minutes parameter being -15 and the validation at lines 396–397 rejecting negative minutes.
+- Either pass minutes as a non-negative value (15) or change for_offset_hours_minutes to normalize signed hours and minutes into a single offset before validation.

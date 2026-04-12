@@ -1,0 +1,41 @@
+What happened (where it fails)
+- At lines 400–401 the code immediately rejects any minutes_offset < 0:
+  400 |         if minutes_offset < 0 or minutes_offset > 59:
+  401 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later (lines 406 and 408) the method expects to be able to treat a negative minutes_offset when composing the final offset in minutes:
+  406 |                 minutes_offset = hours_in_minutes - minutes_offset
+ 408 |                 minutes_offset = hours_in_minutes + minutes_offset
+- Because the code throws at lines 400–401 as soon as minutes_offset is negative, valid inputs that use a negative sign for the whole offset (for example an offset of -1 hour 30 minutes) are rejected before the code can apply the sign logic at lines 406/408. In short: the validation runs too early and does not account for the sign handling done later.
+
+Why that is the root cause (in plain language)
+- The code treats minutes_offset as an absolute quantity at the validation step, but later treats it as signed when combining hours and minutes. If the caller intended a negative offset by passing a negative minutes value (or if the sign is applied elsewhere before combination), the early check blocks that legitimate negative minute component and raises ValueError.
+
+Exactly where to change it and how to fix it (step-by-step)
+1. Remove or postpone the early check at lines 400–401. Don’t reject negative minutes there.
+2. After you determine the sign of the overall offset (the code path that leads to lines 406/408), validate the magnitude of the minutes part with its sign taken into account. Validate the absolute value of minutes, not the signed value.
+   - Replace the check at lines 400–401 with a check on absolute value, or move a check to after the sign logic:
+     - Option A (simple change): replace
+       if minutes_offset < 0 or minutes_offset > 59:
+           raise ValueError(...)
+       with
+       if abs(minutes_offset) > 59:
+           raise ValueError(...)
+     - Option B (clearer, move validation): remove lines 400–401 entirely, then after sign processing (immediately before lines 406/408 or before computing offset) add:
+       if minutes_offset < 0:
+           minutes_abs = -minutes_offset
+       else:
+           minutes_abs = minutes_offset
+       if minutes_abs > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+3. Ensure the combination logic still uses the signed minutes correctly:
+   - If the overall offset is negative, subtract the minutes part from hours_in_minutes (line 406).
+   - If the overall offset is positive, add the minutes part to hours_in_minutes (line 408).
+
+Concrete minimal replacement (example)
+- Replace lines 400–401 with:
+  if abs(minutes_offset) > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- This keeps the same intent (minutes must be in 0..59) but allows a negative minutes component to reach the sign-handling logic that follows.
+
+Why this fix works
+- It validates the magnitude of minutes while allowing the sign to be applied later. That prevents the early rejection of valid negative offsets and lets lines 406/408 compute the final minutes correctly, so offset calculation and the call at line 412 (cls.for_offset_millis(offset)) succeed instead of failing with the wrong ValueError.

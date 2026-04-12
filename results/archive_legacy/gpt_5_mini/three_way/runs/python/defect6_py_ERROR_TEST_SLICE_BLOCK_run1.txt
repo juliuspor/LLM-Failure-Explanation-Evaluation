@@ -1,0 +1,54 @@
+What happened (root cause)
+- At line 176 the code tests if x == int(x). For x == -0.0 this is True because -0.0 == 0.0 in Python.
+- At line 177 value = int(x) converts -0.0 to the integer 0, which loses the sign bit.
+- Execution then reaches line 192 self.add(str(value)), which adds the string "0".
+- The branch that would have emitted the string form of the floating point (-0.0 → "-0.0") is only used in the else at line 193–194, and is never reached for values that compare equal to an int.
+
+So the code treats -0.0 like the integer 0 and prints "0" instead of preserving the negative sign. The negative-zero detection utility (you have CodeConsumer.is_negative_zero) exists, but it is not used in this integer branch.
+
+Where it happens
+- Check at line 176: if x == int(x) ...
+- Conversion at line 177: value = int(x)  (loses negative zero sign)
+- Final output at line 192: self.add(str(value))  (writes "0")
+
+Concrete, actionable fixes (pick one)
+
+1) Explicit negative-zero check before the integer branch
+- Add an early check right before line 176:
+
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+This preserves sign for negative zero and keeps the rest of the integer-handling code unchanged.
+
+2) Preserve sign when value == 0
+- Modify the integer branch to special-case zero after value = int(x). For example, replace lines 176–178 (and downstream where value is used) with:
+
+    if x == int(x) and not math.isinf(x) and not math.isnan(x):
+        value = int(x)
+        if value == 0 and math.copysign(1.0, x) < 0.0:
+            # negative zero: keep as -0.0
+            self.add("-0.0")
+            return
+        ...
+
+This checks the sign of x with math.copysign and emits "-0.0" when the float is negative zero.
+
+Why these fixes work
+- Both approaches detect negative zero before or right after the integer conversion and prevent the code path that converts -0.0 to the integer 0 and then prints "0".
+- They use the existing utility semantics (is_negative_zero) or math.copysign to reliably check the sign bit of the float.
+
+Which to choose
+- Use the explicit is_negative_zero(x) check if you already have that method and want a readable, single-point check (minimal change).
+- Use the math.copysign check if you prefer to keep all handling inside the integer branch without another helper call.
+
+One-line patch example (preferred, minimal):
+
+Insert at line 176 (before the integer test):
+
+    if CodeConsumer.is_negative_zero(x):
+        self.add("-0.0")
+        return
+
+This explains what happened, where in the code (lines 176–192), why the sign was lost (int(x) => 0), and gives concrete fixes with exact lines to change.

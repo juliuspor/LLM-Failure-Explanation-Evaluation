@@ -1,0 +1,52 @@
+What happened (what failed)
+- The failure happens in ArrayUtils.add when both the input array and the element are None and the caller provided expected_type=str.
+- At runtime the function computes inferred_type == object (because there is no information to infer a more specific type from None values).
+- The code then checks the inferred vs expected types and raises a TypeError. That is the code at lines 346–351:
+
+  346 |             if inferred_type == object and expected_type != object:
+  347 |                 raise TypeError(
+  348 |                     f"Cannot cast object list to {expected_type.__name__} list "
+  349 |                     f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  350 |                     f"[Ljava.lang.{expected_type.__name__};)"
+  351 |                 )
+
+- Because inferred_type is object and expected_type is str (not object), the guard triggers and the function raises the TypeError (mimicking a Java ClassCastException). This directly causes the test test_add_null_to_null_with_expected_type to fail.
+
+Why it happens (root cause)
+- When both the existing array and the element are None, the function cannot infer a component type from the inputs, so it falls back to inferred_type = object.
+- The code treats that fallback as an error whenever the caller requested a specific expected_type (expected_type != object). It assumes converting an object-typed array to a more specific typed array is invalid and raises rather than using the provided expected_type.
+- In Python this is unnecessary: the caller asked for expected_type=str and the expected behavior (per the tests) is to return [None] typed as str (or at least not to raise). Raising prevents valid use where the user provides expected_type to resolve the ambiguity.
+
+Exactly where to look
+- The failing check is lines 346–351 (variables: inferred_type and expected_type).
+- The call that triggers it is ArrayUtils.add(None, None, expected_type=str) (test_add_null_to_null_with_expected_type).
+
+Concrete fixes (specific steps)
+1. Treat the provided expected_type as authoritative when inferred_type is object:
+   - If inferred_type == object and expected_type is not None (or != object), do not raise; instead set inferred_type = expected_type (or otherwise proceed using expected_type).
+2. Only raise if inferred_type == object and no expected_type was supplied (or expected_type is object) and the implementation genuinely cannot create a typed list.
+3. Update the error message (if you still need to raise in other cases) to only describe real conversion failures, not the ambiguous None/None case.
+
+Suggested code change (replace the raising branch around lines 346–351):
+
+- Current (problematic):
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+
+- Replace with:
+  if inferred_type == object:
+      if expected_type is not None and expected_type != object:
+          # Use the caller's expected_type when inference gives only object
+          inferred_type = expected_type
+      else:
+          # Only raise if there is no provided expected_type to resolve ambiguity
+          raise TypeError(...)
+
+Notes and reasoning for the change
+- This uses expected_type to resolve ambiguity when inputs are both None — matching the test's expectation.
+- It avoids rejecting valid calls where the caller explicitly supplied expected_type.
+- It preserves raising in genuine cases where there is no expected_type and no way to infer component type.
+
+Summary
+- The code raises because inferred_type defaults to object when both inputs are None, and the implementation incorrectly treats that as a hard error whenever expected_type is more specific.
+- Fix by using the provided expected_type to resolve object ambiguity instead of raising.

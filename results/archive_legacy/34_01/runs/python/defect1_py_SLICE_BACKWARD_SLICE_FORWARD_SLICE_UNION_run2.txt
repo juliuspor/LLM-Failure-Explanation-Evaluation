@@ -1,0 +1,39 @@
+What happened (where and how)
+- At line 396 the code enforces that minutes_offset is between 0 and 59:
+  - if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- Later, at line 402 the code does:
+  - minutes_offset = hours_in_minutes - minutes_offset
+  or at 404:
+  - minutes_offset = hours_in_minutes + minutes_offset
+  and then turns that minutes count into milliseconds on line 405.
+
+The root cause
+- The code mixes up “minutes part” and the signed “total offset minutes”. lines 402/404 treat minutes_offset as the minutes part but they apply subtraction/addition in the wrong way for negative offsets.
+- For a negative timezone like "-01:30" the intended total offset is - (1*60 + 30) = -90 minutes. But the code:
+  - keeps minutes_offset = 30 (passes the 0..59 check at line 396),
+  - computes minutes_offset = hours_in_minutes - minutes_offset at line 402 → 60 - 30 = 30,
+  - ends up with +30 minutes instead of -90 minutes. That produces the wrong sign/magnitude and later logic (line 405/407) can then mis-report "Offset is too large" or create an incorrect offset.
+
+Why the validation check is part of the problem
+- The check at line 396 is fine for the minutes field itself (0..59), but subsequent arithmetic must combine hours and minutes and then apply the sign. The code subtracts minutes from hours (minutes = hours_in_minutes - minutes) instead of computing total = hours_in_minutes + minutes and then applying the negative sign when appropriate.
+
+Concrete steps to fix (exact changes)
+1. Compute a single total_minutes value from hours and minutes, then apply sign. Replace the lines that change minutes_offset with this explicit, correct sequence:
+   - hours_in_minutes = abs_hours * 60   (keep same as current code)
+   - total_minutes = hours_in_minutes + minutes_offset   (use the positive minute part)
+   - if negative_sign: total_minutes = -total_minutes
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+2. Keep the validation at line 396 (minutes_offset must be 0..59). Do not try to represent the signed value in minutes_offset before computing total_minutes.
+3. Remove/replace the existing subtraction-based lines (402 and/or 404) so you do not compute hours_in_minutes - minutes_offset for negative offsets.
+
+Concrete minimal code sketch (replace the block around 402–405)
+- hours_in_minutes = abs_hours * 60
+- total_minutes = hours_in_minutes + minutes_offset
+- if negative:
+    total_minutes = -total_minutes
+- offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- It ensures "-HH:MM" becomes -(HH*60 + MM) and "+HH:MM" becomes +(HH*60 + MM). That preserves the minutes part validation (0..59) but produces the correct signed total minutes before converting to milliseconds.
+
+If you want, paste the surrounding method and I will show the exact lines to change.

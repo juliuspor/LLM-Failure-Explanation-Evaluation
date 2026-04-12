@@ -1,0 +1,58 @@
+What happened (where it fails)
+- The test that fails is test_negative_zero which calls add_number(-0.0).
+- In add_number the code reaches this condition on line 6 of your snippet:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  For x = -0.0 this is True (because -0.0 == 0).
+- The code then does:
+  value = int(x)      # value == 0
+  mantissa = value    # mantissa == 0
+  ...
+  self.add(str(value))  # adds "0"
+- Because value is the integer 0 and the code converts it to the string "0", the negative sign is lost and the output becomes "0" instead of the expected "-0.0".
+
+Why it happens (root cause)
+- The root cause is that the code treats -0.0 as an integer-equal value (x == int(x)) and uses int(x) to format the number. int(-0.0) is 0 and str(0) drops the sign bit, so the code discards the negative sign of negative zero.
+- Comparison x < 0 is not sufficient to detect negative zero in some places. For example, earlier you use:
+    if x < 0 and prev == '-': ...
+  For x = -0.0, x < 0 is False (IEEE floating comparison considers -0.0 == 0.0 and not < 0), so logic that depends on x < 0 will not see the sign bit either.
+
+Exactly where to change it
+- Before you convert x to int (i.e. before the block guarded by if x == int(x) ...), detect negative zero and handle it specially.
+- The check should use a sign-preserving test, e.g. math.copysign or a dedicated is_negative_zero(x) function. The tests include a utility TestNegativeZeroUtility that expects CodeConsumer.is_negative_zero(-0.0) to return True — use that (or implement it with math.copysign).
+
+Concrete fixes (step-by-step)
+1. Add an explicit negative-zero check immediately inside add_number, before you do value = int(x). For example:
+   if self.is_negative_zero(x):
+       # preserve the sign and a fractional part to make it clearly negative zero
+       self.add("-0.0")
+       return
+   (Place this right before the integer branch: before "if x == int(x) and ...")
+
+2. If you prefer to keep integer-branch behavior but preserve sign, another place to handle it is inside that integer branch:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x):
+       if self.is_negative_zero(x):
+           self.add("-0.0")
+           return
+       value = int(x)
+       ...
+
+3. Implement is_negative_zero (if not already implemented) using math.copysign:
+   @staticmethod
+   def is_negative_zero(x):
+       return x == 0.0 and math.copysign(1.0, x) < 0.0
+
+Why this fix works
+- math.copysign lets you detect the sign bit independently of numeric equality, so you can tell -0.0 from +0.0.
+- Handling negative zero before converting to int prevents the code from discarding the sign by converting to an integer and calling str().
+
+Minor note about other behavior (space after minus)
+- Your code uses prev = self.get_last_char() and then if x < 0 and prev == '-': self.add(" "). Because x < 0 is False for -0.0, that particular branch won't add a space when a negative zero follows a minus. If you must keep the same spacing rule for -0.0 (i.e., treat -0.0 as negative when checking whether to insert a space), use self.is_negative_zero(x) in that condition too:
+    if (x < 0 or self.is_negative_zero(x)) and prev == '-':
+        self.add(" ")
+
+Summary (direct actionable change)
+- Add a guard like:
+    if self.is_negative_zero(x):
+        self.add("-0.0")
+        return
+  before converting x to int or before the integer formatting branch. That single change will make test_negative_zero pass and preserve correct sign handling.

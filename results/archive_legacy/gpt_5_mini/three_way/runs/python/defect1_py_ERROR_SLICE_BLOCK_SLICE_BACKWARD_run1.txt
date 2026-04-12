@@ -1,0 +1,56 @@
+What happened (where it failed)
+- The exception was raised at lines 396–397:
+  - Line 396: if minutes_offset < 0 or minutes_offset > 59:
+  - Line 397: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The value of minutes_offset was -15, so the condition minutes_offset < 0 evaluated true and the code raised ValueError("Minutes out of range: -15").
+
+Why it happened (root cause)
+- The code assumes minutes_offset is always a non‑negative integer in the range 0..59, but the actual value passed in was negative (-15).
+- This usually occurs when the minutes component of a signed timezone offset or a signed duration is produced with the sign attached to the minutes rather than just to the hours, or when the sign is applied twice. For example:
+  - Input "-0:15" or "-00:15" parsed incorrectly yields minutes_offset = -15 instead of hours = -0 and minutes = 15, or
+  - The caller computed minutes_offset as sign * minutes (sign = -1, minutes = 15) but later code expected minutes_offset to be an absolute minute value (0..59).
+- In short: minutes_offset holds a negative minute value, but lines 396–397 explicitly reject negatives.
+
+Exactly where to look next
+- The function that contains lines 396–397 (the validation) — check just before line 396 for how minutes_offset is computed or passed in.
+- The caller(s) of this function — find where minutes_offset is constructed. Look for parsing code that handles signs or splits hour/minute parts (e.g., parse of "-HH:MM" strings), or arithmetic that applies the sign to minutes.
+
+Concrete fixes (step‑by‑step)
+Pick the approach that matches how you want to represent offsets.
+
+A. If minutes_offset should always be stored as an absolute value 0..59 and the sign is kept separately:
+1. Locate where you compute the sign and minutes (caller or just before line 396).
+2. Make minutes_offset the absolute minute value:
+   - minutes_offset = abs(parsed_minutes)
+   or
+   - minutes_offset = parsed_minutes if parsed_minutes >= 0 else -parsed_minutes
+3. Ensure you keep the sign in a separate variable, e.g. sign = -1 or +1, and apply it where needed (when building total minutes or timedelta).
+4. Keep the validation at lines 396–397 as-is.
+
+B. If minutes_offset is intentionally signed and the validation should accept negative minutes:
+1. Change the validation to allow signed minute values in the expected range (e.g. -59..59):
+   - replace line 396 with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Ensure downstream code that uses minutes_offset understands signed minutes (no double-sign application).
+3. Add a unit test for negative minute offsets (e.g. -15) to prevent regressions.
+
+C. Defensive: validate at the parsing boundary and add an informative error
+1. At the point you parse input (e.g. "-00:15"), parse hours and minutes separately and enforce:
+   - minutes = int(mm)
+   - if not 0 <= minutes <= 59: raise ValueError("Parsed minutes out of range")
+2. If the input allows a leading sign, apply it only to the hours or to the combined offset consistently.
+
+Example concrete change (if you want absolute minutes, approach A)
+- Before (causing the failure):
+  # minutes_offset may be negative here
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- After:
+  minutes_offset = abs(minutes_offset)            # ensure 0..59
+  if minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Summary
+- The ValueError was raised because minutes_offset == -15, and the code rejects negative minutes at lines 396–397.
+- Fix by either computing minutes_offset as a non‑negative 0..59 value before that check (keep sign elsewhere), or change the check and downstream logic to accept signed minute values consistently. Also add checks/tests at the parsing site to prevent negative minute values from reaching this validation.

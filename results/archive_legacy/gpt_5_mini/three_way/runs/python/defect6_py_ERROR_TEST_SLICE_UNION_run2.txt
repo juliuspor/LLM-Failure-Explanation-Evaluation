@@ -1,0 +1,49 @@
+What happened
+- At line 176 the code does: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- For x == -0.0 that condition is true because -0.0 == 0 and int(-0.0) == 0.
+- The code then sets value = int(x) (line 177) and later calls self.add(str(value)) (line 192). Converting to int loses the sign: str(0) is "0".
+- So the negative sign of -0.0 is discarded by the int() conversion and the negative-zero case ends up printed as "0". That is why the test expected "-0.0" but got "0".
+
+Where exactly this occurs
+- The integer branch begins at line 176.
+- value is assigned at line 177.
+- mantissa/value-based output uses self.add(str(value)) at line 192 (or falls back to self.add(str(x)) at line 194 in some paths). The branch that runs for -0.0 ends up using str(value) (i.e. "0").
+
+Why it fails (root cause)
+- The code assumes that if x equals int(x) then treating it as an integer is fine. That assumption ignores signed zero: -0.0 compares equal to 0 and becomes int(0), which loses the negative sign.
+- There is an existing utility CodeConsumer.is_negative_zero but it is not consulted in this integer-handling branch, so the negative-zero case is never preserved.
+
+Concrete, actionable fixes (step-by-step)
+1. Detect negative zero before you convert to int.
+   - Add an explicit check before the integer branch (before line 176). For example:
+     if CodeConsumer.is_negative_zero(x):
+         self.add("-0.0")
+         return
+   - This uses the existing is_negative_zero utility and immediately emits "-0.0".
+
+2. Alternatively, detect signed zero with math.copysign or 1.0/x:
+   - Example:
+     if x == 0.0 and math.copysign(1.0, x) < 0:
+         self.add("-0.0")
+         return
+   - Or:
+     if x == 0.0 and 1.0 / x < 0:
+         self.add("-0.0")
+         return
+
+3. If you prefer minimal change inside the integer branch:
+   - After value = int(x) (line 177), test for the signed-zero case:
+     if value == 0 and math.copysign(1.0, x) < 0:
+         self.add("-0.0")
+         return
+   - This prevents using str(value) ("0") when the original x was negative zero.
+
+Why these fixes work
+- They prevent int() from discarding the sign by checking the sign of the original float before converting/formatting. That preserves the semantic difference between -0.0 and 0.0 required by the tests.
+
+One-line code snippet to insert just before line 176
+- if CodeConsumer.is_negative_zero(x):
+      self.add("-0.0")
+      return
+
+That will make test_negative_zero pass and does not affect other numeric formatting paths.

@@ -1,0 +1,43 @@
+What happened (where and why)
+- The failure occurs in LocaleUtils.to_locale, specifically around lines 237–240 and 243–247 in the slice you provided.
+- For the input "fr__POSIX" the string indices are:
+  - 0='f', 1='r', 2='_' (separator), 3='_' (empty country marker), 4='P'...
+- The code at line 237 unconditionally does:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  - then checks if ch3 and ch4 are uppercase letters (lines 239–240).
+- Because ch3 is '_' for the language__variant form, the check ch3 < 'A' or ch3 > 'Z' evaluates true and the method raises ValueError("Invalid locale format: fr__POSIX").
+- In short: the method always assumes that when there is an underscore at index 2 the next two characters (index 3 and 4) are a two-letter uppercase country code. It does not handle the case where the country is empty and an underscore appears at index 3 (language__variant). This is exactly why your test test_locale_with_empty_country_variant fails.
+
+Exact lines referenced
+- ch3 = locale_str[3] (line 237)
+- ch4 = locale_str[4] (line 238)
+- if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z': raise ValueError (lines 239–240)
+- Those lines are executed before any special-case for an empty country (language__variant) is checked.
+
+How to fix it (step-by-step, concrete)
+1. Detect the language__variant pattern early, before enforcing a two-letter uppercase country:
+   - After confirming length > 2 and that locale_str[2] == '_', check whether locale_str[3] == '_'. If so, treat as language with empty country and a variant starting at index 4.
+2. Validate the variant exists (not empty) and return Locale(lang, "", variant).
+3. Only if locale_str[3] is not '_' should you proceed to require a two-letter uppercase country at indices 3 and 4.
+
+Minimal example patch (conceptual — insert this before you read ch3 / ch4):
+- let lang = locale_str[0:2]
+- if len(locale_str) > 2 and locale_str[2] == '_':
+    - if locale_str[3] == '_':
+        - # language__variant
+        - if len(locale_str) <= 4:
+            - raise ValueError("Invalid locale format: " + locale_str)  # variant missing
+        - return Locale(lang, "", locale_str[4:])
+    - else:
+        - # fall through to check country at indices 3 and 4
+
+What to test after the fix
+- Your failing case "fr__POSIX" should now return Locale("fr", "", "POSIX").
+- Other existing tests (language only "en", language_country "en_US", language_country_variant "en_US_WIN", invalid formats) should still behave as before.
+
+Why this is safe and correct
+- The language__variant format explicitly uses a double underscore to show an empty country. Checking for locale_str[3] == '_' is the precise signal you need to accept that form rather than enforcing a two-letter country code at 3–4.
+- Adding this early branch prevents the erroneous uppercase-letter check from running on the '_' at index 3.
+
+If you want, I can produce the exact edited code snippet to replace the problematic block in to_locale.

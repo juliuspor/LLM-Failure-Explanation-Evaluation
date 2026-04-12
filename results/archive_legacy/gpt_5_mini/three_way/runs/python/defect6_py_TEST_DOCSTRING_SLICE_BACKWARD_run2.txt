@@ -1,0 +1,48 @@
+What happened (where and what exactly failed)
+- The failure happens in CodeConsumer.add_number when it decides how to format a float-looking value stored in variable x.
+- At the decision on line 176:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  the code treats any value equal to an integer as an integer and emits "0", "42", "-42", etc.
+- For x == -0.0 this condition is true (because -0.0 == 0 and int(-0.0) == 0). The code therefore takes the integer branch and outputs "0", dropping the negative sign.
+- Your test test_negative_zero expects "-0.0" but got "0". That is why the test fails.
+
+Why this happens (root cause)
+- The integer-format branch runs before checking for negative zero. Negative zero is numerically equal to zero, so x == int(x) is true and the code never uses the negative-zero preservation logic (the is_negative_zero utility or any sign-aware handling).
+- In short: the code's ordering/condition lets -0.0 be handled as a plain integer zero, losing the sign.
+
+Concrete, unambiguous fixes (specific steps and code)
+You can fix this in either of two clear ways. Both are simple and safe.
+
+Option A — check negative zero before the integer branch
+1. At the start of add_number(), detect negative zero first:
+   if CodeConsumer.is_negative_zero(x):
+       append("-0.0")
+       return
+2. Then keep the existing integer branch (line 176) as-is. This guarantees -0.0 is handled specially and returns before integer formatting.
+
+Option B — exclude negative zero from the integer branch
+1. Change the integer-branch condition on line 176 to explicitly exclude negative zero. Replace that line with:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x) and not CodeConsumer.is_negative_zero(x):
+       ...
+2. Leave the rest of the method intact, but ensure there is a separate case that formats negative zero as "-0.0".
+
+Which to pick
+- Option A is the clearest and safest: test for the special case early and return. It makes the intent explicit and avoids subtle conditional logic.
+- Option B is acceptable if you prefer minimal edits, but it's slightly less explicit — you must ensure a later branch formats negative zero correctly.
+
+How to implement is_negative_zero if missing
+- If you need an implementation for CodeConsumer.is_negative_zero, use any sign-aware test, e.g.:
+  @staticmethod
+  def is_negative_zero(x):
+      return x == 0.0 and math.copysign(1.0, x) < 0.0
+- This detects the negative sign on IEEE-754 -0.0.
+
+Summary of exact change (one-line patch example)
+- Replace line 176 with:
+  if x == int(x) and not math.isinf(x) and not math.isnan(x) and not CodeConsumer.is_negative_zero(x):
+  OR, add before line 176:
+  if CodeConsumer.is_negative_zero(x):
+      self.append("-0.0")
+      return
+
+After this change, add_number(-0.0) will produce "-0.0" and test_negative_zero will pass.

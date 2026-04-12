@@ -1,0 +1,58 @@
+What failed
+- Where it occurs: in the type-inference branch shown in your slice (lines ~335–347). The code decides an inferred_type and then throws a TypeError at line 347 if inferred_type == object and expected_type != object.
+- What happened: calling ArrayUtils.add(None, None, expected_type=str) ends up setting inferred_type to object and then raising TypeError because expected_type != object. In other words, the method treats "both array and element are None" as an irrecoverable type-mismatch instead of honoring the caller's expected_type.
+
+Why it happens (root causes, with exact variables/lines)
+1. Wrong source for array element type (line 336)
+   - Code: if array is not None: inferred_type = type(array)
+   - Problem: type(array) returns the list type (e.g. list), not the element type. The code should be deriving the element (component) type from the list contents, not from the list object itself. Using type(array) makes the subsequent logic operate on the wrong thing.
+
+2. Missing use of expected_type when both array and element are None (lines 337–340)
+   - Code flow: elif element is not None: inferred_type = type(element) ... else: inferred_type = object
+   - Problem: when array is None and element is None, inferred_type becomes object. Later (line 346/347) the code checks:
+       if inferred_type == object and expected_type != object:
+           raise TypeError(...)
+     That makes the method fail for ArrayUtils.add(None, None, expected_type=str) — the caller asked for String (expected_type=str) but because no concrete element or array guided the inference, the method treats object as incompatible and raises.
+
+3. Misplaced strictness in TypeError check (line 346)
+   - The code assumes that inferred_type==object means "unknown and incompatible with a non-object expected_type", and immediately raises. But when the caller explicitly supplied expected_type, the method should accept it and produce a list of that element type (even if element is None). The current check rejects that reasonable call.
+
+Consequences you observed
+- Java-like failure described in your test: adding null-to-null with expected_type should produce [None] of the appropriate element type (String[] in the Java case). Instead the method raises a TypeError (or in Java returns Object[] which causes a later ClassCastException). In your Python tests, the implementation raises an error before returning.
+
+Concrete fixes (step-by-step, exact changes to make)
+1. Use element type from the array's contents, not type(array):
+   - Replace line 336 (inferred_type = type(array)) with something like:
+       if len(array) > 0:
+           inferred_type = type(array[0])
+       else:
+           inferred_type = None
+   - Rationale: an empty list provides no element type information; treat that as unknown (None) and allow expected_type to supply the type.
+
+2. Respect expected_type when array or element are None:
+   - After inferring from array or element, if inferred_type is None or object and expected_type is provided (not None), set inferred_type = expected_type instead of raising.
+   - Example logic:
+       if inferred_type is None:
+           if expected_type is not None:
+               inferred_type = expected_type
+           elif element is None:
+               inferred_type = object
+   - Rationale: caller-supplied expected_type should guide the return type when inputs are ambiguous.
+
+3. Change the strict TypeError condition (line 346–347) to only raise when there is a concrete mismatch between two known but different types:
+   - Instead of raising when inferred_type == object and expected_type != object, do:
+       if inferred_type is not None and expected_type is not None and inferred_type is not expected_type:
+           raise TypeError(...)
+   - This allows expected_type to be adopted when inference is unknown, but still catches genuine conflicting types.
+
+4. Be careful about heterogeneous arrays:
+   - If array contains mixed element types, pick a conservative inference (object) or detect element types and decide if they are compatible; raise only on real incompatibility.
+
+Exactly where to change
+- Replace the block starting at line 335–347 with the new inference logic above:
+   - At 335: if array is not None: inspect its elements (use array[0] if length>0; else treat as unknown)
+   - At 337: elif element is not None: inferred_type = type(element)
+   - After those, consult expected_type before deciding to raise (remove the unconditional raise at 346–347).
+
+Summary
+- The code uses type(array) (the list type) rather than the element type and then treats an "unknown" inference (object) as a hard mismatch with a caller-provided expected_type. As a result, ArrayUtils.add(None, None, expected_type=str) fails. Fix by deriving element type from array contents, and by honoring expected_type when the inputs are ambiguous; only raise TypeError on real, provable type conflicts.

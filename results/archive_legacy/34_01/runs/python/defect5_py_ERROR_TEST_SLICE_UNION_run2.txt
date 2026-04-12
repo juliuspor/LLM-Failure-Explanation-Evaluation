@@ -1,0 +1,53 @@
+What happened (root cause)
+- In add(...) the code decides what Java array type to use by "inferring" a component type from the inputs.
+- At line 337 the branch that would set inferred_type from the new element only runs when element is not None. With element == None that branch is skipped.
+- At line 340 inferred_type is left set to object. At line 346–347 the code notices inferred_type == object while expected_type != object and raises a TypeError. In a related execution path the routine instead proceeds and allocates an Object[] and then casts it to the requested String[]; that cast fails at runtime as shown by the ClassCastException (Object[] cannot be cast to String[]).
+- In short: when you call ArrayUtils.add(None, None, expected_type=str) the code never learns a concrete component type from the element (it's None), it falls back to object, and then later either raises a TypeError (line 347) or ends up returning/assigning an Object[] where a String[] is expected, causing the ClassCastException.
+
+Where exactly this happens
+- Line 337: the code that would update inferred_type is skipped because element is None.
+- Line 340: inferred_type is set to object (fallback).
+- Line 346–347: code treats this mismatch (inferred_type == object but expected_type != object) as an error and raises TypeError.
+- The ClassCastException arises when the code uses an Object[] (the fallback) and then casts/returns it as a String[] (the JVM forbids casting Object[] to String[]).
+
+Why the test fails
+- The test expects result == [None] and a return type compatible with expected_type=str.
+- Because the element is None, the method never establishes that the array should be of type String, so it either rejects the call (TypeError) or constructs an Object[] and produces a ClassCastException when treating it as a String[].
+
+Concrete fixes (step-by-step)
+1. If a caller supplies expected_type (non-object), prefer that type when the element is None:
+   - Replace the fallback at line 340 from inferred_type = object to:
+     - if expected_type is not None and expected_type != object: inferred_type = expected_type
+     - else: inferred_type = object
+   - This ensures the method will allocate a String[] when expected_type is str even if element is None.
+
+2. When creating the new array, avoid creating an Object[] and then casting:
+   - Use Array.newInstance(inferred_type, new_length) (or the language-equivalent) so the actual array has the requested component type and no cast is needed.
+   - That prevents the ClassCastException even if inferred_type was object earlier.
+
+3. Tighten validation/scoping at line 346–347:
+   - Either remove the unconditional error raise when inferred_type == object and expected_type != object if expected_type is trusted, or change the check to allow expected_type to override inferred_type:
+     - if inferred_type == object and expected_type != object: inferred_type = expected_type
+     - Only raise a TypeError if there is an actual incompatible type mismatch (e.g., inferred_type != object and not assignable to expected_type).
+
+Suggested minimal code change (pseudocode)
+- Replace:
+    inferred_type = object
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+  With:
+    if element is None:
+        inferred_type = expected_type if expected_type is not None and expected_type != object else object
+    if inferred_type == object and expected_type != object:
+        # now allowed because we used expected_type above; only error if truly incompatible
+        pass
+
+Unit test to add
+- The failing test you provided:
+    result = ArrayUtils.add(None, None, expected_type=str)
+    assert result == [None]
+  Add an assert that type(result) is list_of_strings (or that the returned array component type equals expected_type) to prevent regressions.
+
+Summary
+- Root cause: element == None prevented inferring a concrete component type, so code fell back to Object[] and then either raised TypeError or attempted an invalid cast to String[].
+- Fix by preferring the caller's expected_type when element is None, and by allocating the array with the requested component type (Array.newInstance) rather than creating Object[] then casting.

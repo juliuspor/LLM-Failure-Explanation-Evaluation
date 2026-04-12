@@ -1,0 +1,65 @@
+What failed
+- The Python locale parser raised: ValueError: Invalid locale format: fr__POSIX
+- That exception comes from the locale module when you pass an incorrectly formed locale string into locale.setlocale(...) (or to locale.normalize(...)). The parser rejected the string "fr__POSIX".
+
+Why it failed (root cause, concrete)
+- Locale identifiers must follow this shape: language[_TERRITORY][.codeset][@modifier]. Examples: "fr", "fr_FR", "fr_FR.UTF-8", or "fr_FR@POSIX".
+- Your string "fr__POSIX" contains two underscores in a row: that decodes to language="fr", empty territory="", modifier="POSIX" but with the wrong separator placement. In other words, the territory portion is empty but you still used the underscore for it, producing an invalid format. The locale parser does explicit format checking and rejects "fr__POSIX".
+- In typical code this happens where you call locale.setlocale or locale.normalize. For example:
+  - locale_name = os.environ.get("LANG")  # or similar
+  - locale.setlocale(locale.LC_ALL, locale_name)   # raises ValueError here
+  The exception will be raised on the line that calls locale.setlocale (or locale.normalize) with that bad string.
+
+Exactly where to look in your code
+- Find the call to locale.setlocale(...) or locale.normalize(...). That is the line that raises ValueError. If you don’t call those directly, search for code that reads environment variables LANG, LC_ALL, LC_MESSAGES, or a project variable named locale_name or language_code and then passes it into the locale API.
+- Example locations to search:
+  - any line like: locale.setlocale(locale.LC_ALL, locale_name)
+  - any place you do: lang = os.environ.get("LANG") or lang = config["locale"]
+
+How to reproduce the problem locally
+- In a Python REPL:
+  1) import locale
+  2) locale.setlocale(locale.LC_ALL, "fr__POSIX")
+  You will get the same ValueError.
+
+Concrete steps to fix (step-by-step)
+1) Identify the variable containing the bad string
+   - Search for variables named locale_name, lang, language, or for os.environ["LANG"] usage.
+   - Print/log its value immediately before the locale call:
+     - Example:
+       print("locale_name before setlocale:", repr(locale_name))
+       locale.setlocale(locale.LC_ALL, locale_name)
+
+2) Decide the correct locale string to use
+   - If you want plain French: use "fr"
+   - If you want French for France in UTF-8: use "fr_FR.UTF-8"
+   - If you need the POSIX modifier: use "fr@POSIX" or "fr_FR@POSIX" (but POSIX is rarely needed)
+   - Replace "fr__POSIX" with one of the valid forms above.
+
+3) Sanitize incoming values before passing to locale APIs
+   - Example replacement code:
+     if locale_name in (None, "", "C"):
+         locale_name = ""  # let setlocale use the default environment
+     elif locale_name == "fr__POSIX":
+         locale_name = "fr_FR.UTF-8"   # or "fr@POSIX" — pick what you need
+     locale.setlocale(locale.LC_ALL, locale_name)
+
+   - Or more generally:
+     import locale, os
+     raw = os.environ.get("LANG", "")
+     # normalize common broken formats or fall back
+     if raw == "fr__POSIX":
+         raw = "fr_FR.UTF-8"
+     locale.setlocale(locale.LC_ALL, raw or "")
+
+4) Add logging and tests
+   - Add a unit test or quick check that passes the strings your app may encounter to locale.normalize or locale.setlocale to ensure they are accepted.
+   - Example quick check:
+     import locale
+     for s in ["fr", "fr_FR.UTF-8", "fr@POSIX", "fr__POSIX"]:
+         try:
+             print(s, "=>", locale.normalize(s))
+         except ValueError as e:
+             print(s, "invalid:", e)
+
+If you’d like, paste the short snippet around the line that calls locale.setlocale (the few lines where you set locale_name and call setlocale). I’ll point exactly which variable to change and give the single-line replacement to fix it.

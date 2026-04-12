@@ -1,0 +1,101 @@
+I can’t point to the exact line that fails because you didn’t include the code that implements this factory. To give a useful, concrete explanation I need that code (or the file name and line range). Without it I would be guessing.  
+
+Below I list the specific things that commonly break in implementations of this factory, where to look in your code (exact variable and method names you showed in the docstring), what goes wrong, why it happens, and exactly how to test and fix each possibility. If you paste the failing code or the error trace I will point to the exact line and provide a one-line patch.
+
+What to check first (use these variable names from your docstring)
+- Variables/methods to inspect:
+  - hours_offset (argument)
+  - minutes_offset (argument)
+  - any computed variable like total_seconds, total_minutes, or offset_millis
+  - the factory method name (the function that contains the docstring) and the line that raises ValueError
+- Add quick logging at the start of the method to print hours_offset and minutes_offset so you see the exact inputs that cause the failure.
+
+Likely causes, exact symptoms, root cause, and fixes
+
+1) Sign handling for mixed sign inputs (most common)
+- Symptom: inputs like (2, -15) incorrectly accepted or produce wrong sign, or ( -2, -15 ) becomes -2:-15 or is double-negated.
+- Why it happens: code applies sign independently when computing total offset (for example total = hours_offset * 60 + minutes_offset) without making minutes carry the sign of hours when minutes and hours have the same or different sign rules.
+- Where: look for the line that computes total_minutes or total_seconds, e.g.:
+    total_minutes = hours_offset * 60 + minutes_offset
+  and any subsequent normalization of minutes.
+- Fix (concrete steps):
+  1. Validate allowed sign combinations per docstring: reject (hours>0 and minutes<0) explicitly.
+     Example check (put near the top of the method):
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("positive hours_offset with negative minutes_offset is not allowed")
+  2. If code intends to allow e.g. (-2, -15) to be -02:15, ensure you compute total = hours_offset * 60 - abs(minutes_offset) when hours_offset < 0 and minutes_offset < 0, or normalize minutes sign to match hours:
+       total_minutes = hours_offset * 60 + (minutes_offset if hours_offset == 0 else (minutes_offset if hours_offset * minutes_offset >= 0 else raise ...))
+  3. Add unit tests for the combinations listed in the docstring.
+
+2) Range checks wrong or missing
+- Symptom: ValueError thrown for legitimate inputs (like (0, -15)) or allowed inputs accepted outside allowed ranges (-24, 60).
+- Why: either bounds are off-by-one, or checks use absolute minutes/hours incorrectly.
+- Where: look for conditions like hours_offset < -23 or hours_offset > 23, and for minutes_offset < -59 or minutes_offset > 59.
+- Fix:
+  1. Use inclusive ranges exactly as docstring: hours_offset in [-23, 23], minutes_offset in [-59, 59].
+     Example checks:
+       if not (-23 <= hours_offset <= 23):
+           raise ValueError("hours_offset must be between -23 and 23")
+       if not (-59 <= minutes_offset <= 59):
+           raise ValueError("minutes_offset must be between -59 and 59")
+  2. If you previously normalized minutes into hours (e.g. allowing minutes >= 60), ensure you normalize safely and re-check ranges after normalization.
+
+3) Overflow of resulting offset beyond +/- 23:59:59.000
+- Symptom: inputs near the extremes (23, 59) either raise incorrectly or produce > 23:59:59.
+- Why: code may check hours and minutes separately but not their combined total; e.g., (23, 59) is OK, (23, 60) must be rejected or normalized.
+- Where: look for the final check that computes total_seconds or total_millis.
+- Fix:
+  1. Compute final total_seconds (or minutes) and check absolute bound:
+       total_seconds = hours_offset * 3600 + minutes_offset * 60
+       if abs(total_seconds) > (23 * 3600 + 59 * 60 + 59):
+           raise ValueError("resulting offset exceeds +/- 23:59:59.000")
+  2. Prefer checking minutes-level: if abs(total_minutes) > 23*60 + 59: raise.
+
+4) Incorrect formatting/creation of timezone string or ID
+- Symptom: result string is wrong format "+02:15", or signs reversed, or leading zero missing.
+- Why: your code formats hours/minutes separately and forgets to pad minutes or flip sign when hours==0 and minutes negative (-00:15).
+- Where: look for formatting like "%+02d:%02d" or manual concatenation.
+- Fix:
+  1. Determine sign from total offset, not from hours or minutes independently:
+       sign = '-' if total_minutes < 0 else '+'
+       abs_hours = abs(total_minutes) // 60
+       abs_minutes = abs(total_minutes) % 60
+       tz = f"{sign}{abs_hours:02d}:{abs_minutes:02d}"
+  2. Ensure (0, -15) becomes "-00:15" by using total_minutes < 0.
+
+5) Integer vs float / seconds vs milliseconds mismatch
+- Symptom: timezone created with fractional minutes, or time zone creation API expects seconds/milliseconds but gets minutes.
+- Why: passing minutes where seconds are expected (or passing milliseconds), or dividing by 1000 incorrectly.
+- Where: the call that constructs DateTimeZone or equivalent (factory call).
+- Fix:
+  1. Compute offset in the units the API expects (e.g., seconds or milliseconds). For example, for milliseconds:
+       offset_millis = total_minutes * 60 * 1000
+  2. Verify the type (integer) and that you don’t use floats.
+
+6) Inconsistent behavior with zero hour sign (0, -15)
+- Symptom: some code treats zero hours as positive and ends up producing +00:15 instead of -00:15 for (0, -15).
+- Why: sign derived solely from hours when hours==0.
+- Fix:
+  1. Derive sign from total_minutes, not from hours_offset alone (see formatting above).
+
+How to reproduce and debug (exact steps and checks)
+1. Add temporary assertions/logging at the top of the factory:
+     print("DEBUG: hours_offset=", hours_offset, "minutes_offset=", minutes_offset)
+2. Add or run unit tests for these exact inputs (expected outputs in parentheses):
+     (2, 15) -> "+02:15"
+     (2, 0)  -> "+02:00"
+     (2, -15) -> ValueError
+     (0, 15) -> "+00:15"
+     (0, 0) -> "+00:00"
+     (0, -15) -> "-00:15"
+     (-2, 15) -> "-02:15"
+     (-2, 0) -> "-02:00"
+     (-2, -15) -> "-02:15"
+3. If you get a traceback, copy/paste the exact error message and stack trace; I’ll point to the line number and show the one-line change.
+
+If you paste the function source or the failing exception/stack trace now, I will:
+- Identify the exact line(s) causing the failure
+- Explain precisely why (pointing to the line and variable)
+- Provide a minimal concrete patch (1–3 lines) and a regression unit test that proves the fix
+
+Which would you like to do: paste the code, or paste the exact exception and stack trace?

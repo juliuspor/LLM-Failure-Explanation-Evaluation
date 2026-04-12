@@ -1,0 +1,65 @@
+What happened (what fails)
+- The code computes length = len(locale_str) on line 227, then tests a condition at line 236: if length == 2:. But inside the block after that test the code reads locale_str[3], locale_str[4], and later locale_str[5] and locale_str[6] (lines 242–252). If length is 2, those indices are out of range and Python raises IndexError: string index out of range. In other words, the code is using indices that require a longer string while the branch explicitly matched a length of 2.
+
+Why it happens (root cause)
+- The branch condition at line 236 does not match the code inside the branch. The code inside expects a locale string of at least length 5 (for country) or length 7+ (for country + variant), but the condition that opened the branch requires length == 2. This is a logic/indentation/ordering error: the wrong length test is used for the block that indexes at positions 3–6.
+
+Exactly where it occurs
+- The check length == 2 is at line 236.
+- The code that causes the out-of-range access is at lines 242–244 (locale_str[3], locale_str[4]) and at lines 250–252 (locale_str[5], locale_str[6]).
+- The exception will occur as soon as you call to_locale with any string whose length is 2 or shorter (or other lengths that still fail the subsequent index checks).
+
+How to fix it (clear, step-by-step options)
+Option A — minimal logical fix (preferred if intent is standard "xx" / "xx_YY" / "xx_YY_variant" parsing):
+1. Return immediately when length == 2:
+   - Move or add a return for the pure language case before any code that reads indices >= 3.
+   - Example: at line 236 replace the block with a direct return for two-letter locales:
+     - if length == 2:
+         return Locale(locale_str[0:2])
+2. Then add an elif branch that checks for the underscore and required minimum lengths before indexing:
+   - elif length >= 5 and locale_str[2] == '_' and 'A' <= locale_str[3] <= 'Z' and 'A' <= locale_str[4] <= 'Z':
+         if length == 5:
+             return Locale(locale_str[0:2], locale_str[3:5])
+         elif length >= 7:
+             if locale_str[5] != '_':
+                 raise ValueError(...)
+             return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+   This ensures you never index beyond the string length.
+
+Option B — explicit length checks before each index access:
+1. Before reading locale_str[3] or locale_str[4], assert length >= 5 and raise ValueError if not.
+2. Before reading locale_str[5] and locale_str[6] for the variant case, assert length >= 7 and that locale_str[5] == '_' before indexing locale_str[6:].
+
+Option C — simpler parsing using split:
+1. Split by '_' first: parts = locale_str.split('_', 2)
+2. Validate parts lengths and characters per part and construct Locale accordingly.
+   - If len(parts[0]) != 2: raise
+   - If len(parts) == 1: return Locale(parts[0])
+   - If len(parts) >= 2: validate parts[1] is two uppercase letters, then handle optional parts[2] as variant.
+
+Which to pick
+- If you want to preserve the original index-based style, use Option A so the length == 2 case returns immediately and the later code only runs for longer strings.
+- If you want clearer, safer code, use Option C (split) — it avoids fragile index arithmetic and makes validation steps explicit.
+
+Concrete minimal patch (apply at/around the lines you showed)
+- Replace the block starting at line 236 with:
+  if length == 2:
+      return Locale(locale_str[0:2])
+  if length < 5:
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  # now safe to access locale_str[3], locale_str[4]
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  if length == 5:
+      return Locale(locale_str[0:2], locale_str[3:5])
+  if locale_str[5] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+This patch ensures you never access locale_str[3..6] unless the string is long enough.
+
+Summary
+- Root cause: reading locale_str[3..6] while under a branch that matched length == 2 (lines 236 and 242–252), causing IndexError.
+- Fix: ensure correct length checks or return early for length == 2, or parse using split, so you only index characters that actually exist.

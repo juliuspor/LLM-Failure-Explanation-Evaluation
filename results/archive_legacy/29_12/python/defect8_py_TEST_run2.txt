@@ -1,0 +1,52 @@
+What happened
+- The failing assertion runs: result = LocaleUtils.to_locale('fr__POSIX'); assert result == Locale('fr', '', 'POSIX')
+- The code in LocaleUtils.to_locale does not construct a Locale with language='fr', country='' and variant='POSIX' when the input contains an empty country (the double underscore). Instead it treats the parts incorrectly and returns a Locale that does not match the expected Locale('fr', '', 'POSIX').
+
+Why it fails (root cause)
+- LocaleUtils.to_locale splits the input string on underscore and then decides which token is language, which is country and which is variant.
+- The split/parse logic in LocaleUtils.to_locale assumes that a missing country will not be represented by an empty token, so it shifts tokens when the country is empty. In plain terms: the code converts "fr__POSIX" into the wrong three fields because it ignores the empty middle element produced by the consecutive underscores.
+- Concretely, the parser treats the second token as "POSIX" or drops the empty token, so the method either creates Locale('fr', 'POSIX', '') or raises an error instead of creating Locale('fr', '', 'POSIX').
+
+Where it occurs
+- Inside LocaleUtils.to_locale (the method you call from your test). The error occurs in the part of that method that splits and assigns tokens to language, country and variant. The failure is observed on the test assertion line.
+
+How to reproduce quickly
+- Call LocaleUtils.to_locale("fr__POSIX") and inspect the returned Locale: its country will not be the empty string and/or the variant will be wrong. The test assertion then fails.
+
+Exact, actionable fixes (pick the one that matches your language/runtime)
+1) Preserve empty tokens when you split (Java)
+   - If LocaleUtils.to_locale uses String.split("_") with no limit, Java will remove trailing empty tokens (and some custom code may drop empties). Use split with a negative limit so consecutive separators produce empty tokens:
+     - Replace:
+       String[] parts = input.split("_");
+     - With:
+       String[] parts = input.split("_", -1);
+     - Then map:
+       language = parts[0];
+       country  = parts.length > 1 ? parts[1] : "";
+       variant  = parts.length > 2 ? parts[2] : "";
+     - Build the Locale with new Locale(language, country, variant).
+
+2) Preserve empty tokens when you split (other languages / general)
+   - Ensure your tokenization does not discard empty tokens between separators. For example, in Python input.split('_') already gives ['fr', '', 'POSIX'] so make sure your code does not filter out '' before constructing the Locale.
+   - Then construct the Locale using the tokens by position, not by filtering empties away.
+
+3) Make the parsing logic explicit and position-based
+   - Replace any logic that "collapses" or "reinterprets" fields with an explicit rule:
+     - If there is one token: language only.
+     - If there are two tokens: language + country.
+     - If there are three or more tokens: language + country + variant (join remaining tokens for variant).
+   - Important: accept an empty middle token as a valid country value (i.e., keep it as "").
+
+Steps to implement and verify
+1. Open LocaleUtils.to_locale and find the block that splits/parses the input (the tokenization / assignment lines).
+2. Change the split call or tokenization so it preserves empty tokens (see examples above).
+3. Assign language = parts[0]; country = parts.length > 1 ? parts[1] : ""; variant = parts.length > 2 ? parts[2] : "";
+4. Add these unit tests:
+   - "fr"           -> Locale('fr', '', '')
+   - "fr_FR"        -> Locale('fr', 'FR', '')
+   - "fr__POSIX"    -> Locale('fr', '', 'POSIX')  (the failing case)
+   - "en_US_POSIX"  -> Locale('en', 'US', 'POSIX')
+5. Run tests and confirm the assertion passes.
+
+Why this explanation is definitive
+- The failure is not about Locale.equals or the assertion itself; it is specifically the parsing step in LocaleUtils.to_locale that handles consecutive underscores incorrectly by dropping the empty country token. Fixing how the method splits and assigns tokens fixes the failing test.

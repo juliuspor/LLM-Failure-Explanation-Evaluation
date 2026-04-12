@@ -1,0 +1,53 @@
+What went wrong (root cause)
+- On line 336 you do:
+  inferred_type = type(array)
+  That gets the Python type of the whole list object (e.g. list), not the element/component type you need.
+- As a result:
+  - _copy_list_grow1(array, inferred_type) is being called with inferred_type = list (or some other container type) instead of the type of the list elements. That likely causes _copy_list_grow1 to produce a wrong kind of list or to allocate with an incorrect component type.
+  - The later check on line 346:
+    if inferred_type == object and expected_type != object:
+    never triggers in the case where array was present, because inferred_type will be list (not object). So you miss the intended ClassCast-like check when array is an object array; the code therefore either fails earlier inside _copy_list_grow1 or accepts an incompatible cast and fails when assigning element on line 344:
+    new_list[len(new_list) - 1] = element
+- Concretely: when array is a list, type(array) returns <class 'list'>. You needed the element type (for example <class 'int'> or <class 'MyClass'>), not the list class. This wrong value is used both for copying/allocating and for the subsequent compatibility check.
+
+Where it happens (line numbers)
+- Line 336: inferred_type = type(array) — wrong value picked.
+- Line 338: inferred_type = type(element) — OK when array is None.
+- Line 340: inferred_type = object — OK when both None.
+- Line 344: new_list = ArrayUtils._copy_list_grow1(array, inferred_type) — receives the wrong inferred_type when array is present.
+- Line 346: if inferred_type == object and expected_type != object: — this check will not detect cases where the code should raise, because inferred_type is list, not object.
+
+How to fix it (concrete steps)
+1. When array is not None, infer the element type from the array contents, not from the array object. For example:
+   - If array has at least one element: inferred_type = type(array[0])
+   - If array is empty: fall back to the element argument or to object:
+     if len(array) > 0:
+         inferred_type = type(array[0])
+     elif element is not None:
+         inferred_type = type(element)
+     else:
+         inferred_type = object
+2. Use identity comparison for object if you want exact match (optional clarity):
+   if inferred_type is object and expected_type is not object: ...
+3. Keep the rest of logic the same, but be sure _copy_list_grow1 expects an element type (document that expectation).
+
+Example replacement for lines 335–341:
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])
+        elif element is not None:
+            inferred_type = type(element)
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Why this fixes it
+- _copy_list_grow1 will now receive the actual element type (not the list class), so allocation/copy behavior will match the intended element component type.
+- The compatibility check on line 346 will behave correctly for arrays whose component type is object.
+- Assigning element into the newly grown list will not fail due to the wrong inferred_type.
+
+One more guard (recommended)
+- After inferring a type, you may want to validate that all existing elements in array (if any) are instances of inferred_type; otherwise pick a common base/class or raise a TypeError early. This prevents silently choosing the wrong component type from a mixed list.

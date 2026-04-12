@@ -1,0 +1,44 @@
+What happened (where it fails)
+- The failure is in the factory that builds a fixed-offset zone from hours and minutes. The key checks and calculations are around lines 400–412 (per your slice).
+- At line 400–401 the code does:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  This unconditionally rejects any negative minutes.
+- That makes valid inputs illegal: the docstring explicitly allows negative minutes when hours == 0 (e.g. (0, -15) → -00:15) and when hours < 0 (e.g. (-2, -15) → -02:15). Because the code always rejects negative minutes, passing (0, -15) or (-2, -15) raises ValueError at line 401.
+- Later lines (406, 408) try to combine hours and minutes into a total minutes value using different formulas depending on sign, but the code never gets there for negative minutes because of the earlier unconditional rejection. Even if that rejection were loosened, the addition/subtraction logic there is fragile (see fixes below).
+
+Why it happens (root cause)
+- The minutes range check is wrong: it disallows any negative minutes, while the specification permits negative minutes in some combinations (hours == 0 or hours < 0).
+- The combination logic must take into account the sign of the pair (hours and minutes): positive hours must not be paired with negative minutes (that should raise), but negative hours may be paired with negative minutes, and zero hours may be paired with negative minutes. The current code enforces "minutes must be non-negative" rather than enforcing the allowed sign combinations.
+
+Exactly where to change (concrete steps)
+1. Change the minutes range check (lines 400–401)
+   - Replace the unconditional check that rejects negative minutes with a range check that allows -59..+59:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This accepts negative minutes so the sign rules can be applied next.
+
+2. Enforce the allowed sign combinations before combining hours and minutes
+   - Add an explicit check that rejects the forbidden case: positive hours with negative minutes:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is not allowed")
+   This implements the rule described in the docstring.
+
+3. Compute the total offset in minutes correctly (replace lines 406/408)
+   - Derive total_minutes as:
+     if hours_offset < 0 or (hours_offset == 0 and minutes_offset < 0):
+         total_minutes = hours_offset * 60 - abs(minutes_offset)
+     else:
+         total_minutes = hours_offset * 60 + minutes_offset
+   This keeps the sign semantics: if hours are negative, the minutes reduce the total further negative; if hours positive, minutes increase it; if hours zero, minute sign determines result.
+
+4. Keep the existing bounds check for maximum magnitude and convert to milliseconds (lines ~409–412)
+   - After total_minutes is computed, multiply by MILLIS_PER_MINUTE and check that the resulting offset does not exceed +/- (23*60 + 59) minutes converted to millis. If it does, raise the existing "Offset is too large" ValueError, otherwise return for_offset_millis(offset).
+
+Example problematic inputs and expected behavior
+- (2, -15): should raise ValueError (positive hours with negative minutes) — current code raises earlier but for the wrong reason (minutes out of range).
+- (0, -15): should produce -00:15 — current code wrongly raises ValueError.
+- (-2, -15): should produce -02:15 — current code wrongly raises ValueError.
+
+Summary
+- Root cause: the code rejects negative minutes unconditionally (line 400–401) even though the doc allows negative minutes for some sign combinations. Fix by allowing minutes in -59..59, explicitly disallow the one forbidden sign combo (hours>0 and minutes<0), and compute total_minutes with correct sign handling before converting to milliseconds.

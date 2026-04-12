@@ -1,0 +1,47 @@
+What happened (where it fails)
+- Call: ArrayUtils.add(None, None, expected_type=str).
+- The method computes inferred_type for the new list and ends up with inferred_type == object. That reaches the check at lines 346–351:
+  - Line 346: if inferred_type == object and expected_type != object:
+  - Line 347–351: raise TypeError("Cannot cast object list to str list …").
+- Because expected_type is str (not object) the code raises the TypeError instead of returning [None]. That is why the test fails.
+
+Why it happens (root cause)
+- inferred_type becomes object because there is no non-None element to infer a concrete element type from (both the original array and the element value are None).
+  - The backward slice shows the code path that sets inferred_type to object (lines around 337–340).
+- The code then treats "inferred_type == object" as an indication that it would be unsafe to make a list of the requested expected_type, and it unconditionally raises if expected_type != object (line 346).
+- But when the element is None, it is perfectly valid to create a list of the requested expected_type containing None (a None value is compatible with any reference type). The check incorrectly refuses that case.
+
+Where to change it (concrete fixes, step by step)
+Choose one of these safe fixes; apply at or just before line 346:
+
+Option A — prefer expected_type when no concrete inference exists
+1. If inferred_type is object and an expected_type was supplied, use expected_type instead of raising:
+   - Replace the raise branch with:
+     if inferred_type == object and expected_type != object:
+         # No concrete element type was inferred; honor requested expected_type
+         inferred_type = expected_type
+   - Then continue and build a list of type expected_type containing None.
+
+Option B — only raise if there is a conflicting non-None element
+1. Change the guard to raise only when there is at least one non-None element that forced inferred_type == object and expected_type conflicts:
+   - Compute a check like has_non_none = any(el is not None for el in original_array or []) or (element is not None)
+   - Use:
+     if inferred_type == object and expected_type != object and has_non_none:
+         raise TypeError(...)
+
+Option C — allow None to be added to an expected_type list unconditionally
+1. If element is None, skip the cast check:
+   - At top of the branch before the raise:
+     if element is None and expected_type != object:
+         inferred_type = expected_type
+
+Why these fixes work
+- They stop treating a lack of type information (all None) as a hard type-cast error. When the element is None there is no conflicting runtime value that would violate expected_type, so the method can safely create a list of the requested expected_type containing None.
+- They preserve the original safety check when there are real non-None values that may actually conflict with the requested expected_type.
+
+Minimal patch example (Option A)
+- Replace the check at line 346–351 with:
+  if inferred_type == object and expected_type != object:
+      inferred_type = expected_type
+
+This change makes ArrayUtils.add(None, None, expected_type=str) return [None] as the test expects.

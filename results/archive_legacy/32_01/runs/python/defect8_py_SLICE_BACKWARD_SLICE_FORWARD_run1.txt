@@ -1,0 +1,54 @@
+What happened
+- The method to_locale (shown at the top of your slice) indexes characters past the end of locale_str before checking its length. That causes an IndexError when locale_str is shorter than the code assumes.
+- Specifically:
+  - At line 236 you test length == 2, but then at lines 242–245 you read locale_str[3] and locale_str[4]. Accessing [3] and [4] on a short string raises IndexError.
+  - At lines 248–252 you read locale_str[5] and locale_str[6:] without first ensuring the string is long enough; that also can raise IndexError.
+
+Why this happens (root cause)
+- The code’s guards and the character accesses are out of order and inconsistent: you only check the length in some branches (or check the wrong length), then immediately use fixed indices assuming the string has at least 6+ characters. For example, checking length == 2 and then using index 3 is logically impossible — an index check for 3 and 4 must be guarded by length >= 5 (or similar), not length == 2.
+
+Where it occurs
+- Method: to_locale
+- Problematic lines:
+  - 236: length is checked (length == 2) but not used correctly
+  - 242–245: locale_str[3], locale_str[4] accessed unguarded
+  - 248–252: locale_str[5] and locale_str[6:] accessed without verifying length
+
+Concrete fixes (step-by-step)
+1. Decide what string shapes you accept. Typical locale formats are:
+   - "ll" (2 letters)
+   - "ll_CC" (2 letters, underscore, 2 uppercase letters)
+   - "ll_CC_variant" (2, underscore, 2, underscore, rest)
+2. Check length (and exact character positions) before indexing. For example:
+   - If length == 2: return Locale(locale_str, None, None) — do not index beyond 1.
+   - If length >= 5 and locale_str[2] == '_' and locale_str[3:5].isupper(): handle language + country.
+   - If length >= 7 and locale_str[5] == '_': handle variant (ensure indices exist before reading).
+3. Replace the faulty branches with ordered guards that verify the indices exist before you use them.
+
+Example corrected logic (pseudocode you can apply to your method)
+- if length == 2:
+    return Locale(locale_str[0:2])
+- if length >= 5 and locale_str[2] == '_' and 'A' <= locale_str[3] <= 'Z' and 'A' <= locale_str[4] <= 'Z':
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    if length >= 7:
+        if locale_str[5] != '_':
+            raise ValueError(...)
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+- else: raise ValueError(...)
+
+Minimal concrete code changes
+- Replace the check at line 236 from if length == 2: ... (which currently surrounds the later index checks) with a guard that only returns for length == 2 and does not proceed to index 3/4.
+- Add an explicit check before reading locale_str[3] and locale_str[4], for example: if length < 5: raise ValueError(...) or handle other allowed lengths first.
+- Before reading locale_str[5] or locale_str[6:], ensure length >= 7.
+
+Tests to verify the fix
+- to_locale("en") → succeeds (no indexing beyond 1)
+- to_locale("en_US") → succeeds
+- to_locale("en_US_POSIX") → succeeds
+- to_locale("e") → raises ValueError (too short)
+- to_locale("enU") or "enUS" → raises ValueError (missing underscore)
+- to_locale("en_U") → raises ValueError (country too short)
+
+Summary
+You index locale_str at positions 3, 4, 5, 6 without ensuring the string is that long. Reorder and tighten your length/character checks so you never read past the end of the string before validating that those indices exist.

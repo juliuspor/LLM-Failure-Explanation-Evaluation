@@ -1,0 +1,43 @@
+What happened (where and what error):
+- The code throws ValueError: Minutes out of range: -15 at lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That means the function was called with minutes_offset == -15 and the check rejected it. The exception occurs before any of the later math (lines that combine hours and minutes).
+
+Why it happened (root cause, with variables and lines):
+- The function expects minutes_offset to be in 0..59 (lines 396–397), but the caller passed -15. The code later (lines after the try) tries to deal with negative total offsets by combining hours_in_minutes and minutes_offset:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  That logic assumes minutes_offset is a non-negative magnitude (0..59) and negates it when hours are negative. But since the function rejects negative minutes at validation time, callers that supply signed minutes (e.g., hours=-3, minutes=-15 to mean -3:15) hit the earlier check and raise the ValueError. In short: the validation rejects negative minutes while later code expects minutes to be non-negative and applies sign via the hours part — or alternately, the code is inconsistent with callers that pass signed minutes.
+
+Concrete fixes (clear steps you can apply):
+1) Decide a single API rule: minutes_offset must be non-negative (0..59) and the sign comes from hours_offset; OR allow signed minutes (-59..59).
+2) If you choose "minutes must be non-negative" (recommended because later code assumes that):
+   - Update the caller to pass minutes as a non-negative magnitude. For example, represent -3:15 as hours_offset = -3, minutes_offset = 15 (not -15).
+   - Or make the function fail earlier with a clearer message: change the error text to "minutes must be 0..59 and use hours sign" to avoid confusion.
+3) If you want to accept signed minutes (alternate):
+   - Change the validation to allow -59..59:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(...)
+   - Compute total_minutes explicitly and clearly instead of reusing minutes_offset:
+       total_minutes = hours_offset * 60 + minutes_offset
+     (You may also normalize sign rules if you require consistent sign semantics.)
+   - Then multiply: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Minimal code example for option 2 (non-negative minutes):
+- Validate:
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError("Minutes must be in 0..59; use hours' sign for negative offsets")
+- Compute:
+    total_minutes = hours_offset * 60
+    if total_minutes < 0:
+        total_minutes -= minutes_offset
+    else:
+        total_minutes += minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, ...)
+
+Why this will stop the error:
+- Either approach prevents passing -15 into the initial check (option 3 fixes the check), or prevents callers from sending negative minutes (option 2) so the validation no longer triggers for signed inputs. Either way, the code and the callers become consistent about how the sign of the offset is represented.

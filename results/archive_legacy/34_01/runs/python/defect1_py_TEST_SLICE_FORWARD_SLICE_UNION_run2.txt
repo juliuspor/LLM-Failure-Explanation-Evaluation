@@ -1,0 +1,37 @@
+What happened (where it failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) is meant to produce offset -2 hours and -15 minutes (total -135 minutes → "-02:15").
+- The bug is in the code that combines hours and minutes into a single minutes_offset. Specifically the logic at lines 402 and 404 is wrong when both hours and minutes are negative:
+  - Line 396 checks minutes_offset is in 0..59, but that check is applied to the raw minutes argument (which here is -15) and already indicates the caller passed a negative minute. If the code reaches the combination step, it expects to handle sign explicitly.
+  - Lines 402 / 404 do:
+    - if hours < 0:
+        minutes_offset = hours_in_minutes - minutes_offset   (line 402)
+      else:
+        minutes_offset = hours_in_minutes + minutes_offset   (line 404)
+  - For hours = -2, hours_in_minutes = -120, and minutes_offset = -15, line 402 computes -120 - (-15) = -105. That yields -1 hour 45 minutes, i.e. +01:45 relative to the expected -02:15. So the code reduces magnitude instead of adding the extra negative minutes.
+
+Why this is the root cause (clear, concrete)
+- The code assumes minutes_offset is non-negative when it subtracts minutes from hours_in_minutes for the negative-hour case. That assumption is false here: the caller passed a negative minutes value. Subtracting a negative minute (+15) makes the total less negative by 15 instead of more negative by 15.
+- The wrong arithmetic happens exactly at lines 402 and 404; the later multiplication (line 405) and return (line 408) only convert whatever minutes_offset was computed into milliseconds and create the zone, so they are not the cause.
+
+Exact fixes (step-by-step)
+1. Normalize sign and minutes before combining:
+   - Compute sign = -1 if hours < 0 else +1.
+   - Use minutes = abs(minutes_offset) for combination and for the range check.
+2. Combine as: minutes_offset = hours_in_minutes + sign * minutes
+   - This produces -120 + (-1 * 15) = -135 for the failing call.
+3. Validate minutes using the absolute value (0..59).
+4. Keep the safe_multiply (line 405) and return (line 408) unchanged.
+
+Concrete replacement (illustrative) for the relevant block:
+- Replace the logic around lines 396, 402, 404 with:
+
+  if minutes < 0 or minutes > 59:
+      raise ValueError(f"Minutes out of range: {minutes}")
+  sign = -1 if hours < 0 else 1
+  minutes_abs = abs(minutes)
+  minutes_offset = (hours * 60) + sign * minutes_abs
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Notes
+- The important change is using abs(minutes) and applying the hour sign to the minute contribution, instead of subtracting minutes directly when hours < 0.
+- After this change, DateTimeZone.for_offset_hours_minutes(-2, -15) will compute -135 minutes and produce id "-02:15" as expected.

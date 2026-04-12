@@ -1,0 +1,45 @@
+What happens
+- At the top of your loop you call:
+  consumed = self.translate_codepoint(code_units, pos, out)
+  (that tells you how many code units the translator consumed at position pos).
+- If consumed > 0 you then run this loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+Why that fails (root cause)
+- You are advancing pos using char_count(code_point_at(code_units, pos)) instead of advancing pos by the number of code units the translator already told you it consumed.
+- That is inconsistent and can cause two kinds of concrete failures:
+
+  1) IndexError from code_point_at
+     - code_point_at(code_units, index) raises IndexError when index < 0 or index >= len(code_units) (see lines 35–36 in your slice union).
+     - In the for loop you increment pos inside the loop. If pos becomes equal to len(code_units) during the last iteration, the next call to code_point_at(code_units, pos) will be called and raise IndexError because pos is out of range.
+     - Example sequence:
+       - length = 10, pos = 9, consumed = 1
+       - for pt in range(1): you call code_point_at(code_units, 9) -> OK, increment pos by 1 -> pos == 10
+       - loop end; if consumed > 1 this pattern will try code_point_at(10) and raise IndexError. Even with consumed==1 the logic is fragile because you depended on iteration control to avoid out-of-range calls while incrementing pos inside the loop.
+
+  2) Wrong skipping or infinite loop
+     - translate_codepoint is supposed to tell you how many code units it consumed. If you instead advance pos by char_count(code_point_at(...)) you may advance by a different amount than consumed:
+       - If translate_codepoint consumed 1 but code_point_at returns a surrogate pair (char_count 2), you will skip an extra code unit.
+       - If translate_codepoint consumed 2 but code_point_at returns a BMP codepoint (char_count 1), you will advance too little and re-process the same portion of input, leading to incorrect behavior or an infinite loop.
+     - In short, you are not honoring the contract signaled by consumed, so pos can get out of sync with what translate_codepoint consumed.
+
+Where exactly (lines/variables)
+- The problematic call is in the for loop that runs after consumed is read (the lines starting "for pt in range(consumed):" in your snippet).
+- The index-check and surrogate logic live in code_point_at (lines 35–44 in the [SLICE_UNION]). code_point_at can raise IndexError when you call it with pos == len(code_units).
+- pos is the variable being advanced incorrectly.
+
+How to fix (concrete steps)
+1. Do the simplest, correct advance: after a translator consumes code units, advance pos by consumed:
+   - Replace the whole for-loop with:
+       pos += consumed
+   - Rationale: translate_codepoint returned the number of code units it consumed; use that directly.
+
+2. If translate_codepoint's returned value is meant to mean "number of code points consumed" rather than code units (only if that's the actual contract in your system), make the contract explicit and implement accordingly. But given your comment ("they have to understand codepoints and they just took care of a surrogate pair") consumed should be code units or always reflect the actual UTF-16 code unit count; using pos += consumed is correct.
+
+3. Add a defensive check (optional but useful) before calling code_point_at anywhere:
+   - if pos >= length: break or raise a clear error.
+   - This prevents IndexError and makes the code's intent explicit.
+
+Summary (one-sentence)
+- The loop advances pos using char_count(code_point_at(...)) instead of using the consumed value returned by translate_codepoint, which both violates the translator contract and leads to IndexError or incorrect/skipped processing; fix it by doing pos += consumed (and add a boundary check if needed).

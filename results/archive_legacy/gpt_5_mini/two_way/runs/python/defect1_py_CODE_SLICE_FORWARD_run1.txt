@@ -1,0 +1,49 @@
+I can explain what's wrong, but I need one small piece of information to be certain: what exact exception / error message do you see at runtime (full stack trace)? Also what language/runtime is this (the code looks like Java, but your snippet used Python-style type hints)?
+
+Based on the code and the lines you highlighted (lines 402–408), the most likely root causes are one of these two concrete problems. I’ll show where each happens, why it fails there, and exactly how to fix it.
+
+Problem A — incorrect sign/total-minutes calculation (most likely logic bug)
+- Where it happens: lines 402 and 404
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- What the code is trying to do: convert hours_offset and minutes_offset into a single total number of minutes, then convert that to milliseconds.
+- Why it fails (root cause): the code mutates the input variable minutes_offset and re-uses that name for the total minutes. That alone is confusing but not fatal. The real logical risk is that the branch for negative hours_offset uses subtraction unconditionally: it assumes minutes_offset is always the positive minutes part to subtract, which is correct only if minutes_offset was meant to be the magnitude of the minutes. If the caller ever passes a signed minutes value (or if there's any earlier change to minutes_offset), the sign handling becomes wrong. Reusing the parameter name makes it easy to get the sign wrong and produces an incorrect total minutes value before multiplication.
+- Concrete symptom you’ll see: the produced offset will have the wrong sign or magnitude (example: -1 hour 30 minutes should be -90 minutes; a logic error can produce -30 or -150), and you’ll get the wrong timezone offset returned. If you log the computed minutes_offset just before line 405 you’ll see an unexpected value.
+- How to fix it (exact steps):
+  1. Stop reusing the minutes_offset parameter for the total. Introduce a new variable, e.g. totalMinutes.
+  2. Compute totalMinutes explicitly and clearly:
+     - if hours_offset < 0: totalMinutes = hours_offset * 60 - minutes_offset
+     - else: totalMinutes = hours_offset * 60 + minutes_offset
+  3. Pass totalMinutes to safe_multiply.
+  4. Keep the parameter minutes_offset unchanged for readability.
+- Example corrected fragment (Java-style):
+  - int hoursInMinutes = hours_offset * 60;
+  - int totalMinutes = (hours_offset < 0) ? hoursInMinutes - minutes_offset : hoursInMinutes + minutes_offset;
+  - long offset = FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE);
+
+Problem B — integer overflow in multiplication (if you’re running on Java)
+- Where it happens: line 405
+  - offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+- Why it fails: FieldUtils.safe_multiply will throw ArithmeticException if the multiplication overflows the integer/long range. If minutes_offset is large enough (or if minutes_offset variable was corrupted to a large value because of the bug above), the multiplication by MILLIS_PER_MINUTE (60_000) can overflow and trigger the catch block that raises "Offset is too large".
+- How to fix it (exact steps):
+  1. Ensure you multiply a safely-bounded value (use totalMinutes as above, which should be within -1439..1439 for hours in [-23,23] and minutes in [0,59]).
+  2. Use the correct numeric type before multiplying (e.g. cast to long) so FieldUtils.safe_multiply operates on the expected type, or use a multiplication helper that returns a long and checks overflow correctly.
+  3. Add unit tests for extremes: (-23,59), (23,59), (0,0), (-0,30), etc., to confirm no overflow and correct sign.
+- Example corrected fragment (Java-style):
+  - long totalMinutes = (long) totalMinutesInt;
+  - long offset = FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE);
+
+Summary (what went wrong, where, and how to fix)
+- What happened: the code overwrote the input minutes_offset variable and combined hours and minutes in a way that is easy to get the sign wrong; that produced either a wrong total minutes value or an unexpectedly large value that made FieldUtils.safe_multiply throw an overflow error.
+- Where it happened: lines 402–405 (minutes arithmetic and multiplication).
+- Why it happened: variable reuse + fragile sign handling, then unguarded multiplication that can overflow.
+- Exact fixes (step-by-step):
+  1. Replace mutation of minutes_offset with a new variable totalMinutes.
+  2. Compute totalMinutes explicitly with clear sign handling:
+     - totalMinutes = hours_offset * 60 + (hours_offset < 0 ? -minutes_offset : minutes_offset)
+     (or the equivalent shown earlier).
+  3. Pass totalMinutes (in a long) to safe_multiply.
+  4. Add tests for extreme inputs: (-23,59), (23,59), (0,0), (1,30), (-1,30).
+  5. Log/inspect computed totalMinutes and offset during debugging to confirm correctness.
+
+If you post the exact runtime exception/stack trace and confirm whether this is Java (and the actual types of FieldUtils.safe_multiply and DateTimeConstants.MILLIS_PER_MINUTE), I will give a patched code snippet exactly in your language and point out the exact line numbers to change.

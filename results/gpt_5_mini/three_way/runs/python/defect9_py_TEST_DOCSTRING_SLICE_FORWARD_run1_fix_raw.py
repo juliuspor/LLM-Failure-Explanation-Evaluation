@@ -1,0 +1,89 @@
+    @staticmethod
+    def replace_each(
+        text: Optional[str],
+        search_list: Optional[List[Optional[str]]],
+        replacement_list: Optional[List[Optional[str]]],
+    ) -> Optional[str]:
+        if text is None:
+            return None
+        if text == "":
+            return ""
+        if search_list is None or replacement_list is None:
+            return text
+        if len(search_list) == 0 or len(replacement_list) == 0:
+            return text
+        if len(search_list) != len(replacement_list):
+            raise ValueError(
+                f"Search and Replace array lengths don't match: {len(search_list)} vs {len(replacement_list)}"
+            )
+
+        search_length = len(search_list)
+        no_more_matches_for_repl_index = [False] * search_length
+
+        text_index = -1
+        replace_index = -1
+
+        for i in range(search_length):
+            if (
+                no_more_matches_for_repl_index[i]
+                or search_list[i] is None
+                or len(search_list[i]) == 0
+                or replacement_list[i] is None
+            ):
+                continue
+            temp_index = text.find(search_list[i])
+            if temp_index == -1:
+                no_more_matches_for_repl_index[i] = True
+            elif text_index == -1 or temp_index < text_index:
+                text_index = temp_index
+                replace_index = i
+
+        if text_index == -1:
+            return text
+
+        increase = 0
+
+        for i in range(search_length):
+            if search_list[i] is None or replacement_list[i] is None:
+                continue
+            greater = len(replacement_list[i]) - len(search_list[i])
+            if greater > 0:
+                increase += 3 * greater
+        increase = min(increase, len(text) // 5)
+
+        start = 0
+        parts: List[str] = []
+
+        while text_index != -1 and replace_index != -1:
+            # append the segment before the match
+            parts.append(text[start:text_index])
+            # append replacement (safe because replace_index != -1)
+            parts.append(replacement_list[replace_index])
+
+            # move start past the matched search string
+            start = text_index + (0 if search_list[replace_index] is None else len(search_list[replace_index]))
+
+            # reset for next search
+            text_index = -1
+            replace_index = -1
+
+            # Find the next earliest match.
+            for i in range(search_length):
+                if (
+                    no_more_matches_for_repl_index[i]
+                    or search_list[i] is None
+                    or len(search_list[i]) == 0
+                ):
+                    continue
+                # Do not skip just because replacement is None: allow finding matches,
+                # but treat None replacement as skipping the actual replacement (i.e., no replacement)
+                temp_index = text.find(search_list[i], start)
+                if temp_index == -1:
+                    no_more_matches_for_repl_index[i] = True
+                elif text_index == -1 or temp_index < text_index:
+                    text_index = temp_index
+                    replace_index = i
+
+        # append the remainder of the text
+        parts.append(text[start:])
+        return "".join(parts)

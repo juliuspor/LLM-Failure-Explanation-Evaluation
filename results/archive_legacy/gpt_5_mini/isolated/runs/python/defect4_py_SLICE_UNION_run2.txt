@@ -1,0 +1,42 @@
+What happens
+- At run time you get an UnboundLocalError on line 346 (the comparison `if start < min_start:`). The variable min_start is not defined there.
+
+Why it happens (root cause, with exact lines)
+1. _min_start_index is initialized to -1 (line 253). The block that runs when you update items checks `if self._min_start_index >= 0:` (line 340), so execution enters the block starting at line 341.
+2. Inside that block you assign `min_start_period = self.get_data_item(self._min_start_index).get_period()` (line 341).
+3. You only set `min_start` when `min_start_period` is a SimpleTimePeriod:
+   - If it is, you set `min_start = min_start_period.get_start_millis()` (line 343 → 345 alternative).
+   - If it is not a SimpleTimePeriod, you never set min_start at all.
+4. Immediately after (line 346) you do `if start < min_start:`, which references min_start even in the case where it was never assigned. That causes the failure.
+
+Additional logic bug (overwrites the conditional result)
+- At lines 346–349 you intend to update `_min_start_index` only if `start < min_start` (line 346–347). But line 349 unconditionally sets `self._min_start_index = index`, which undoes the conditional assignment and makes the conditional meaningless.
+
+How to fix it (concrete steps you can apply)
+1. Make sure min_start is always assigned before it is used. Mirror the handling you already have for `period`:
+   - After line 341, add a branch that handles the non-SimpleTimePeriod case and sets min_start the same way you set start for that other case. Example (replace the whole min_start handling):
+     - if isinstance(min_start_period, SimpleTimePeriod):
+         min_start = min_start_period.get_start_millis()
+       else:
+         min_start = int(min_start_period.get_start().timestamp() * 1000)
+   - This guarantees min_start exists at line 346.
+2. Fix the unconditional overwrite at line 349:
+   - Remove line 349 (the unconditional `self._min_start_index = index`), or
+   - Put that assignment inside an else-block for the earlier conditional if your intention differs (but likely you only want to set it when start < min_start).
+3. Optionally, initialize min_start to a safe default immediately before the if (e.g., `min_start = float('inf')`) so the variable exists, but prefer step 1 so you use the correct semantics for the existing period object.
+
+Example minimal patch (conceptual, referring to your lines)
+- Replace lines 341–349 with:
+  - min_start_period = self.get_data_item(self._min_start_index).get_period()
+  - if isinstance(min_start_period, SimpleTimePeriod):
+      min_start = min_start_period.get_start_millis()
+    else:
+      min_start = int(min_start_period.get_start().timestamp() * 1000)
+  - if start < min_start:
+      self._min_start_index = index
+
+Why this fixes it
+- It ensures min_start is always defined before you compare with start (removing the UnboundLocalError).
+- It also avoids overwriting _min_start_index unconditionally, restoring the intended logic of only updating the index when a new minimum is found.
+
+If you want, tell me which lines correspond to your "period" handling (331–335) and I can produce an exact 3–5 line patch to paste into your file.

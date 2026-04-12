@@ -1,0 +1,49 @@
+What happened (where it fails)
+- The bug is in the lines that compute the total minutes from hours_offset and minutes_offset:
+  - Line computing hours_in_minutes: hours_in_minutes = hours_offset * 60
+  - The conditional branch:
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  - For hours_offset = -2 and minutes_offset = -15 this computes:
+    hours_in_minutes = -120
+    minutes_offset = -120 - (-15) = -105
+  - That yields -105 minutes (-01:45) instead of the expected -135 minutes (-02:15).
+- In short: subtracting minutes_offset when hours_in_minutes is negative undoes the negative minutes rather than combining them, so two negative parts become less negative.
+
+Why it happens (root cause)
+- The code treats the minutes sign incorrectly when the hour part is negative. The expression hours_in_minutes - minutes_offset is wrong when minutes_offset is already negative. The correct arithmetic for total minutes is simply:
+  total_minutes = hours_in_minutes + minutes_offset
+  regardless of sign.
+- The current code effectively flips the sign of minutes_offset when hours are negative, producing the wrong total.
+
+Where to change (exact variables/lines)
+- Change the branch that assigns minutes_offset after computing hours_in_minutes:
+  Replace both branches (the if/else that sets minutes_offset) with a single line:
+    total_minutes = hours_in_minutes + minutes_offset
+  Use total_minutes (or overwrite minutes_offset) for the subsequent call to FieldUtils.safe_multiply.
+
+Additional correctness notes and fixes you should apply
+1. Enforce documented sign rule: the docstring says "The minutes value must be in the range -59 to +59" but also that a positive hours with negative minutes is invalid (ValueError). Add an explicit check:
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Minutes must be non-negative when hours is positive")
+   (This matches the doc: e.g. (2, -15) -> ValueError.)
+2. Use a separate variable name for clarity (total_minutes) rather than reassigning minutes_offset.
+3. Keep the existing overflow try/except around the multiplication.
+4. Tests to add:
+   - DateTimeZone.for_offset_hours_minutes(-2, -15) -> '-02:15'
+   - DateTimeZone.for_offset_hours_minutes(-2, 15) -> '-02:15'
+   - DateTimeZone.for_offset_hours_minutes(2, 15) -> '+02:15'
+   - DateTimeZone.for_offset_hours_minutes(2, -15) -> raises ValueError
+
+Corrected core snippet
+- Replace the hours/minutes combination block with:
+    hours_in_minutes = hours_offset * 60
+    # enforce documented sign rule
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError(f"Minutes out of range for positive hours: {minutes_offset}")
+    total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+That change fixes the failing test and aligns the implementation with the docstring.

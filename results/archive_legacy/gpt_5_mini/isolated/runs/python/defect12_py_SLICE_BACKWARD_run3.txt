@@ -1,0 +1,46 @@
+What happens (where and what failed)
+- At line 32–33 your code raises IndexError whenever the boolean expression
+  if start < 0 or end < 0 or start > end or start > len(s) or end > len(s):
+  is true, so control always hits the raise on line 33 for some inputs.
+- The immediate problem is the condition is wrong for backward slicing: when you call this function to slice with a negative step, it is valid for start to be greater than end, but the clause start > end forces an error. That makes backward slices fail even though they are valid.
+- Another related failure: the checks reject negative indices (start < 0 or end < 0) even though typical slice semantics allow negative indices (they mean offset from the end). Rejecting them here causes otherwise valid slice calls to raise at line 33.
+- The error message is also misleading: raise IndexError(f"String index out of range: {end}") reports only end, so if start was the bad value you get the wrong variable in the message.
+
+Why it fails (root cause)
+- You enforce start <= end unconditionally. For negative-step (backward) slicing, the correct relation is start >= end, so the unconditional start > end check is wrong.
+- You treat any negative index as an error, but many slice APIs accept negative indices or normalize them to non-negative values relative to len(s).
+- You treat indices beyond len(s) as errors, but Python slice semantics normally clamp out-of-range indices; even if you want strict bounds you should use consistent rules and messages.
+
+Concrete fixes (step-by-step)
+1. Decide intended semantics:
+   - If you want Python-like slicing: accept negative indices and clamp indices into [0, len(s)] instead of raising. Allow start > end when step < 0.
+   - If you want strict positional indices (no negatives): disallow negatives but change the start/end ordering rule to depend on the step sign and fix the error message.
+
+2. Example patch for Python-like behavior:
+   - Normalize negative indices:
+     if start is None: start = 0; if end is None: end = len(s)  (if you allow None)
+     if start < 0: start += len(s)
+     if end < 0: end += len(s)
+   - Clamp into bounds:
+     start = max(0, min(start, len(s)))
+     end   = max(0, min(end,   len(s)))
+   - Remove the unconditional start > end check: only consider ordering when implementing the slicing loop (use step sign to decide termination).
+   - Fix the raise message to include both variables if you must raise:
+     raise IndexError(f"String index out of range: start={start}, end={end}")
+
+3. If you want strict (no negatives) but correct handling of backward slices:
+   - Keep rejecting negative start/end, but change the ordering check:
+     if start < 0 or end < 0 or start > len(s) or end > len(s):
+         raise IndexError(f"String index out of range: start={start}, end={end}")
+     if step is None:
+         step = 1
+     if step > 0 and start > end:
+         raise IndexError("start must be <= end for positive step")
+     if step < 0 and start < end:
+         raise IndexError("start must be >= end for negative step")
+
+4. Always include both start and end in the error text so the caller knows which value caused the problem:
+   raise IndexError(f"String index out of range: start={start}, end={end}")  (line 33)
+
+Summary
+- The cause is the unconditional start > end check combined with rejecting negative indices; that makes correct backward slices fail at line 33 and produces a misleading message. Fix by normalizing/clamping indices for Python-like slices, or by making the start<=end check conditional on the sign of the step and improving the error message to show start and end.

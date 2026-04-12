@@ -1,0 +1,47 @@
+What happened (root cause)
+- At line 38 the code does: high = code_units[index]
+- That access happens before any bounds check. If index equals len(code_units) (or is otherwise >= len(code_units)), Python raises IndexError when trying to read code_units[index].
+- The following guard on line 39, "index + 1 < len(code_units)", only protects the access to code_units[index + 1] (low). It does not protect the earlier access to code_units[index].
+- The error message "String index out of range: 2" means the function was called with index == 2 while len(code_units) == 2 (valid indices are 0 and 1), so the access at line 38 failed.
+
+Where it happened
+- Method: the translator method shown in the docstring (the code that translates an input string to code units)
+- Exact lines (from the slice):
+  - Line 38: high = code_units[index]  <-- raises IndexError when index >= len(code_units)
+  - Line 39: if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):  <-- too late to avoid the crash
+
+Why that produces the crash
+- You must check that index is within bounds before performing code_units[index]. The current code checks only for index+1 when deciding whether to read a surrogate pair low unit, but never ensures index itself is valid.
+
+Concrete fixes (pick one and apply)
+1) Guard index before any access (recommended)
+- Add a bounds check before line 38:
+  if index >= len(code_units):
+      raise IndexError(f"index {index} out of range for code_units length {len(code_units)}")
+  high = code_units[index]
+  ...
+  This makes the failure explicit and prevents the implicit IndexError at line 38.
+
+2) Reorder and combine checks so you never access out-of-range elements
+- Replace lines 38–41 with:
+  if index < len(code_units):
+      high = code_units[index]
+      if 0xD800 <= high <= 0xDBFF and index + 1 < len(code_units):
+          low = code_units[index + 1]
+          if 0xDC00 <= low <= 0xDFFF:
+              return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+      return high
+  else:
+      raise IndexError(f"index {index} out of range for code_units length {len(code_units)}")
+
+3) If the method should never be called with index >= len(code_units), validate callers
+- Add an assertion at the start:
+  assert 0 <= index < len(code_units), "index out of range"
+  This documents the expectation and fails earlier with a clearer message.
+
+Which to choose
+- Use (1) or (2) if the function must safely handle arbitrary index values.
+- Use (3) only if it is a programming error for callers to pass an out-of-range index and you want the code to signal that clearly during development.
+
+Summary
+- The crash is caused by accessing code_units[index] at line 38 without first checking that index < len(code_units). Fix by adding an explicit bounds check or reordering checks so you never index out of range.

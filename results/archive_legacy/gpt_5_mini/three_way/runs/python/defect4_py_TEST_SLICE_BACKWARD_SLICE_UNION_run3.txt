@@ -1,0 +1,69 @@
+What happened (root cause)
+
+- The bug is a copy/paste / misplaced-assignment error inside TimePeriodValues._update_bounds. In the snippet you showed (min_start handling) the code always overwrites the stored index because an assignment is unguarded. Specifically:
+  - At line 340 the code checks whether a previous min index exists: if self._min_start_index >= 0:
+  - If it does, it loads min_start (lines 341–346) and conditionally updates the stored index only when the new start is smaller: if start < min_start: self._min_start_index = index  (line 346–347).
+  - But then line 349 unconditionally executes self._min_start_index = index, so every call resets _min_start_index to the current index regardless of the comparison. That defeats the whole comparison above.
+
+- The failing test you cited (the original Java failure for max_middle_index) is the same class of bug: the wrong index variable or an unconditional assignment is used when updating the “max middle” bound. In other words, the update logic that should compare the current middle to the stored max_middle value ends up assigning the wrong member or always assigning, so _max_middle_index ends up being the last added index (or a wrong index), not the index of the true maximum middle.
+
+Where it occurs (variables, methods, lines)
+
+- Method: TimePeriodValues._update_bounds
+- Affected variables in your slice: self._min_start_index, start, min_start, index
+- Exact problematic lines (from your slice):
+  - Line 340: if self._min_start_index >= 0:
+  - Line 346–347: if start < min_start: self._min_start_index = index
+  - Line 349: self._min_start_index = index  ← this unconditional assignment wipes out the conditional update above
+- By analogy, the max_middle_index bug is caused by the same pattern in the max-middle branch: the code uses the wrong variable in the comparison/assignment (or leaves an unconditional assignment), so the stored index (_max_middle_index) is set incorrectly.
+
+Why that produces your failing test
+
+- In test_max_middle_index_simple you expect the maximum middle to be the period with middle=150 (index 1).
+- Because of the bad update logic (wrong index/assignment), the code does not keep the current best index; it gets overwritten (or compared against the wrong variable), so get_max_middle_index() returns a wrong index (in the original report it returned 3).
+- The same symptom is visible in the min-start slice: even if a smaller start appeared earlier, the unconditional assignment sets _min_start_index to the most recent index.
+
+Concrete fixes (exact steps)
+
+1) Fix the min_start branch you showed:
+   - Move the unconditional assignment into the else branch of the if self._min_start_index >= 0 check.
+   - Correct structure should be:
+
+     if self._min_start_index >= 0:
+         min_start_period = self.get_data_item(self._min_start_index).get_period()
+         ... compute min_start ...
+         if start < min_start:
+             self._min_start_index = index
+     else:
+         # no previous min, initialize it
+         self._min_start_index = index
+
+   - In other words, remove the unconditional self._min_start_index = index that currently executes every time.
+
+2) Search the rest of _update_bounds for identical copy/paste errors and for the max-middle logic in particular:
+   - Find the branch that updates _max_middle_index. It should:
+     - compute middle for the new period (middle)
+     - if self._max_middle_index >= 0:
+         - compute max_middle from the stored item
+         - if middle > max_middle: self._max_middle_index = index
+       else:
+         - self._max_middle_index = index
+   - Make sure:
+     - The code compares middle vs max_middle (not some other variable like max_index).
+     - The assignment uses self._max_middle_index (not another index name).
+     - There is no unconditional assignment after the if-block that overwrites the conditional result.
+
+3) Run the unit tests after these changes.
+
+Why these fixes work
+
+- They restore the intended logic: only initialize the stored index when none exists; otherwise update it only when the new value is strictly better. That prevents later additions from clobbering the correct index unless the comparison warrants it.
+
+Summary checklist for the maintainer
+
+- Remove/relocate the unconditional assignment at line 349 (move it into the else).
+- Inspect all min/max update blocks in _update_bounds for the same pattern (min_start, max_start, min_end, max_end, min_middle, max_middle).
+- Confirm each block compares the current value against the correct stored value and assigns to the correct index variable (e.g., self._max_middle_index) only when appropriate.
+- Re-run tests.
+
+If you want, paste the whole _update_bounds implementation and I’ll produce a patch with the exact line edits.

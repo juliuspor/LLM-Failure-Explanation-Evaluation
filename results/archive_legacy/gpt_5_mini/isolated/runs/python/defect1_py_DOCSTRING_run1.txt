@@ -1,0 +1,75 @@
+What happened (root cause)
+- The method takes hours_offset and minutes_offset and then forms a single offset by adding them as signed values (total_minutes = hours_offset * 60 + minutes_offset).
+- That arithmetic is wrong for combinations where hours_offset is non‑zero and minutes_offset has the opposite sign to the hours. For example:
+  - hours_offset = -2, minutes_offset = +15
+  - current code computes total_minutes = -2 * 60 + 15 = -120 + 15 = -105 → -01:45
+  - The doc says (-2, 15) must be -02:15 (total -135 minutes). The code treated the +15 as reducing the negative hour instead of extending it.
+- In short: the code treats minutes_offset as an independent signed component instead of treating minutes as a magnitude combined with the sign determined by the hours (except when hours == 0).
+
+Where it occurs (precise places and names)
+- The bug is in the factory function that receives hours_offset and minutes_offset (the variables are named hours_offset and minutes_offset in the docstring).
+- It occurs at the line(s) that compute the combined offset, i.e. the expression like:
+    total_minutes = hours_offset * 60 + minutes_offset
+  or anything equivalent that uses minutes_offset with its sign directly.
+- The subsequent range check that compares the resulting offset against +/- 23:59:59 will then be applied to the wrong total, and the wrong time zone value is produced (or an unexpected ValueError might be raised/omitted).
+
+Why it fails (simple logic)
+- The doc’s rules:
+  - If hours > 0 then minutes must be ≥ 0 (positive minutes with positive hours are allowed; negative minutes with positive hours are invalid).
+  - If hours < 0 then minutes are treated as part of the negative offset regardless of sign in the input (both (-2, 15) and (-2, -15) mean -02:15).
+  - If hours == 0 then minutes sign determines final sign (0, -15) → -00:15; (0, 15) → +00:15.
+- The current implementation does not enforce those sign rules and instead sums the signed minutes directly, which yields the wrong sign/magnitude for mixed-sign inputs.
+
+Exactly how to fix it (step-by-step, concrete)
+1. Validate ranges first:
+   - Ensure hours_offset is in [-23, 23]. If not, raise ValueError.
+   - Ensure abs(minutes_offset) is in [0, 59]. If not, raise ValueError.
+2. Enforce invalid combination:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (doc says this combination is invalid).
+3. Normalize minutes sign so minutes contribute in the same direction as hours when hours != 0:
+   - If hours_offset < 0:
+       minutes_offset = -abs(minutes_offset)   # force minutes negative
+   - Else if hours_offset > 0:
+       minutes_offset = abs(minutes_offset)    # force minutes positive (already checked minutes < 0 is invalid)
+   - Else (hours_offset == 0): leave minutes_offset as given (its sign determines final sign).
+4. Compute combined value:
+   - total_minutes = hours_offset * 60 + minutes_offset
+5. Check absolute total does not exceed 23:59 (or 23*60 + 59). If exceeding, raise ValueError.
+6. Convert total_minutes to seconds (or milliseconds) as your DateTimeZone constructor expects, and return zone.
+
+Minimal pseudocode you can paste into the method
+- (using the variable names from the docstring)
+
+    if not (-23 <= hours_offset <= 23):
+        raise ValueError("hours_offset out of range")
+    if not (0 <= abs(minutes_offset) <= 59):
+        raise ValueError("minutes_offset out of range")
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("negative minutes with positive hours is invalid")
+
+    if hours_offset < 0:
+        minutes_offset = -abs(minutes_offset)
+    elif hours_offset > 0:
+        minutes_offset = abs(minutes_offset)
+    # else hours_offset == 0: keep minutes_offset sign as-is
+
+    total_minutes = hours_offset * 60 + minutes_offset
+    if abs(total_minutes) > (23 * 60 + 59):
+        raise ValueError("resulting offset exceeds +/- 23:59")
+
+    total_seconds = total_minutes * 60
+    return DateTimeZone.for_offset_seconds(total_seconds)  # or whatever constructor you use
+
+Tests to run (exact cases)
+- Positive hours, positive minutes: (2, 15) → +02:15
+- Positive hours, zero minutes: (2, 0) → +02:00
+- Positive hours, negative minutes: (2, -15) → must raise ValueError
+- Zero hours, positive minutes: (0, 15) → +00:15
+- Zero hours, negative minutes: (0, -15) → -00:15
+- Negative hours, positive minutes: (-2, 15) → -02:15
+- Negative hours, negative minutes: (-2, -15) → -02:15
+- Boundary checks: (23, 59), (-23, -59), and (23, 60) should raise ValueError.
+
+Summary
+- Bug: minutes_offset was added as a signed value directly; that produces wrong offsets for mixed-sign inputs (e.g. (-2, 15) becomes -01:45 instead of -02:15).
+- Fix: enforce the sign rules in the doc, normalize minutes to follow the hours sign (unless hours == 0), then compute total_minutes and validate final bounds.

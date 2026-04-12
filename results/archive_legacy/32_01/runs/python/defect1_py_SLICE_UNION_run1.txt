@@ -1,0 +1,39 @@
+What happens (what failed)
+- At lines 400–401 you validate minutes_offset is between 0 and 59.
+- Later, at lines 406–408 you try to combine hour and minute parts into a minutes total, but the math flips the sign of the minute part incorrectly when the hour part is negative:
+  - line 406: minutes_offset = hours_in_minutes - minutes_offset
+  - line 408: minutes_offset = hours_in_minutes + minutes_offset
+- Because of that sign/combination bug you produce the wrong minutes total and then compute offset in milliseconds on line 409. That wrong value can be outside the library limits and triggers the "Offset is too large" ValueError on line 411 (or produces an incorrect offset returned by for_offset_millis at line 412).
+
+Why it failed (root cause)
+- The code treats minutes_offset both as “minutes within the hour” (0–59) and then reuses the same variable to hold “total minutes” after combining with hours. When the hour part is negative the code mixes up subtracting versus adding the minute part:
+  - For a negative hour offset you must subtract the minute part from the absolute total minutes (e.g. -2:30 => total minutes = -(2*60 + 30) = -150). The current code does hours_in_minutes - minutes_offset in one branch and hours_in_minutes + minutes_offset in the other, but those operations are performed on variables whose signs/meanings are inconsistent. That yields the wrong sign for minutes in some cases.
+- In short: minutes_offset is validated as a 0–59 minute field, but then treated as if it already reflected the hour sign; the combination logic is inverted, producing wrong total minutes (sometimes far too large), and that triggers the overflow/ValueError later.
+
+Where it occurred (specific methods/lines)
+- Validation: lines 400–401 check the minute range.
+- Combination of hours and minutes into minutes total: lines 406 and 408.
+- Millisecond conversion: line 409 uses FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE).
+- Final overflow check / error: line 411 raises "Offset is too large".
+- Return on success: line 412 returns cls.for_offset_millis(offset).
+
+Concrete steps to fix (exact changes to make)
+1. Keep minutes_offset as the minute-within-hour (0–59). Don’t mutate it into a different meaning. Introduce a separate variable for total_minutes.
+2. Compute total_minutes explicitly using the hour sign. Example code (replace logic at/around lines 406–409):
+   - Determine sign of the hour part, e.g. hour_sign = 1 if hours >= 0 else -1.
+   - total_minutes = hour_sign * (abs(hours) * 60 + minutes_offset)
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Preserve the existing overflow check after computing offset; if safe_multiply signals overflow, raise the "Offset is too large" ValueError as before.
+4. Return cls.for_offset_millis(offset).
+
+Minimal example replacement (pseudocode replacing lines 406–409)
+/* assume hours is the hour component, minutes_offset is 0..59 validated */
+int totalMinutes = (hours >= 0)
+    ? hours * 60 + minutes_offset
+    : hours * 60 - minutes_offset;   // or: Math.abs(hours) * 60 + minutes_offset, then apply sign
+long offset = FieldUtils.safe_multiply(totalMinutes, DateTimeConstants.MILLIS_PER_MINUTE);
+
+Why this fixes it
+- This makes the minute part always added to the absolute hour part, then applies the hour sign exactly once. It removes the ambiguity of reusing minutes_offset for two meanings and ensures negative offsets like -2:30 produce -150 minutes, not a wrong large positive or negative number that triggers overflow.
+
+If you want, paste the surrounding method (including the hours variable and how it's obtained) and I’ll produce an exact drop-in patch showing the new lines and the line numbers to change.

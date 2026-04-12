@@ -1,0 +1,59 @@
+What happened (where)
+- The failure occurs in ArrayUtils.add when both array and element are None and the caller passes expected_type=str. This is the test method test_add_null_to_null_with_expected_type (calls ArrayUtils.add(None, None, expected_type=str)).
+- The problematic code is the block shown in the slice, lines 346–351:
+
+  346 |             if inferred_type == object and expected_type != object:
+  347 |                 raise TypeError(
+  348 |                     f"Cannot cast object list to {expected_type.__name__} list "
+  349 |                     f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  350 |                     f"[Ljava.lang.{expected_type.__name__};)"
+  351 |                 )
+
+Why it fails (root cause)
+- When array is None and element is None, the code sets inferred_type to object (there is no concrete element type to infer).
+- The caller provided expected_type=str, so expected_type != object is true.
+- The code therefore raises a TypeError (mimicking a Java ClassCastException) whenever inferred_type == object but the caller expects a more specific type.
+- In this test case that leads to raising TypeError instead of returning a list [None] of the expected type. The test expects ArrayUtils.add(None, None, expected_type=str) to return [None]. Instead it raises the TypeError from lines 346–351.
+
+Why that check is wrong
+- The check assumes that an "object" inferred type is always incompatible with a caller's expected_type. But if both array and element are None, there is no real type information to contradict expected_type — the caller's expected_type should be accepted and used to construct the returned list.
+- In other words, inferred_type == object in this situation means "no information", not "definitely an Object[] that cannot be cast". Raising the exception prevents valid use-cases where the caller supplies an expected target type but the actual element value is currently None.
+
+What must be changed (concrete fixes, step-by-step)
+Option A — prefer expected_type when nothing concrete was inferred
+1. Replace the exception-raising branch with logic that, when inferred_type == object and expected_type is provided (not object or None), sets inferred_type = expected_type and proceeds to build the list.
+2. Only raise a TypeError if there is a concrete mismatch: e.g., when element is not None and not isinstance(element, expected_type), or when array contains elements incompatible with expected_type.
+
+Concretely, change lines 346–351 to something like:
+
+  if inferred_type == object:
+      if expected_type is not None and expected_type is not object:
+          # no concrete type info, accept caller's expected_type
+          inferred_type = expected_type
+      else:
+          # leave inferred_type as object (no exception here)
+
+# Later, validate actual non-None elements only:
+if element is not None and expected_type is not None and not isinstance(element, expected_type):
+    raise TypeError(...)
+
+Option B — only raise when incompatibility is provable
+- Only raise the TypeError if you can prove incompatibility:
+  - If expected_type is provided and array contains an element that is not instance of expected_type, or
+  - If element is not None and not instance of expected_type.
+- Do not raise when both array and element are None.
+
+Minimal patch example (pseudo-code replacing 346–351):
+
+  if inferred_type == object:
+      # No concrete element type could be inferred.
+      # If caller gave an expected_type, use it; otherwise keep object.
+      if expected_type is not None and expected_type is not object:
+          inferred_type = expected_type
+      # Do NOT raise here; only raise on concrete mismatches below.
+
+Then ensure validation checks use element/array contents, not just inferred_type.
+
+Summary
+- The code raises a TypeError whenever inferred_type == object but expected_type is not object (lines 346–351). That triggers the test failure for ArrayUtils.add(None, None, expected_type=str) because inferred_type == object while the caller legitimately supplied str as expected_type.
+- Fix by treating inferred_type == object as "no info" and accepting expected_type when provided, and only raising errors when a real incompatibility is demonstrated (non-None element or array element incompatible with expected_type).

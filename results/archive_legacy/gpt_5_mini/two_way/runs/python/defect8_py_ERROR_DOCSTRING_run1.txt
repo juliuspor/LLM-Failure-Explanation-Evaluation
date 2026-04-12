@@ -1,0 +1,47 @@
+What happened
+- The failure happens in LocaleUtils.to_locale when it validates the input string variable locale_str.
+- Your input was "fr__POSIX".
+- The method is strict: it requires the country code to be exactly two characters when a country is present. During validation it splits the input (or otherwise extracts language/country/variant) and then checks the country length. Because "fr__POSIX" has two underscores the extracted country piece is the empty string "" and the code runs the check that enforces country length == 2. That check fails and a ValueError("Invalid locale format: fr__POSIX") is raised.
+
+Why that specific string fails (plain language)
+- "fr__POSIX" is intended to mean language = "fr", empty country, variant = "POSIX".
+- The implementation does not treat the empty middle field between two underscores as a legal empty country; it expects either:
+  - just a language ("fr"), or
+  - language and a two-letter country ("fr_FR"), or
+  - language, two-letter country, and variant ("fr_FR_POSIX").
+- When it sees two underscores it still applies the "country must be length 2" rule to the empty string and throws the ValueError.
+
+Where in the code the check fails
+- In LocaleUtils.to_locale, after splitting locale_str into its parts (language, country, variant), the code performs the country-length validation (something like if len(country) != 2: raise ValueError(...)). That is the exact validation that causes the error for "fr__POSIX".
+
+Concrete fixes (step-by-step)
+1. If the input is wrong, fix the caller:
+   - Create the Locale directly if you mean language "fr" with empty country and variant "POSIX": Locale("fr", "", "POSIX") rather than using the string parser.
+   - Or pass a two-letter country if you mean to include a country (e.g., "fr_FR_POSIX").
+
+2. If you want to allow the "language__variant" form in to_locale, change the validator to accept an empty country when the input has two underscores:
+   - After splitting locale_str (e.g. parts = locale_str.split('_', -1)):
+     - If len(parts) == 3:
+       - Allow parts[1] == "" (empty country) and set country = "" and variant = parts[2] without enforcing the 2-character country rule.
+       - Keep enforcing country length == 2 only when parts[1] is non-empty.
+   - Example patch (conceptual):
+     - country = parts[1]
+     - if country != "" and len(country) != 2:
+         raise ValueError("Invalid locale format: " + locale_str)
+     - variant = parts[2]  # allowed any length
+3. Add unit tests for these cases:
+   - "fr" -> Locale("fr", "")
+   - "fr__POSIX" -> Locale("fr", "", "POSIX") (if you decide to accept it)
+   - "fr_" or "fr_POSIX" -> ensure behaviour is defined and tested
+
+Suggested minimal code change (pseudo/Python-ish)
+- Replace the strict country-length check with:
+  if country != "" and len(country) != 2:
+      raise ValueError("Invalid locale format: " + locale_str)
+
+That change keeps strict validation for a present country code but allows the empty-country-with-variant pattern "fr__POSIX", which is a common valid form for language+variant.
+
+Summary
+- Root cause: the method enforces country length == 2 even when the country substring is empty (from "fr__POSIX").
+- Where: LocaleUtils.to_locale, in the country-length validation section acting on locale_str.
+- Fix: either send a different input (Locale(...)) or modify the validation to allow an empty country when a variant is present by checking country != "" before enforcing length == 2.

@@ -1,0 +1,45 @@
+What happened (root cause)
+- The code treats any float that compares equal to an int as an integer (line 176: "if x == int(x) ..."). For -0.0 this is true: -0.0 == 0 and int(-0.0) == 0.
+- That branch sets value = int(x) (line 177) and later calls self.add(str(value)) (line 192). Converting via int() loses the negative-zero sign, so "-0.0" becomes "0".
+- The code also uses x < 0 when deciding whether to insert a space after a preceding '-' (the check above the shown slice). For -0.0, x < 0 is False, because IEEE -0.0 compares equal to 0, so that check also fails to detect the signed zero.
+- Effect: negative zero is treated like plain zero and printed as "0" instead of "-0.0". The failure point is in the integer-handling branch (lines 176–194), and in the earlier "prev == '-'" check that uses x < 0.
+
+Where exactly (lines)
+- Line 176: if x == int(x) and not math.isinf(x) and not math.isnan(x): — causes -0.0 to enter integer branch.
+- Line 177: value = int(x) — strips the sign by converting to int 0.
+- Line 192: self.add(str(value)) — emits "0".
+- Earlier, the code does: if x < 0 and prev == '-': ... — this fails to recognize negative zero because x < 0 is False for -0.0.
+
+Why comparisons fail for negative zero
+- IEEE-754 negative zero compares equal to positive zero (x == 0.0 is True) and comparisons like x < 0 are False. You cannot detect the sign of zero with plain numeric comparisons or int().
+
+Concrete steps to fix (clear actionable changes)
+
+1) Add a negative-zero detection utility (if not present) — exact implementation:
+   @staticmethod
+   def is_negative_zero(x):
+       return x == 0.0 and math.copysign(1.0, x) < 0
+
+   (math.copysign preserves the sign even when value is zero.)
+
+2) Early-return when x is negative zero (insert before line 176):
+   if self.is_negative_zero(x):
+       self.add("-0.0")
+       return
+
+   This prevents -0.0 from entering the integer branch and preserves the sign and decimal form expected by tests.
+
+3) Use the utility where code checks sign for space insertion (change the earlier check that uses x < 0):
+   # original: if x < 0 and prev == '-':
+   if (x < 0 or self.is_negative_zero(x)) and prev == '-':
+
+   This ensures you insert the space when a negative zero follows a '-' operator.
+
+Why these steps fix it
+- Detecting negative zero before converting to int prevents losing the sign (value variable and str(value) no longer execute for -0.0).
+- Using math.copysign lets you detect the sign bit even when the numeric comparisons treat it as zero, fixing both printing and spacing behavior.
+
+Optional note on implementation alternatives
+- You can implement is_negative_zero with struct.pack/unpack to examine the sign bit, but math.copysign is simpler and portable.
+
+That is the exact root cause (int() + numeric comparisons strip/ignore the negative-zero sign) and the precise code changes needed (add is_negative_zero, check it before integer branch, and use it in the x<0 space-insertion check).

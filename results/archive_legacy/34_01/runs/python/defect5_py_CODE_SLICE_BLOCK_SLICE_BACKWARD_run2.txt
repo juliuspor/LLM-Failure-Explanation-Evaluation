@@ -1,0 +1,38 @@
+What went wrong (root cause)
+- At line 337 you do inferred_type = type(array). That returns the Python type of the list object itself (e.g. list), not the element/component type stored in the list.
+- Later, at line 346 you check inferred_type == object to decide whether you have an unknown component type. That check never becomes true for a real list value because type(array) is list, not object. As a result the code fails to detect "unknown element type" and the code path that should raise or handle that situation is not taken.
+- ArrayUtils._copy_list_grow1(array, inferred_type) is therefore being called with inferred_type == list (the list class) instead of the intended component type (for example str, int, or the element's class). That leads to a type-mismatch or incorrect internal representation in the newly created list and then assignment new_list[len(new_list) - 1] = element can fail (or silently produce an invalid/incorrect list).
+- The bug occurs when array is not None (line 335–338). If array is None and element is not None you set inferred_type correctly to type(element). If both are None you set inferred_type = object (line 340), which matches your later check.
+
+Where it happens (specific lines and variables)
+- Problematic assignment: line 337: inferred_type = type(array)
+- Faulty check that depends on that value: line 346: if inferred_type == object and expected_type != object:
+- The failing call: line 343: new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+- The failing write: line 344: new_list[len(new_list) - 1] = element
+
+Why that produces the failure
+- The code assumes inferred_type holds the element/component class, but it holds the list class. That breaks the logic that decides when a cast from an object-list to a typed-list should be prevented and also breaks whatever ArrayUtils._copy_list_grow1 expects for its second argument. The check intended to raise TypeError (lines 346–351) never triggers when it should, so invalid casts are allowed through and then blow up later.
+
+Concrete fixes (step-by-step)
+1. Infer element type from the array contents, not from the list object:
+   - If array is not None and len(array) > 0: use type(array[0]) (or scan elements to find a common type if you need to be stricter).
+   - If array is not None but empty: fall back to type(element) if element is provided, otherwise object.
+2. Keep your existing handling for the case array is None (use type(element) or object).
+3. Example corrected logic (replace lines 335–341):
+
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])      # element/component type from existing elements
+        elif element is not None:
+            inferred_type = type(element)      # array empty but we have an element
+        else:
+            inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+4. Optionally, if heterogenous arrays are possible, decide a policy: (a) take the first non-None element's type, (b) require all elements to be same type and raise if not, or (c) use a common base class. Implement that scanning before calling _copy_list_grow1.
+5. After fixing inferred_type, ensure ArrayUtils._copy_list_grow1 expects a component type (not the list class) and that the TypeError check at lines 346–351 behaves as intended.
+
+That change makes the check at line 346 meaningful and prevents invalid casts/assignments that are currently causing the failure.

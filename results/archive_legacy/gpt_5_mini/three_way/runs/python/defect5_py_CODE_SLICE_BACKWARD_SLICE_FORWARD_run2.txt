@@ -1,0 +1,57 @@
+What happened (root cause)
+- At line 336 you call inferred_type = type(array). That returns the Python type of the container object (for example <class 'list'>), not the type of the elements inside the list.
+- ArrayUtils._copy_list_grow1 apparently expects an element/component type (the class of list items) so it gets the wrong value and creates a list/array with the wrong element type. That mismatch later causes the code to fail when assigning element into the new list (new_list[len(new_list) - 1] = element) or when you do the type-check at lines 346–347.
+- Concretely: if array is a list of strings, type(array) is list, not str. So inferred_type becomes list instead of the element type. If the code later assumes inferred_type describes item type and tries to treat it that way, you get class/type mismatches.
+
+Where it happens (exact lines)
+- The wrong value is set at line 336: inferred_type = type(array).
+- The result is used immediately at line 343 when calling ArrayUtils._copy_list_grow1(array, inferred_type).
+- The problematic assignment happens at line 344 (new_list[len(new_list) - 1] = element) and the later type check at lines 346–347 relies on inferred_type having been a real element type.
+
+Why that causes the failure
+- You need the runtime type of the list elements (e.g. type(array[0]) or the element variable), not the runtime type of the list object itself.
+- Using type(array) produces a wrong "element type". That makes _copy_list_grow1 construct an incorrectly typed container or otherwise behave incorrectly; writing element into new_list then triggers a type error (or your subsequent check misfires).
+
+How to fix it (clear step-by-step changes)
+1. If array is not None and not empty, use the type of an element from the array (and prefer a non-None element):
+   - replace line 336 with logic like:
+     if array is not None:
+         # prefer a non-None existing element to infer type
+         for item in array:
+             if item is not None:
+                 inferred_type = type(item)
+                 break
+         else:
+             inferred_type = None  # empty or all-None; fall back below
+2. If array was empty or all elements are None, and element is not None, use type(element) (this is already present at line 337 but needs to be used when array gives no element type).
+3. If both provide no information, set inferred_type = object (line 340 is fine).
+4. Use inferred_type (the element type) when calling _copy_list_grow1.
+
+Example corrected fragment (conceptual)
+    if array is not None:
+        # find first non-None element to infer element type
+        inferred_type = None
+        for item in array:
+            if item is not None:
+                inferred_type = type(item)
+                break
+        if inferred_type is None:
+            # array empty or all items None; fall back to element or object
+            if element is not None:
+                inferred_type = type(element)
+            else:
+                inferred_type = object
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+
+Then call:
+    new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+    new_list[len(new_list) - 1] = element
+
+Other notes
+- If your arrays can be heterogeneous (mixed types) you must decide a policy (first non-None element, most specific common base class, or always object).
+- If ArrayUtils._copy_list_grow1 expects a JVM-style component class name (your error string mentions "[Ljava.lang.Object;"), ensure inferred_type is the element class you intend and not the Python list class.
+
+This pinpoints the bug: line 336 uses type(array) (the container type) instead of deriving the element type from the array contents (e.g. type(array[0]) or a first non-None element). Fix the inference logic as shown and the failure will go away.

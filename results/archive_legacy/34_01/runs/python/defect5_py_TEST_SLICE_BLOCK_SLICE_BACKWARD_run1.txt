@@ -1,0 +1,47 @@
+What happens
+- Call: ArrayUtils.add(None, None, expected_type=str).
+- Inside ArrayUtils.add the code builds an inferred_type for the array contents. The snippet shows:
+  - At line 337 a branch sets inferred_type = object when an element is not None (line 340).
+  - At line 346 there is a guard: if inferred_type == object and expected_type != object: raise TypeError(...).
+- Because every element is None (you passed None and are adding None), the method never sees a non-None element to determine a concrete inferred_type, so inferred_type remains object.
+- The code then hits the guard at line 346: inferred_type == object and expected_type is str, so it raises a TypeError. That is why the test fails instead of returning [None].
+
+Root cause, in plain terms
+- inferred_type is used to decide whether the existing array type can be cast to the requested expected_type.
+- The logic treats inferred_type == object as “incompatible with any specific expected_type” and rejects the operation.
+- But when the array (or the items being added) are all None, there is no real type information; object is just a placeholder. In that case it is valid to accept expected_type=str and produce an array of str elements whose only value is None.
+- The check at lines 346–351 wrongly forbids the allowed case where all elements are None and expected_type is a concrete type.
+
+Where to change it (concrete steps)
+1. Track whether any non-None element was seen while inferring the element type (e.g. has_non_none = False). Set has_non_none = True when you set inferred_type based on a non-None element.
+2. Replace the guard at line 346 with a check that only rejects when there was a real conflict, not when the only evidence is None. For example:
+   - Current:
+     if inferred_type == object and expected_type != object:
+         raise TypeError(...)
+   - Replace with:
+     if inferred_type == object and expected_type != object and has_non_none:
+         raise TypeError(...)
+   Or, equivalently, if no non-None elements were seen, allow expected_type to be used:
+     if inferred_type == object and expected_type != object and any_non_none_elements_in_array:
+         raise TypeError(...)
+
+Minimal patch example (conceptual)
+- Before the loop that sets inferred_type add:
+    has_non_none = False
+- When you set inferred_type from a concrete element, also set:
+    has_non_none = True
+- Replace line 346 condition with:
+    if inferred_type == object and expected_type != object and has_non_none:
+        raise TypeError(...)
+
+Why that fixes it
+- If all elements are None, has_non_none stays False, so the TypeError is not raised and the method can create an array of the requested expected_type (str) containing None.
+- If you actually saw non-None elements that forced inferred_type to object (meaning mixed incompatible types), has_non_none will be True and the TypeError will still protect against invalid casts.
+
+References to code lines and names
+- Variable: inferred_type (lines 337, 340, 346)
+- Variable: element (line 337)
+- Parameter: expected_type (call site and check at line 346)
+- Check raising the exception: lines 346–351
+
+This explains why your test fails and gives a precise change to make the method accept adding None values when expected_type is provided.

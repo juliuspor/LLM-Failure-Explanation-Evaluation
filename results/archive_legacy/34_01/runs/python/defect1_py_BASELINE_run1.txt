@@ -1,0 +1,53 @@
+What happened (where it failed)
+- The call DateTimeZone.for_offset_hours_minutes(-2, -15) raised ValueError: Minutes out of range: -15 at the check on lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check rejects any negative minutes. But the docstring and test expect negative minutes to be allowed when hours_offset is negative (see " -ve -ve (-2, -15) -> -02:15").
+
+Why it happened (root causes and exact code locations)
+There are two related bugs in this method:
+
+1) Wrong validation logic (lines 396–397)
+- Current code: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+- This always rejects negative minutes, even when hours_offset is negative. The docstring explicitly allows negative minutes when hours_offset is negative (e.g. (-2, -15) is valid).
+- So the failure happens here because minutes_offset == -15 triggers minutes_offset < 0 and raises.
+
+2) Incorrect combination of hours and minutes when hours are negative (lines 402 and 404)
+- Current code:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+- For (-2, -15) hours_in_minutes == -120. The code computes minutes_offset = -120 - (-15) = -105, i.e. -1:45, but the expected total is -120 + (-15) = -135 (-2:15).
+- The subtraction in the if branch is the wrong operation: you should add the minute offset (which may be negative) to the hours converted to minutes.
+
+Precise fixes (exact changes to make)
+1) Fix the minutes validation (line ~396)
+- Replace the current check with a conditional that only rejects negative minutes when the hour sign forbids them:
+  if (minutes_offset < 0 and hours_offset > 0) or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- This allows negative minutes when hours_offset is negative or zero (matches the docstring table).
+
+2) Fix the combination logic (lines ~402–404)
+- Compute a new variable total_minutes instead of reusing minutes_offset, and add the minute offset to hours_in_minutes:
+    hours_in_minutes = hours_offset * 60
+    total_minutes = hours_in_minutes + minutes_offset
+- Use total_minutes in the multiplication:
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why these changes fix the problem
+- The updated validation allows (-2, -15) to pass the range checks.
+- Adding hours_in_minutes + minutes_offset produces -120 + (-15) = -135 minutes, which is the intended -02:15 total offset.
+- Using a separate total_minutes variable avoids confusion from overwriting minutes_offset.
+
+Suggested minimal test cases to verify behavior
+- (2, 15) -> +02:15
+- (2, -15) -> ValueError (positive hours with negative minutes is invalid)
+- (0, -15) -> -00:15
+- (-2, 15) -> -02:15
+- (-2, -15) -> -02:15 (the failing case)
+- (hours out of range) e.g. (24, 0) -> ValueError
+- (minutes out of range) e.g. (0, 60) -> ValueError
+
+That is the exact reason the code fails and the concrete changes required to make the method behave according to the docstring and the test.

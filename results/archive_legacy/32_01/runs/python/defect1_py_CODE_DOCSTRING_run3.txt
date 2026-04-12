@@ -1,0 +1,64 @@
+What happens
+- The bug is in for_offset_hours_minutes at the two lines that compute the total minutes by mutating minutes_offset:
+  - if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  - else:
+      minutes_offset = hours_in_minutes + minutes_offset
+- These lines treat minutes_offset as if it is always a non-negative magnitude. When minutes_offset is negative the arithmetic becomes wrong (subtracting a negative becomes addition), so certain sign combinations produce the wrong total offset.
+
+Where it fails (concrete examples)
+- Example 1 (should raise ValueError): hours_offset = 2, minutes_offset = -15
+  - Expected: this combination is invalid per the docstring (positive hours with negative minutes).
+  - Actual: hours_in_minutes = 120, code takes 120 + (-15) = 105 => +01:45 (wrong and should not have been accepted).
+- Example 2 (wrong result): hours_offset = -2, minutes_offset = -15
+  - Docstring says (-2, -15) -> -02:15 (i.e. -135 minutes).
+  - Actual: hours_in_minutes = -120; code computes -120 - (-15) = -105 => -01:45 (wrong sign/amount).
+
+Why this happens (root cause)
+1. The code reuses the minutes_offset parameter as if it were always a non-negative magnitude, instead of treating minutes_offset as a signed offset or using its absolute value where appropriate.
+2. The branch for negative hours subtracts minutes_offset directly: hours_in_minutes - minutes_offset. If minutes_offset is negative this becomes hours_in_minutes + abs(minutes), which is the opposite of the intended behavior.
+3. The code also does not enforce the rule in the docstring that minutes must not be negative when hours is positive (so invalid inputs are accepted rather than rejected).
+
+Where in the method
+- The problematic lines are inside the try block after hours_in_minutes is computed:
+  - the "if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset" line
+  - the "else: minutes_offset = hours_in_minutes + minutes_offset" line
+- Those lines then feed into FieldUtils.safe_multiply(...) and the wrong offset propagates.
+
+How to reproduce quickly
+- Call for_offset_hours_minutes(2, -15) and observe it returns +01:45 instead of raising ValueError.
+- Call for_offset_hours_minutes(-2, -15) and observe it returns -01:45 instead of -02:15.
+
+Precise fixes (step-by-step)
+1. Enforce the docstring sign rule: if hours_offset > 0 and minutes_offset < 0 then raise ValueError("Minutes must be non-negative when hours is positive") (and possibly symmetric checks if you want).
+   - Insert this validation after the existing range checks and before doing arithmetic.
+2. Compute total minutes using absolute minutes when combining with hours:
+   - Replace the two-branch mutation with:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+       else:
+           total_minutes = hours_in_minutes + abs(minutes_offset)
+   - Note: for hours_offset == 0 the else branch will use abs(minutes_offset), which yields the desired behavior (sign is determined by minutes_offset when hours == 0 only if you retain minutes_offset sign logic — if you want (0, -15) => -00:15 then handle zero-hours as a special case: if hours_offset == 0: total_minutes = minutes_offset).
+3. Use a fresh variable name (e.g., total_minutes) instead of mutating minutes_offset to avoid confusion and mistakes.
+4. Then multiply total_minutes by MILLIS_PER_MINUTE and proceed as before.
+
+Minimal corrected outline (illustrative)
+- After range checks:
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError("Minutes must be non-negative when hours is positive")
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes = hours_in_minutes - abs(minutes_offset)
+    elif hours_offset > 0:
+        total_minutes = hours_in_minutes + abs(minutes_offset)
+    else:  # hours_offset == 0
+        total_minutes = minutes_offset  # keep sign of minutes
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why these steps fix it
+- Using abs(minutes_offset) ensures arithmetic always treats minutes as a magnitude to be added to or subtracted from the hours component consistently.
+- Enforcing the sign rule rejects invalid inputs that the docstring says should be rejected.
+- Using a new variable prevents accidental reuse/overwrite of input parameters.
+
+If you want, I can produce a drop-in corrected implementation of for_offset_hours_minutes with unit-test examples for the failing cases.

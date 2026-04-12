@@ -1,0 +1,34 @@
+What happened (where it failed)
+- At line 176 the code does: if x == int(x) and not math.isinf(x) and not math.isnan(x):
+- For x == -0.0, the condition x == int(x) is true because -0.0 == 0.
+- Then at line 177 the code does: value = int(x). For -0.0 this produces value == 0 (the sign is lost).
+- Later the code calls self.add(str(value)) at line 192, which adds "0" (or "0.0" depending on surrounding code) instead of the expected "-0.0".
+- The test asserts the formatted output should preserve the negative zero sign ("-0.0"), but the path that converts x to an int drops that sign, so the test sees "0" and fails with Expected -0.0, got 0.
+
+Why this root cause occurs (simple)
+- In IEEE floats, -0.0 compares equal to 0.0, and int(-0.0) yields 0. Converting to an int and then to a string loses the negative-zero sign bit. The code's integer-special-case (lines 176–192) does exactly that and so destroys information needed to show "-0.0".
+
+Exact places to change (concrete fixes)
+1) Detect negative zero before int() conversion (recommended)
+- On line 176 (before value = int(x)) add a check for negative zero:
+  - if x == 0.0 and math.copysign(1.0, x) < 0:
+      self.add("-0.0")
+      return  # or continue the proper control flow
+  This preserves "-0.0" and avoids using int(x).
+
+2) Or preserve sign when converting to string
+- Replace self.add(str(value)) at line 192 with code that re-inserts the negative sign when appropriate:
+  - if value == 0 and math.copysign(1.0, x) < 0:
+      self.add("-0")
+    else:
+      self.add(str(value))
+
+3) Or avoid the int-special-case for values that are signed zero
+- Change the if guard at line 176 to exclude signed zero:
+  - if x == int(x) and not math.isinf(x) and not math.isnan(x) and not (x == 0.0 and math.copysign(1.0, x) < 0):
+
+Notes and why I prefer option 1
+- Option 1 is simplest and explicit: it preserves the exact negative-zero representation immediately and avoids downstream branches that assume integer signlessness.
+- Use math.copysign(1.0, x) < 0 to detect negative zero in portable Python (avoids fiddly bit-twiddling).
+
+This is the single root cause: converting -0.0 to int (value = int(x)) eliminates the negative zero sign, and the code later uses that int-to-string result (self.add(str(value))) so the output becomes "0" instead of "-0.0".

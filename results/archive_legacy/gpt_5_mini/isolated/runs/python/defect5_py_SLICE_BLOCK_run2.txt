@@ -1,0 +1,84 @@
+What happened (where it fails)
+- The failure happens at lines 346–351. The code raises a TypeError because this condition is true:
+  inferred_type == object and expected_type != object
+- That means inferred_type ended up being the built-in object type, while expected_type is some more specific type. The code treats that as an impossible cast and raises the error with the ClassCastException-style message.
+
+Why it happened (root cause)
+- inferred_type was computed earlier (before line 346). It becomes object when the list elements do not give a more specific common type. Common reasons inferred_type becomes object:
+  1. The list is empty, so there was no element to derive a type from.
+  2. All elements are None, so the code fell back to object.
+  3. Elements are heterogeneous (different types) and the inference logic collapsed to object as the only common type.
+- Because the check at line 346 only looks for inferred_type == object, it treats all these different cases the same and immediately raises a TypeError instead of handling them correctly.
+
+Why that is incorrect / surprising
+- If the list is empty or contains only None, you might still want to allow casting to a list of expected_type (or to give a clearer error that the list is empty).
+- If elements are heterogeneous but every element individually is an instance of expected_type, the check inferred_type == object is too coarse — it will still raise even though the cast is actually valid.
+- The code therefore makes two wrong assumptions:
+  a) inferred_type == object always means the cast is impossible; and
+  b) inferred_type was reliably computed as the element type in the first place.
+
+Where to look
+- The problem originates where inferred_type is set (the code just prior to line 346). Inspect that inference code to see how it handles empty lists, None values, and heterogeneous element types.
+
+Concrete, step-by-step fixes (do these exact changes)
+
+1) Decide desired behavior for empty lists and all-None lists
+   - If you want to allow casting empty lists to any expected_type, special-case that.
+   - Example change (pseudocode, put this before the current check at line 346):
+     if len(list_value) == 0:
+         # allow cast of empty list to any expected_type
+         return casted_empty_list_to(expected_type)
+
+2) Improve inferred_type computation (replace current inference with explicit logic)
+   - Compute inferred_type from the first non-None element and verify all other elements are compatible:
+     inferred_type = None
+     for el in list_value:
+         if el is not None:
+             inferred_type = type(el)
+             break
+     if inferred_type is None:
+         # list contains only None values: handle as empty-case (step 1)
+         ...
+     # verify every non-None element is instance of inferred_type or expected_type
+     for el in list_value:
+         if el is None:
+             continue
+         if not isinstance(el, inferred_type):
+             # if you want the more specific common base, compute it, or set inferred_type = object
+             inferred_type = object
+             break
+
+3) Replace the simplistic check with an issubclass/instance check
+   - Instead of: if inferred_type == object and expected_type != object:
+     use: 
+     if not (inferred_type is object or issubclass(inferred_type, expected_type)):
+         # raise TypeError because elements cannot be treated as expected_type
+   - Or, if inferred_type may be a runtime class of an element:
+     if not all(el is None or isinstance(el, expected_type) for el in list_value):
+         raise TypeError(...)
+
+4) Give clearer error messages
+   - If you still raise, include why inferred_type became object:
+     - For empty list: "Cannot cast empty object list to X list; list is empty"
+     - For heterogeneous elements: "Cannot cast list to X list; elements types: {set(type(el) for el in list_value if el is not None)}"
+   - Replace the ClassCastException-style message with one that references inferred_type and expected_type and the condition (line 346) that caused the raise.
+
+Examples of exact replacement for lines 346–351 (one option)
+- Before (current):
+  if inferred_type == object and expected_type != object:
+      raise TypeError(f"Cannot cast object list to {expected_type.__name__} list ...")
+- After (recommended):
+  # handle empty or all-None lists
+  if len(list_value) == 0 or all(el is None for el in list_value):
+      # permit or handle explicitly; choose to permit:
+      return []  # or appropriate empty converted list
+  # verify each non-None element is an instance of expected_type
+  if not all(el is None or isinstance(el, expected_type) for el in list_value):
+      raise TypeError(
+          f"Cannot cast list to {expected_type.__name__} list; "
+          f"element types: {sorted({type(el).__name__ for el in list_value if el is not None})}"
+      )
+
+Summary
+- The code fails because inferred_type becomes object (empty/None/heterogeneous elements) and the code treats that as an automatic cast failure at line 346–351.
+- Fix by (1) handling empty/all-None lists explicitly, (2) computing inferred_type from real element types, and (3) replacing the exact equality check inferred_type == object with instance/issubclass checks that verify element compatibility with expected_type.

@@ -1,0 +1,54 @@
+What happened (where)
+- The failure occurs in the branch that handles "integer-valued" floats (lines shown around 177–194). The key line is:
+  - value = int(x)  (line 177 in your slice)
+- The test fed x = -0.0. IEEE floats have a negative zero value that compares equal to 0.0, so:
+  - x == int(x) is True for x == -0.0, so the integer branch runs.
+  - int(-0.0) produces 0, losing the sign bit. Later you call self.add(str(value)) (line 192), which produces "0".
+- The code above also checks sign using x < 0 (near the top). For -0.0 that test is False, so you don't detect negative zero there either.
+- Result: the negative zero sign is lost and you output "0" instead of "-0.0". That matches the failure: Expected -0.0, got 0.
+
+Why this happens (root cause)
+- Converting -0.0 to int removes the sign bit; Python ints have no signed zero.
+- The comparisons x < 0 and x == int(x) treat -0.0 as non-negative and equal to 0, so the code both enters the integer branch and fails to detect the negative sign. The negative-zero sign is an IEEE float property, not preserved by int().
+
+Concrete fixes (clear steps you can apply)
+Option A — preserve and special-case negative zero early
+1. At the top of add_number, detect negative zero with math.copysign or math.atan2 sign test:
+   - if x == 0.0 and math.copysign(1.0, x) < 0:
+       self.add("-0.0")
+       return
+2. This must be done before value = int(x) so you never lose the sign.
+
+Option B — use sign detection wherever you convert to int
+1. Replace the sign test x < 0 with a sign-test that catches -0.0:
+   - use math.copysign(1.0, x) < 0 (this is True for negative zero)
+   - e.g. change:
+       if x < 0 and prev == '-':
+     to:
+       if math.copysign(1.0, x) < 0 and prev == '-':
+2. Before calling int(x) (line 177), check for negative zero and handle it explicitly:
+   - if x == 0.0 and math.copysign(1.0, x) < 0:
+       self.add("-0.0")
+       return
+
+Option C — avoid int conversion for exact integral floats entirely
+1. If you want to keep the negative sign and canonical float formatting, consistently format the float with str(x) whenever x is zero or when sign matters. For example:
+   - if x == 0.0:
+       self.add(str(x))   # str(-0.0) gives "-0.0"
+       return
+2. Otherwise proceed with the integer optimization.
+
+Which to pick
+- If the purpose of the integer branch is to produce compact integer-like output but still preserve -0.0, use Option A or B so negative zero is handled before int() strips the sign.
+- If you prefer simplicity and correct sign behavior over micro-optimizations, use Option C and rely on str(x) for zero.
+
+Minimal code patch example (Option B):
+- Add import math if needed, and change the sign test and add a pre-int check:
+    if math.copysign(1.0, x) < 0 and prev == '-':
+        self.add(" ")
+    if x == 0.0 and math.copysign(1.0, x) < 0:
+        self.add("-0.0")
+        return
+    # then continue with value = int(x) ...
+
+This will stop converting -0.0 to int( ) and output the expected "-0.0".

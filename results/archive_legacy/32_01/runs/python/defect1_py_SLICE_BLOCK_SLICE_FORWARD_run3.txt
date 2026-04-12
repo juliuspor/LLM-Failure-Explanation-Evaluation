@@ -1,0 +1,42 @@
+What happened (where it fails)
+- The failure is in the code that builds the total minute offset after parsing hours and minutes. Look at the lines you showed:
+  - Lines 400–401 validate the parsed minutes value: it must be 0–59.
+  - Lines 406 and 408 then reuse the variable minutes_offset to build the total offset in minutes:
+    - 406: minutes_offset = hours_in_minutes - minutes_offset
+    - 408: minutes_offset = hours_in_minutes + minutes_offset
+  - Line 409 converts that minutes_offset to milliseconds and returns it (via for_offset_millis).
+
+Why it fails (root cause)
+- The code mixes two meanings in the same variable minutes_offset: first it is the parsed minutes field (0–59), then it is overwritten with the total offset in minutes. Because the sign logic is wrong, the sign of the final offset can be inverted or otherwise incorrect when minutes are non-zero.
+- Concretely:
+  - For a negative time zone like "-01:30" you parsed hours_in_minutes = 60 and minutes_offset = 30 (valid under the 0–59 check).
+  - Line 406 runs and computes minutes_offset = hours_in_minutes - minutes_offset = 60 - 30 = 30 (a positive 30), which loses the negative sign. The code then multiplies by MILLIS_PER_MINUTE and returns +01:30 instead of -01:30.
+- In short: the arithmetic at line 406 is wrong for negative offsets. The code should form the total as hours + minutes and then apply the sign, but instead it subtracts the parsed minutes from the hours for the negative branch, producing the wrong sign when minutes ≠ 0.
+
+Exact place to fix
+- The incorrect logic is at line 406 (and the surrounding sign handling). The bug is introduced where minutes_offset (the parsed minute component) is reused and combined with hours_in_minutes incorrectly.
+
+Concrete fixes (step-by-step)
+1. Stop reusing minutes_offset for two meanings. Use a new variable total_minutes to hold the combined hours+minutes.
+2. Compute total_minutes = hours_in_minutes + parsed_minutes (where parsed_minutes is the original minutes value validated at 400–401).
+3. Apply the sign after you compute the absolute total:
+   - If parsed sign is negative, do total_minutes = -total_minutes.
+4. Then convert to milliseconds and return:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+   - return cls.for_offset_millis(offset)
+
+Concretely change the code like this (pseudocode referencing your line numbers):
+- Keep lines 400–401 as-is to validate parsed_minutes.
+- Replace 406–409 with:
+  - total_minutes = hours_in_minutes + minutes_offset  # minutes_offset here is the parsed minutes
+  - if negative_sign:
+  -     total_minutes = -total_minutes
+  - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Why this fixes it
+- This makes the math explicit and correct: you always add hours and minutes to get the absolute minute count, then apply the sign once. That preserves the sign for all combinations (e.g., -00:30 → -30, -01:30 → -90).
+
+Additional notes
+- After this change, add unit tests for edge cases where minutes ≠ 0:
+  - "+00:30", "-00:30", "+01:00", "-01:00", "+23:59", "-23:59"
+- Keep the existing minutes range check at 400–401 (0–59) — that is correct.

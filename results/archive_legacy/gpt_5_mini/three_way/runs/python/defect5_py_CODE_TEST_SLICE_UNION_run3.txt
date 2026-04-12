@@ -1,0 +1,55 @@
+What happened (root cause)
+- The code infers the element/component type incorrectly at line 336:
+  - It does inferred_type = type(array). But type(array) is the Python list class (i.e. <class 'list'>), not the element type inside the list.
+  - Because of that you pass the wrong type into ArrayUtils._copy_list_grow1 and later comparisons (line 346) become meaningless.
+- Two failing scenarios caused by that mistake:
+  1. When array is a non-empty list, you should infer the element/component type (e.g. type(array[0])), not the list class. Using type(array) breaks type logic and any code that expects a component type.
+  2. When both array and element are None and the caller supplies expected_type (the test case test_add_null_to_null_with_expected_type), the code sets inferred_type = object (line 340) and then immediately raises a TypeError at line 346 because it treats "object list" as incompatible with the requested expected_type. In this code path you should allow creating a list using expected_type rather than raising.
+
+Where it occurs
+- Relevant lines (from SLICE_UNION):
+  - 335-336: if array is not None: inferred_type = type(array)
+  - 337: elif element is not None: inferred_type = type(element)
+  - 340: inferred_type = object
+  - 346-347: if inferred_type == object and expected_type != object: raise TypeError(...)
+
+Why that causes the failing test
+- test_add_null_to_null_with_expected_type calls ArrayUtils.add(None, None, expected_type=str).
+  - array is None and element is None → code sets inferred_type = object (line 340).
+  - expected_type is str, so the check at line 346 is true and the method raises TypeError. The test expected a result [None] instead of an exception.
+- Additionally, other tests (adding to non-empty arrays) will get wrong inferred_type (list instead of element type) which may break _copy_list_grow1 or later logic.
+
+Concrete fixes (step-by-step)
+1. When array is not None:
+   - If the array is empty (len(array) == 0) you cannot infer element type from its contents; prefer expected_type if provided, else fallback to object.
+   - If the array is non-empty, infer the element/type from the first element: inferred_type = type(array[0]).
+2. When array is None and element is not None:
+   - Keep inferred_type = type(element).
+3. When both are None:
+   - If expected_type is provided, use that as inferred_type.
+   - Otherwise fall back to object.
+4. Remove or change the restrictive TypeError at lines 346-347: If inferred_type is object but expected_type is a concrete type, you should accept expected_type and pass it down to the copy routine (do not raise). Only raise if there's an actual incompatibility (e.g. trying to cast elements that exist to an incompatible expected_type).
+
+Suggested corrected logic (pseudocode you can apply at lines 335-346):
+    if array is not None:
+        if len(array) > 0:
+            inferred_type = type(array[0])      # element/component type
+        else:
+            inferred_type = expected_type if expected_type is not None else object
+    elif element is not None:
+        inferred_type = type(element)
+    else:  # array is None and element is None
+        inferred_type = expected_type if expected_type is not None else object
+
+Then call:
+    new_list = ArrayUtils._copy_list_grow1(array, inferred_type)
+    new_list[len(new_list) - 1] = element
+
+And remove the TypeError that unconditionally raises when inferred_type == object and expected_type != object. If you must validate, do a real compatibility check between expected_type and inferred_type (for example, if inferred_type is concrete and not subclass of expected_type, then raise).
+
+Why this fix works
+- For a non-empty array you now infer the actual element type, not the list class.
+- For the test_add_null_to_null_with_expected_type case, inferred_type will be set to str (expected_type) and no TypeError will be raised; the returned list will be created with the correct component type semantics.
+- For empty arrays you respect caller's expected_type if given; otherwise fallback to object as before.
+
+If you want, I can produce a small patch with exact replacements for the lines in your file.

@@ -1,0 +1,57 @@
+What happened (what you saw)
+- The test calls ArrayUtils.add(None, None, expected_type=str) expecting a one-element list [None].
+- The code raised a TypeError from the block at lines 346–351 instead of returning [None].
+
+Where it happened (exact place)
+- In the ArrayUtils.add implementation, the check starting at line 346:
+  346 | if inferred_type == object and expected_type != object:
+  347 |     raise TypeError(
+  348 |         f"Cannot cast object list to {expected_type.__name__} list "
+  349 |         f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+  350 |         f"[Ljava.lang.{expected_type.__name__};)"
+  351 |     )
+
+Why it failed (root cause)
+- When both the input array and the element are None, the function's type-inference logic sets inferred_type to object because there is no runtime information to choose a narrower type.
+- The test passed expected_type=str. The code sees inferred_type == object and expected_type != object and immediately raises the TypeError at line 346, claiming an Object[] cannot be cast to String[].
+- That check assumes an actual runtime array already exists as Object[] and that the caller's expected_type is incompatible. But in this call there is no existing array to cast — the right behavior is to create a new list of the requested expected_type (or at least return [None]) rather than fail.
+
+Concrete variables involved
+- inferred_type — result of the function's type inference; becomes object when both array and element are None.
+- expected_type — the caller-provided desired element type (str in the failing test).
+- The offending conditional uses these two variables to decide to raise.
+
+What should be changed (specific fixes)
+1. Prefer expected_type when no type can be inferred:
+   - Replace the current raise branch with logic that uses expected_type if inferred_type is object and expected_type is provided (not object). Example change:
+     - Replace
+       if inferred_type == object and expected_type != object:
+           raise TypeError(...)
+     - With
+       if inferred_type == object:
+           # if caller gave an expected_type, use it; otherwise keep object
+           inferred_type = expected_type or object
+   - This lets ArrayUtils.add(None, None, expected_type=str) return a properly-typed list (i.e., behave like [None]) instead of throwing.
+
+2. If you must validate casts when an actual existing array is present:
+   - Only raise when there is an existing concrete array whose actual element type is object and the caller expects a different type. Concretely, check for the presence of an existing array (e.g., original_array is not None) before raising.
+
+3. Keep current behavior for ambiguous/no-expected-type cases:
+   - If both array and element are None and expected_type is not provided, keep inferred_type == object and return [None] (no TypeError).
+
+Suggested minimal patch (conceptual):
+- After the inference code that sets inferred_type, change the block at lines 346–351 to:
+  if inferred_type == object:
+      # If caller named an expected_type, use it; otherwise keep object
+      if expected_type is not None and expected_type is not object:
+          inferred_type = expected_type
+      else:
+          inferred_type = object
+  # (remove the raise)
+
+Why this fixes it
+- When both inputs are None but the caller specified expected_type=str, the function will now choose str for the new array's element type and return [None] instead of failing.
+- When there is an actual array whose stored type is object and the caller expects a different non-object type, you can still perform an appropriate cast check and raise if you detect a real incompatibility. But you must only do that when there is an actual array to inspect.
+
+Bottom line
+- The code raises because it treats "no inferred type" (object) and "caller expects a concrete type" as an immediate cast error, even when there is no concrete array to cast. Adjust the check so expected_type is used when inference yields object (or only raise when a real array exists). This will allow ArrayUtils.add(None, None, expected_type=str) to return [None] as the test expects.

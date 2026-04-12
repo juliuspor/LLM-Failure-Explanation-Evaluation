@@ -1,0 +1,55 @@
+What happened (what failed)
+- The test calls CsvEscaper.translate_string on "\U0001F630A" (emoji U+1F630 followed by 'A').
+- That input becomes three UTF‑16 code units: [high_surrogate, low_surrogate, 'A'].
+- The code raises IndexError from the bounds check in code_point_at / to_utf16 helper:
+
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+
+- The raised index is 2, which means some code attempted to read at index == len(code_units) (or otherwise called code_point_at with a position equal to the buffer length).
+
+Why it fails (root cause, simple)
+- The translator loop advances the index incorrectly after processing a surrogate pair.
+- When the code sees a high surrogate (start of a surrogate pair) it decodes the full code point, but then the loop increments the position by the wrong amount (typically +1 instead of +2). That leaves the next iteration pointing at the low surrogate (or the loop advances too far and calls code_point_at with index == len).
+- As a result:
+  - Either code_point_at is called with index pointing at a low surrogate (so it tries to read index+1 and walks off the end), or
+  - code_point_at is called with index == len(code_units), triggering the explicit bounds check at lines 35–36 and raising IndexError.
+
+Concrete sequence for "\U0001F630A"
+- UTF‑16 units: [HS, LS, 'A'] with len = 3.
+- Correct behavior: iteration should see HS at index 0, decode the pair (HS+LS) and then advance index by 2 => new index 2, which points to 'A', and decode that.
+- Buggy behavior (what your code does): after decoding the pair the loop increments by 1 (index becomes 1) or otherwise ends up calling code_point_at with index == len (2) at the wrong time. That causes the check at lines 35–36 to fail and raise IndexError: String index out of range: 2.
+
+Where it occurred (which variables / methods / lines)
+- Method(s): CsvEscaper.translate_string (the outer loop that walks code units) and the helper code_point_at (the function performing the surrogate read).
+- Exact failing check: the index check at lines 35–36 in code_point_at (or the equivalent helper shown in your slice block).
+- Variables involved: index (the loop/position variable), code_units (UTF‑16 code unit list produced by to_utf16_code_units), HS/LS (the surrogate pair elements).
+
+How to fix it (step-by-step, specific)
+1. In the main translation loop (translate_string / CharSequenceTranslator.translate):
+   - Use a while loop with the condition while index < len(code_units): so you never call code_point_at when index == len.
+   - After decoding a code point, advance index by the right number of UTF‑16 units:
+     - If the decoded code point is in BMP (<= 0xFFFF), do index += 1.
+     - If it was formed from a surrogate pair (> 0xFFFF), do index += 2.
+   - Example pattern:
+     - while index < len(code_units):
+         cp, units_consumed = code_point_at(code_units, index)  # change helper to report consumed units, or detect cp>0xFFFF
+         ... process cp ...
+         index += units_consumed
+
+2. Or change code_point_at to return (codepoint, units_consumed) instead of requiring the caller to detect surrogates and move the index. This centralizes the correct advancement logic and avoids off‑by‑one mistakes.
+
+3. Ensure code_point_at always validates that it has enough units before reading a low surrogate:
+   - Before reading a low surrogate at index+1, check index+1 < len(code_units) and otherwise handle as an error or treat the high surrogate as a replacement character. Do not assume index+1 exists.
+
+4. Add tests that exercise these edge cases:
+   - Surrogate pair at end of string (no following character).
+   - Surrogate pair followed by another BMP code unit (your failing test).
+   - Multiple consecutive surrogate pairs.
+
+Why these fixes fix the bug
+- They prevent calling code_point_at with index == len (avoids the bounds check failure).
+- They ensure the loop does not treat the low surrogate as a standalone start-of-pair or step past the buffer.
+- They make index advancement explicit and correct (consume 2 units for surrogate pairs), eliminating the off-by-one advancement that caused the out-of-range call.
+
+If you want, paste the translate loop and code_point_at implementation here and I will point exactly which lines to change and show the corrected code.

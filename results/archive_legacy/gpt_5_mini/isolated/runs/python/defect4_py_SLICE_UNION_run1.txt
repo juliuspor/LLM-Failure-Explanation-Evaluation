@@ -1,0 +1,72 @@
+What happened
+- At runtime the code raises an UnboundLocalError (or behaves incorrectly) because the variables start and/or min_start are sometimes used before they are set, and because _min_start_index is being overwritten unconditionally every loop iteration.
+
+Where it occurs (line numbers from your snippet)
+1. Lines 331–335 and 340–346:
+   - start is only assigned inside the SimpleTimePeriod branch:
+     - line 332: if isinstance(period, SimpleTimePeriod):
+     - line 333: start = period.get_start_millis()
+     - line 335: start = int(period.get_start().timestamp() * 1000)
+   - If neither branch executes, start is never defined but later compared at line 346:
+     - line 346: if start < min_start:
+   - That causes an UnboundLocalError (name 'start' referenced before assignment).
+
+2. Lines 340–346 (min_start handling):
+   - You fetch min_start_period at line 341 and only assign min_start inside the SimpleTimePeriod check:
+     - line 342: if isinstance(min_start_period, SimpleTimePeriod):
+     - line 343 / 345: min_start = ...
+   - If min_start_period is not a SimpleTimePeriod, min_start remains undefined and then is used at line 346 in the comparison if start < min_start, again causing an UnboundLocalError.
+
+3. Line 349 (logic bug that hides intended behavior):
+   - After the conditional at line 346 that should update _min_start_index only when start < min_start, line 349 unconditionally assigns:
+     - line 349: self._min_start_index = index
+   - That line overwrites the conditional update and thus sets _min_start_index to the current index every iteration, so the conditional comparison at line 346 becomes pointless and the stored index will always be the last index visited.
+
+Why this is the root cause
+- Using start and min_start without guaranteeing they were set leads to a runtime name error; this is the immediate failure.
+- The unconditional assignment at line 349 is a logic bug: even if the comparison worked, the unconditional assignment means you'll never retain the previously found minimum — the stored index will always be the current index.
+
+Concrete fixes (step-by-step)
+1. Ensure start is always defined before use:
+   - Decide a single, consistent way to get the start time for any period type.
+   - Example approach: define start at top of the loop using a helper that handles all period implementations or explicit else branches.
+   - If only SimpleTimePeriod and another type exist, use if/elif/else and set start in every branch, or skip comparison when you cannot obtain a start.
+
+2. Ensure min_start is defined before use:
+   - After getting min_start_period at line 341, set min_start in every case or skip the comparison if you cannot compute a numeric min_start.
+   - For example, default min_start = float('inf') when _min_start_index < 0 or when min_start_period lacks a start, then compare numerically.
+
+3. Fix the unconditional overwrite of _min_start_index:
+   - Remove line 349. Only set self._min_start_index = index inside the branch where you determine the new minimum (i.e., inside the if start < min_start condition).
+   - If the intent was to set the initial value when _min_start_index < 0, do that explicitly only in that case.
+
+Minimal corrected outline (pseudocode with exact places to change)
+- Before the loop or at its start: ensure default values
+  - self._min_start_index = -1
+- In the loop where you compute start (replace lines 331–335):
+  - if isinstance(period, SimpleTimePeriod):
+        start = period.get_start_millis()   # or the timestamp-based line, but pick one
+    else:
+        # compute start for other period types or skip this item
+        continue  # or set start = other_period_start_value
+- When checking an existing minimum (replace lines 340–346 and remove 349):
+  - if self._min_start_index >= 0:
+        min_start_period = self.get_data_item(self._min_start_index).get_period()
+        if isinstance(min_start_period, SimpleTimePeriod):
+            min_start = min_start_period.get_start_millis()
+        else:
+            # cannot compare; either set a fallback or skip comparison
+            continue
+        if start < min_start:
+            self._min_start_index = index
+    else:
+        # first valid start found
+        self._min_start_index = index
+
+What to test after fixes
+- Case where period is SimpleTimePeriod (confirm min index chosen correctly).
+- Case where period is another type (confirm code either skips or handles alternative start extraction).
+- Edge cases: empty dataset, all periods invalid for start extraction, single-item list.
+
+Summary
+- Root causes: start and/or min_start can be referenced before assignment (lines 332–335 and 342–346), causing name errors; and line 349 unconditionally resets self._min_start_index so the comparison at line 346 never has the intended effect. Fix by always assigning start/min_start before use (or skipping items that lack them) and by removing the unconditional assignment so you only update _min_start_index when you actually find a smaller start (or when initializing it).

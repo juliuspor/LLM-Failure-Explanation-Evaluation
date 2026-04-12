@@ -1,0 +1,56 @@
+What happens
+- The function to_utf16_code_units sets code_units = [] (line 12) but never fills that list.
+- Later, some caller (or code inside this block) accesses code_units by index. The check at line 35 sees index >= len(code_units) (because len(code_units) == 0) and raises IndexError("String index out of range: {index}").
+- In short: code_units is empty, so any access to code_units[index] fails at the test on line 35, and the code never reaches lines 38–44 that expect populated UTF‑16 code units.
+
+Why it fails (root cause)
+- The code assumes code_units contains the UTF‑16 code units for the input string s, but there is no code that converts s into those units and appends them to code_units. The empty list is the direct cause of the IndexError at line 35.
+- Because code_units is empty, lines 38–44 (which interpret high and low surrogates) never get meaningful data.
+
+Exactly where it occurs
+- Variable: code_units (line 12 initialization).
+- Check raising the error: line 35–36.
+- Downstream logic that would use filled code_units: lines 38–44 (surrogate handling and return).
+
+How to fix it — step‑by‑step concrete options
+Option A — Build code_units from Python code points (recommended for clarity):
+1. Replace code_units = [] (line 12) with an implementation that converts s into UTF‑16 code units:
+   - For each Unicode code point cp = ord(ch) in s:
+     - If cp <= 0xFFFF: append cp to code_units.
+     - Else (cp > 0xFFFF): produce a surrogate pair:
+       - cp' = cp - 0x10000
+       - high = 0xD800 + (cp' >> 10)
+       - low = 0xDC00 + (cp' & 0x3FF)
+       - append high; append low
+2. After this population, the check at line 35 and the surrogate logic at lines 38–44 will work correctly.
+
+Minimal example implementation:
+- Replace the body of to_utf16_code_units with:
+  code_units = []
+  for ch in s:
+      cp = ord(ch)
+      if cp <= 0xFFFF:
+          code_units.append(cp)
+      else:
+          cp -= 0x10000
+          code_units.append(0xD800 + (cp >> 10))
+          code_units.append(0xDC00 + (cp & 0x3FF))
+  return code_units
+
+Option B — Derive code_units from UTF‑16 bytes (alternative):
+1. Use s.encode('utf-16-le') to get UTF‑16 little‑endian bytes.
+2. Split those bytes into 2‑byte units and convert to integers with int.from_bytes(..., 'little').
+3. That list becomes code_units. This properly includes surrogate pairs in the byte order used.
+
+Minimal example:
+  raw = s.encode('utf-16-le')
+  code_units = [int.from_bytes(raw[i:i+2], 'little') for i in range(0, len(raw), 2)]
+  return code_units
+
+Which to pick
+- Option A is explicit and does not depend on byte order; it's clearer if you later need code-point math (lines 38–44).
+- Option B is shorter and equivalent if you only need the UTF‑16 code units.
+
+Summary
+- Root cause: code_units is never populated (line 12), so the index check at line 35 raises IndexError.
+- Fix: populate code_units from s before any indexing. Use either the explicit surrogate-pair logic (Option A) or s.encode('utf-16-le') parsing (Option B).

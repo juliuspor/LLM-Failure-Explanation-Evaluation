@@ -1,0 +1,33 @@
+What happened (root cause)
+- The code treats x as an integer when the test `if x == int(x) ...` passes. That check is true for -0.0 because -0.0 == 0.0 and int(-0.0) == 0.
+- Converting to `value = int(x)` loses the negative sign: `int(-0.0)` is `0`. Later `self.add(str(value))` appends `"0"`.
+- Meanwhile the earlier sign-related check `if x < 0 and prev == '-'` never runs for -0.0 because `-0.0 < 0` is False (it compares equal to 0), so you neither preserve the sign nor add the space.
+- Result: the code outputs `"0"` instead of the expected `"-0.0"` — hence the assertion failure "Expected -0.0, got 0".
+
+Where it happens (lines/variables)
+- The misclassification happens at the `if x == int(x) and not math.isinf(x) and not math.isnan(x):` line.
+- The sign is lost at `value = int(x)`.
+- The code path that tries to handle leading `-` (the `if x < 0 and prev == '-':` block) does not catch negative zero because it uses `x < 0`.
+- The final output that shows the wrong value comes from `self.add(str(value))`.
+
+How to fix it (concrete steps)
+1. Detect negative zero before casting to int. Use math.copysign to test sign reliably:
+   - Example check: `is_neg_zero = (x == 0.0 and math.copysign(1.0, x) < 0)`
+2. If `is_neg_zero` is True, handle it as a float/string and preserve the sign (e.g. call `self.add(str(x))`) instead of converting to int.
+3. Keep the rest of the integer-path logic for true integers other than negative zero.
+
+Minimal patch (insert before the integer branch)
+- Right before `if x == int(x) ...`, add:
+  ```
+  # preserve negative zero
+  if x == 0.0 and math.copysign(1.0, x) < 0:
+      self.add(str(x))   # yields "-0.0"
+      return
+  ```
+- Then the existing `if x == int(x) ...` branch can proceed safely for all other values.
+
+Why this fixes it
+- `math.copysign(1.0, x) < 0` reliably detects the negative sign even for -0.0.
+- By handling negative zero upfront, you avoid converting it to an integer (which loses sign) and ensure `self.add` receives the correct string representation (`"-0.0"`).
+
+Alternative detection: you can also use `math.copysign` comparisons or `struct.pack`/`struct.unpack` to inspect IEEE sign bit, but the `math.copysign` approach above is simple, portable, and readable.

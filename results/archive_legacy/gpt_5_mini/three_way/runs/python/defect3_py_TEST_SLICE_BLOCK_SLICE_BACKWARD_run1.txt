@@ -1,0 +1,33 @@
+What happened (short): to_utf16_code_units builds a list of UTF-16 code units, but its index bounds check (lines 35–36) uses len(code_units) even though the index being checked is an index into the original Python string (s). Because some Python characters (emoji, other non-BMP code points) expand into two UTF-16 code units, the lengths and index spaces diverge and the wrong length is used for the check. That mismatch lets a legitimate index be rejected (IndexError) when the string contains surrogate pairs.
+
+Where it occurs (specific lines):
+- to_utf16_code_units: function header at line 10.
+- Bounds check that raises the exception: lines 35–36:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+
+Why this is wrong (concrete):
+- The variable code_units is a list of UTF-16 code units derived from s. If s contains a non-BMP character (like "\U0001F630"), that single Python character becomes two entries in code_units (a high surrogate and a low surrogate).
+- The index you are validating is taken from, and is intended to index into, the original string s (or into code points), not into the expanded code_units list.
+- Therefore comparing index against len(code_units) is using the wrong domain. For example, for s = "\U0001F630A" (two Python characters: emoji + 'A'):
+  - len(s) == 2
+  - len(code_units) == 3 (emoji -> 2 units, plus 'A' -> 1 unit)
+  If code elsewhere increments an index over the original characters, that index can legitimately reach 2 (end of s), but 2 may be out of range or misinterpreted relative to code_units depending on how you use it — causing an IndexError when the code uses len(code_units) for bounds checking.
+
+Why you saw the IndexError in the tests:
+- The test input "\U0001F630A" includes a surrogate pair followed by another character. The translator code advances indices based on characters/code points, but the bounds check uses the longer code_units length. That mismatch of index-domain vs. checked-length is exactly the cause of "advancing past a surrogate pair" IndexError described in the test comment.
+
+How to fix it (concrete, step-by-step):
+1. Decide which index space each function and call-site uses:
+   - If functions accept/return indices in the original Python string (character/code-point indices), always validate against len(s).
+   - If functions operate in UTF-16 code-unit space, make that explicit and ensure all callers use code-unit indices.
+2. Apply one of these concrete fixes:
+   - Replace the incorrect check in to_utf16_code_units with a check against the original string length (if index is meant to be into s). Example: if index < 0 or index >= len(s): raise IndexError(...).
+   - OR, if the function really must validate a code-unit index, then ensure callers pass a code-unit index (not a character index), or provide a mapping function between char-index and code-unit-index and use that mapping for bounds checks.
+3. Prefer the simpler, less-surprising API: keep functions indexed by Python string indices (len(s)) and remove any implicit mixing with UTF-16 unit indices. That means change the bounds check at lines 35–36 to use len(s) (or validate index before you expand to code_units).
+4. Add tests that assert correct behavior for:
+   - A non-BMP char followed by an ASCII char (your failing test).
+   - Iteration across multiple surrogate pairs.
+   - Indexing at the very end of the string.
+
+Summary in one line: the code checks an index against len(code_units) (UTF-16 expanded length) while the index is actually a position in the original Python string (len(s)), so surrogate pairs make the two lengths differ and the check wrongly raises IndexError. Fix by validating against len(s) or by making all indices consistently refer to the same domain.

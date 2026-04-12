@@ -1,0 +1,63 @@
+What happens
+- The ValueError is thrown at the minutes range check (lines 396–397):
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That happens when callers pass a negative minutes_offset (for example hours_offset = -2 and minutes_offset = -30). The current code requires minutes_offset to be between 0 and 59, so it rejects negative minute components.
+
+Why it fails (root cause)
+- The function mixes two different conventions for representing negative offsets:
+  - Some callers provide a negative minutes component (e.g. -30) to mean “-2 hours and -30 minutes”.
+  - The code insists minutes_offset must be non‑negative (0..59). That check rejects negative minutes and raises the error shown.
+- Adding to the confusion, the code later reuses the minutes_offset variable to hold the computed total minutes:
+      hours_in_minutes = hours_offset * 60
+      if hours_in_minutes < 0:
+          minutes_offset = hours_in_minutes - minutes_offset
+      else:
+          minutes_offset = hours_in_minutes + minutes_offset
+  Reassigning minutes_offset conflates the input minute component with the total offset-in-minutes. That makes the code fragile and hard to reason about.
+
+Where it occurs
+- The rejection occurs at the explicit minutes validation (lines 396–397).
+- The incorrect variable reuse (minutes_offset being overwritten with total minutes) occurs in the block that computes hours_in_minutes and adjusts minutes_offset.
+
+How to fix it (concrete steps)
+Pick one of these two clear, explicit behaviors and implement it:
+
+Option A — Require minutes_offset to be non-negative (0..59) and apply sign from hours_offset
+1. Keep the existing minutes range check (0..59).
+2. Do not accept negative minute inputs from callers.
+3. Compute total_minutes using a separate variable and apply the sign of hours_offset:
+      hours_in_minutes = hours_offset * 60
+      if hours_offset < 0:
+          total_minutes = hours_in_minutes - minutes_offset
+      else:
+          total_minutes = hours_in_minutes + minutes_offset
+      offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+4. Return cls.for_offset_millis(offset)
+
+Option B — Allow minutes_offset to carry its sign (accept -59..59) and normalize
+1. Change the minutes check to allow negative minutes in the range -59..59:
+      if minutes_offset < -59 or minutes_offset > 59:
+          raise ValueError(...)
+2. Normalize total minutes by combining hours and minutes directly:
+      total_minutes = hours_offset * 60 + minutes_offset
+3. Optionally enforce that signs are consistent (e.g., hours_offset and minutes_offset should not have opposite signs) if that is desired.
+4. Multiply total_minutes by MILLIS_PER_MINUTE and proceed.
+
+Minimal code example for Option A (explicit and safe)
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    hours_in_minutes = hours_offset * 60
+    if hours_offset < 0:
+        total_minutes = hours_in_minutes - minutes_offset
+    else:
+        total_minutes = hours_in_minutes + minutes_offset
+    offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+    return cls.for_offset_millis(offset)
+
+Why this fix solves it
+- It makes the meaning of minutes_offset unambiguous (either always non-negative, or allowed to be signed).
+- It avoids reusing the input minutes_offset variable for storage of the total, preventing accidental confusion.
+- It stops rejecting legitimate negative offsets that callers express by passing a negative minutes parameter (if you choose Option B), or makes the API contract clear so callers must pass non-negative minutes (Option A).
+
+Pick the option that matches your API contract and be explicit in the function docstring so callers don’t pass mixed-sign components.

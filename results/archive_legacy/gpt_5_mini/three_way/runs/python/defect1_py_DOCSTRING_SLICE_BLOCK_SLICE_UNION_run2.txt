@@ -1,0 +1,32 @@
+What happened (where)
+- At lines 396–397 the code unconditionally rejects any negative minutes:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That check runs before the code at lines 402 and 404 which expect minutes_offset to sometimes be negative and then adjust it:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- Because the early guard always raises for negative minutes, the later logic that handles negative-minute cases is never reached. As a result valid combinations described in the docstring — for example (0, -15) -> +00:15? actually doc says (0,-15) -> -00:15, and (-2, -15) -> -02:15 — raise a ValueError instead of producing a DateTimeZone.
+
+Why it fails (root cause)
+- The docstring allows minutes_offset to be negative in some sign-combinations (zero hours with negative minutes, and negative hours with negative minutes). The code, however, enforces minutes_offset to be in [0,59] unconditionally. That validation contradicts the intended behavior and causes valid inputs such as (0, -15) or (-2, -15) to be rejected at lines 396–397 before the subsequent code can compute the correct offset.
+
+Concrete examples
+- Input (hours_offset=0, minutes_offset=-15) — should return offset -00:15 per the docstring — raises ValueError at line 396.
+- Input (hours_offset=-2, minutes_offset=-15) — should return -02:15 — raises ValueError at line 396.
+
+What to change (precise steps)
+1. Allow minutes_offset to be in the full documented range [-59, 59] instead of only [0, 59]. Replace the current check with something like:
+   - if minutes_offset < -59 or minutes_offset > 59:
+   -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. After that, enforce invalid sign combinations that the doc disallows (hours positive with minutes negative). For example, immediately after validating the range add:
+   - if hours_offset > 0 and minutes_offset < 0:
+   -     raise ValueError("Positive hours with negative minutes is not allowed")
+3. Keep the existing code that combines hours and minutes (the logic at lines 402 and 404 and the offset bounds check). With the new checks, those lines will now receive negative minutes when appropriate and will compute the correct offset.
+4. Ensure the final bounds check still enforces the maximum allowed magnitude (the "Offset is too large" check at line 407), and then call cls.for_offset_millis(offset) as before.
+
+Why this fix works
+- It matches the docstring: minutes can be negative in allowed combinations, but out-of-range minute values (less than -59 or greater than 59) are still rejected.
+- It retains the later code that composes hours and minutes into total minutes and converts to milliseconds (FieldUtils.safe_multiply ... DateTimeConstants.MILLIS_PER_MINUTE).
+- It prevents the specific invalid combination (positive hours with negative minutes) while allowing the combinations documented as valid.
+
+If you want, I can produce the exact small patch diff to apply to the method.

@@ -1,0 +1,47 @@
+What fails
+- The try/except block at lines 402–408 is intended to catch an overflow from FieldUtils.safe_multiply(...), but it never catches the actual exception that safe_multiply throws. That means the overflow (or whatever runtime error safe_multiply raises) escapes the method instead of being converted to the intended ValueError("Offset is too large").
+
+Where it happens (specific lines and variables)
+- Lines 402–405 compute a total-minute value and store it back into minutes_offset:
+  - hours_in_minutes = hours_offset * 60  (line ~402)
+  - if hours_in_minutes < 0: minutes_offset = hours_in_minutes - minutes_offset  (line ~402)
+  - else: minutes_offset = hours_in_minutes + minutes_offset  (line ~404)
+- Line 405 calls FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE).
+- Lines 406–407 try to catch an arithmetic error:
+  - except ArithmeticError:
+      raise ValueError("Offset is too large")
+  This is the catch that fails to fire for the actual exception thrown by safe_multiply.
+
+Why it fails (root cause)
+- The code is catching the wrong exception class. FieldUtils.safe_multiply does not raise the exception type being caught (ArithmeticError in this code), so when safe_multiply overflows or otherwise signals an error it raises a different exception which is not caught, so the method fails with that unexpected exception instead of raising the intended ValueError("Offset is too large").
+- Because the code reuses the parameter minutes_offset to hold the combined total minutes (instead of using a new variable like total_minutes), any unhandled exception will show up with the intermediate value in minutes_offset — but the real problem is the mismatched exception type in the except.
+
+Concrete example of the symptom
+- If FieldUtils.safe_multiply throws (for example) ArithmeticException or OverflowException, that exception will propagate out of for_offset_hours_minutes instead of being converted to the ValueError the caller expects.
+
+How to fix it (step-by-step, concrete)
+1. Do not reuse the parameter minutes_offset for the combined total minutes (optional but recommended):
+   - Introduce total_minutes = hours_in_minutes ± minutes_offset, then use total_minutes in the multiply call. This avoids confusing reuse of the input variable.
+   - Example:
+     - hours_in_minutes = hours_offset * 60
+     - if hours_in_minutes < 0:
+         total_minutes = hours_in_minutes - minutes_offset
+       else:
+         total_minutes = hours_in_minutes + minutes_offset
+     - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+2. Catch the correct exception(s) from FieldUtils.safe_multiply:
+   - Inspect the safe_multiply implementation and catch the exact exception type it throws on overflow. In Java that would usually be ArithmeticException; in Python it might be OverflowError or a custom exception.
+   - Replace "except ArithmeticError:" with the specific exception type(s). For example, in Java you would catch ArithmeticException; in Python you would catch OverflowError (or the specific custom exception).
+   - If the method is intended to be language-neutral, use a broad but explicit check first: validate total_minutes is within acceptable range before calling safe_multiply so you avoid relying on catching exceptions.
+
+3. Optionally validate ranges before multiplication to avoid relying on safe_multiply:
+   - Compute the allowed minute range (e.g., [-24*60+1, 24*60-1] or whatever your domain requires).
+   - If total_minutes is outside the allowed range, raise ValueError("Offset is too large") before calling safe_multiply.
+
+Summary of minimal code changes
+- Replace reuse of minutes_offset with total_minutes.
+- Catch the exact exception thrown by safe_multiply (for Java, catch ArithmeticException; for Python, catch OverflowError or the specific exception).
+- Or validate total_minutes range before multiplication and raise ValueError yourself.
+
+That will ensure the overflow case is handled where you expect (line 407) and the method will return the intended ValueError("Offset is too large") instead of failing with an unexpected exception.

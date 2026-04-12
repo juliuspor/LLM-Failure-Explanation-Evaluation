@@ -1,0 +1,52 @@
+What happened
+- The test calls DateTimeZone.for_offset_hours_minutes(-2, -15).
+- Inside for_offset_hours_minutes the code checks minutes_offset at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because minutes_offset is -15, the condition is true and a ValueError is raised. That is exactly where and why the test fails.
+
+Why it fails (root cause)
+- The validation at line 396 forbids any negative minute values. The test intends to express a negative total offset of -2 hours and -15 minutes (i.e. -02:15), but the validator only accepts minute values in [0, 59]. It does not allow negative minutes, so the API rejects the input rather than computing the combined negative offset.
+
+Concrete fixes (step-by-step)
+Choose one of these (pick the one that matches your intended API semantics):
+
+1) Require minutes be non-negative; update the test
+- Behavior: minutes must be 0..59; sign is carried by the hours parameter alone.
+- Steps:
+  - Change the test to use positive minutes: DateTimeZone.for_offset_hours_minutes(-2, 15)
+  - Update documentation/comments to state "minutes must be in 0..59; sign is taken from hours".
+  - Add unit tests for boundary cases: (0,0), (0,59), (-0,59) if applicable, (-2,15) -> '-02:15'.
+
+2) Allow signed minutes and compute total offset from hours + minutes
+- Behavior: minutes may be negative or positive; total offset = hours*60 + minutes.
+- Steps:
+  - At line 396 change the range check to allow negative minutes up to -59:
+      396 |         if minutes_offset < -59 or minutes_offset > 59:
+      397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+  - Ensure subsequent code computes total_minutes = hours_offset * 60 + minutes_offset (not abs(minutes_offset)).
+  - Add tests for mixed-sign inputs, e.g. (-2, -15) -> '-02:15', (2, -15) -> '+01:45' (if you want to support that).
+  - Update documentation to state "minutes may be negative; final offset = hours*60 + minutes".
+
+3) Normalize mixed signs into a single signed minutes value
+- Behavior: accept minutes sign but normalize so minutes are in 0..59 and the sign is applied consistently.
+- Steps:
+  - Before validation, compute total_minutes = hours_offset*60 + minutes_offset.
+  - Then reconstruct normalized hours/minutes from total_minutes:
+      sign = -1 if total_minutes < 0 else 1
+      total_abs = abs(total_minutes)
+      normalized_hours = sign * (total_abs // 60)
+      normalized_minutes = total_abs % 60
+  - Use normalized_hours and normalized_minutes for ID formatting.
+  - Add unit tests covering negative and mixed inputs.
+
+Which to pick
+- If your API intended minutes to be a magnitude (0..59) and sign only on hours, use option 1.
+- If you want callers to be able to pass a negative minutes value (as your test does), use option 2 or 3. Option 2 is simplest: accept minutes in [-59,59] and compute total_minutes = hours*60 + minutes.
+
+Where to change (exact location)
+- The immediate failing check is at lines 396–397 inside DateTimeZone.for_offset_hours_minutes. Modify the condition there (and adjust downstream computation) according to the chosen fix. Also update tests and documentation to reflect the final rule.
+
+Summary
+- Root cause: minutes_offset = -15 is rejected by the check at lines 396–397 because the code only allows 0..59.
+- Fix by either making minutes positive in the test or changing the validation and offset computation so negative minutes are permitted and combined with hours to form the final offset.

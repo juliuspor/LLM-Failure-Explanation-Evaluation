@@ -1,0 +1,44 @@
+What happened (where):
+- The failure occurs in DateTimeZone.for_offset_hours_minutes inside the input validation at lines 396–397:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why it fails (root cause):
+- That code rejects any negative minutes_offset unconditionally. The method's docstring (and your tests) allow negative minute values in some cases (e.g., (0, -15) -> -00:15, (-2, -15) -> -02:15, and (-2, 15) -> -02:15). By treating any negative minutes as out of range, valid inputs like (0, -15) and (-2, -15) raise ValueError unexpectedly, causing the tests to fail.
+
+Which variables and behaviors are involved:
+- minutes_offset (the variable checked on line 396) is being constrained incorrectly.
+- The method should accept minutes_offset in the numeric range -59..+59, then enforce sign rules relative to hours_offset (for example, positive hours with negative minutes should be invalid).
+- The current code enforces the range 0..59 and thus breaks cases where minutes_offset is negative but allowed by the spec.
+
+Concrete fixes (step-by-step):
+1. Replace the strict negative rejection with a numeric range check that allows -59..+59:
+   - Change the condition to:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   (This fixes the immediate incorrect rejection on line 396.)
+
+2. Enforce the sign rules separately (after the range check):
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (e.g., (2, -15) invalid).
+   - Other combinations are allowed per the docstring:
+     - (0, -15) is allowed and means negative offset.
+     - (-2, 15) and (-2, -15) both mean negative offset -02:15.
+   Example code to add after the range check:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Positive hours with negative minutes is not allowed")
+3. Compute the final offset using absolute sums and applying the sign once:
+   - total_minutes = abs(hours_offset) * 60 + abs(minutes_offset)
+   - if hours_offset < 0 or (hours_offset == 0 and minutes_offset < 0):
+         total_minutes = -total_minutes
+   - total_millis = total_minutes * 60_000
+
+Why these fixes work:
+- They match the docstring's allowed ranges and sign-combination rules:
+  - Allow minutes in -59..+59.
+  - Disallow only the specific invalid combination (positive hours with negative minutes).
+  - Compute the offset magnitude from absolute values and then apply the sign, so (-2, 15) and (-2, -15) both produce -02:15 and (0, -15) produces -00:15.
+
+Where to change:
+- Update the validation at/around lines 396–397, then add the sign-check and offset-construction logic immediately after.
+
+This will stop valid negative-minute inputs from being rejected while preserving the intended invalid-case behavior (e.g., (2, -15) still raises ValueError).

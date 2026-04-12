@@ -1,0 +1,26 @@
+The code fails because when hours_offset is negative the code incorrectly computes minutes_offset, producing an offset with the wrong sign or with minutes out of range, and it can also overflow before the bounds check that raises "Offset is too large". Specifically:
+
+- Where it checks minutes range (lines 377-378), it correctly raises if minutes_offset < 0 or > 59.
+- Later (lines 383, 385) it adjusts minutes_offset depending on sign of hours_offset. For a negative hours_offset the code does "minutes_offset = hours_in_minutes - minutes_offset" (line 383). That expression uses hours_in_minutes which is hours_offset * 60; if hours_offset is negative this subtraction increases the magnitude of minutes_offset (making it more negative) instead of combining the hour and minute components into a single signed minute total. For example, hours_offset = -1 and minutes_offset = 30: hours_in_minutes = -60, line 383 gives minutes_offset = -60 - 30 = -90, which encodes -1 hour and -30 minutes rather than -1 hour and +30 minutes as intended.
+- For a positive hours_offset the code does "minutes_offset = hours_in_minutes + minutes_offset" (line 385) which is correct, but the asymmetric formulas cause sign errors for negative hours.
+- After that it calculates offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE) (line 386). Because minutes_offset can now be outside the expected range (e.g. -90), multiplying leads to an unexpectedly large negative millisecond offset. If that value exceeds supported limits the later check triggers the ValueError("Offset is too large") (line 388), aborting creation.
+
+Where it occurred: in the fixed-offset creation path when hours_offset < 0, at the minutes adjustment logic on line 383 and the subsequent multiplication on line 386, causing either wrong sign for minute contribution or an out-of-range offset which leads to the "Offset is too large" ValueError.
+
+Why it happened: the code treats minute component as always adding to hour component regardless of the hour sign. For negative hours it should subtract the minutes component from the absolute hour magnitude and then reapply the negative sign (or compute a single signed total minutes as hours_offset*60 + sign(hours_offset)*minutes_offset). Instead it used hours_in_minutes - minutes_offset which double-counts the sign and reverses the minutes sign.
+
+How to fix (specific steps):
+1) Compute a single signed total minutes variable, e.g.:
+   total_minutes = hours_offset * 60
+   if hours_offset < 0:
+       total_minutes -= minutes_offset
+   else:
+       total_minutes += minutes_offset
+   OR more simply:
+   total_minutes = hours_offset * 60 + (hours_offset < 0 ? -minutes_offset : minutes_offset)
+   Or even better, use:
+   total_minutes = hours_offset * 60 + (hours_offset >= 0 ? minutes_offset : -minutes_offset)
+2) Use total_minutes in the safe_multiply call: offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3) Keep the bounds checks (lines 377-378 and the later maximum-size check) but ensure minutes_offset is only 0..59 and that total_minutes is checked before multiplying to avoid overflow.
+
+This will ensure a minute component is combined with the hour component with the correct sign and prevent spurious "Offset is too large" errors.

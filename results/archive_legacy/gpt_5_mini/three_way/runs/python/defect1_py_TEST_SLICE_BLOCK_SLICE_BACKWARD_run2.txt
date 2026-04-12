@@ -1,0 +1,57 @@
+What happened (what failed)
+- The minutes validation at lines 396–397 is wrong:
+  - Code: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...)
+  - That rejects any negative minutes (minutes_offset < 0), but negative minutes are valid in the API/tests (e.g. (0, -15) or (-2, -15)).
+- So calls like DateTimeZone.for_offset_hours_minutes(0, -15) or for_offset_hours_minutes(-2, -15) raise ValueError at those lines even though your tests (and the docstring) expect them to succeed.
+
+Why it happened (root cause)
+- The check uses minutes_offset < 0 instead of the intended lower bound -59. The valid minute range is -59..+59, not 0..59. Because of that single comparison the function incorrectly treats any negative minutes as out-of-range.
+- The failure occurs specifically in the variable minutes_offset inside DateTimeZone.for_offset_hours_minutes, at lines 396–397.
+
+Where to change (concrete steps)
+1. Fix the minutes range check (change lower bound from 0 to -59):
+   - Replace:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - With:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the intended sign/combination behavior (the docstring/tests expect:
+   - (+hours, -minutes) -> ValueError
+   - (+hours, +minutes) -> OK
+   - (-hours, +minutes) and (-hours, -minutes) -> treated as negative total offset)
+   Implement this explicitly after parsing inputs:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError
+   - If hours_offset < 0 and minutes_offset > 0: treat minutes as negative (minutes_offset = -minutes_offset)
+   - If hours_offset == 0: minutes sign alone determines sign (allow both + and -)
+
+   Example patch (pseudo-Python to insert after parsing/validating ranges):
+   ```
+   # validate minutes absolute range
+   if minutes_offset < -59 or minutes_offset > 59:
+       raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+   # disallow mixed positive hours with negative minutes
+   if hours_offset > 0 and minutes_offset < 0:
+       raise ValueError("Positive hours with negative minutes is not allowed")
+
+   # for negative hours and positive minutes, make minutes negative to extend the negative offset
+   if hours_offset < 0 and minutes_offset > 0:
+       minutes_offset = -minutes_offset
+   ```
+
+3. Recompute total offset using the (possibly adjusted) minutes_offset:
+   - total_millis = hours_offset * 3600000 + minutes_offset * 60000
+
+Why this fix works
+- Changing the lower bound to -59 matches the API/documentation expectation that minutes can be negative.
+- Explicitly handling mixed signs enforces the documented rules (e.g., (2, -15) is invalid; (-2, 15) and (-2, -15) both mean -02:15).
+- Recomputing total_millis after normalization yields the expected offsets for the tests.
+
+Quick example of the failing call
+- Input: hours_offset = 0, minutes_offset = -15
+- Old check: minutes_offset < 0 -> True -> raises ValueError at lines 396–397
+- New check: -15 < -59? False and -15 > 59? False -> allowed -> function continues and returns -00:15 as expected.
+
+If you want, I can produce a small concrete patch showing exact replacement code ready to drop into the file.

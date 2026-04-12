@@ -1,0 +1,55 @@
+What fails
+- At lines 396–397 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- The docstring and the examples show that negative minutes are valid in some cases (for example (0, -15) and (-2, -15) are valid). The current check therefore throws ValueError for inputs that should be allowed (e.g. (0, -15), (-2, -15)).
+
+Why it fails (root cause)
+1. Wrong validation range for minutes (lines 396–397)
+   - The code enforces minutes_offset >= 0, but the doc permits minutes in the range -59..+59. This is the direct reason valid inputs are rejected.
+
+2. Incorrect combination logic (later code)
+   - The code then modifies minutes_offset in place:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           minutes_offset = hours_in_minutes - minutes_offset
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+   - This arithmetic is wrong for some sign combinations. Example: hours_offset = -2, minutes_offset = -15:
+       hours_in_minutes = -120
+       minutes_offset = -120 - (-15) = -105 -> -1:45, not -2:15 as the doc says.
+   - Reusing minutes_offset for intermediate computation makes the code confusing and error-prone.
+
+What to change (concrete steps and exact places)
+1. Fix the minutes range check (replace lines 396–397):
+   - Enforce absolute range: minutes must satisfy -59 <= minutes_offset <= 59.
+   - Example replacement:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+2. Enforce the documented sign rule for positive hours (add a check after hours range check):
+   - The doc states: a positive hour with a negative minute is invalid (ValueError).
+   - Add:
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Positive hour with negative minutes is not allowed")
+
+3. Compute the total minutes correctly (replace the in-place arithmetic block):
+   - Compute total_minutes in a clear, sign-correct way. For example:
+       if hours_offset == 0:
+           total_minutes = minutes_offset  # minutes can be negative or positive
+       else:
+           sign = 1 if hours_offset > 0 else -1
+           total_minutes = sign * (abs(hours_offset) * 60 + abs(minutes_offset))
+   - This matches documented examples:
+       (2, 15) -> +135
+       (2, 0) -> +120
+       (0, -15) -> -15
+       (-2, 15) -> -135
+       (-2, -15) -> -135
+
+4. Multiply total_minutes by MILLIS_PER_MINUTE and continue as before:
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Summary
+- The immediate failure is caused by the minutes validation at lines 396–397 rejecting negative minutes that the API intends to accept. After fixing that validation, also fix the combination arithmetic (do not subtract a negative minute from a negative hour) and add the explicit rule that positive hours cannot have negative minutes. Implement the suggested replacements above to match the docstring behavior and avoid the incorrect results shown in the examples.

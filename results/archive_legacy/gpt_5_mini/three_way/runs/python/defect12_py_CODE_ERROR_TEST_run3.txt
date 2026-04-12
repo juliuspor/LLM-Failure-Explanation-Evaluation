@@ -1,0 +1,58 @@
+What happened (root cause)
+- In this call: abbreviate("0123456789", lower=15, upper=20, append_to_end=None) the string length is 10.
+- The code first clamps upper to len(text):
+  if upper == -1 or upper > len(text):
+      upper = len(text)
+  => upper becomes 10.
+- Then the next if sets upper = lower when upper < lower:
+  if upper < lower:
+      upper = lower
+  => upper becomes 15 (because lower is 15). That pushes upper beyond the actual string length.
+- After that the function calls:
+  index = StringUtils.index_of(text, " ", lower)
+and later uses substring_java(text, 0, upper).
+  - index_of(text, " ", lower) attempts to search starting at position 15 (lower). That call (or the substring_java call with end index 15) attempts to access string indices beyond the length and raises the IndexError: "String index out of range: 15".
+
+Why that is wrong
+- The code clamped upper to the string length, then overwrote it with lower which may be larger than the string length. That leads to passing invalid indices (lower or upper > len(text)) into index_of and substring_java, causing the exception. The logic order makes the clamp ineffective when lower > len(text).
+
+Exactly where to change (lines / variables)
+- Current problematic lines (in order):
+  1) if upper == -1 or upper > len(text): upper = len(text)
+  2) if upper < lower: upper = lower
+  3) index = StringUtils.index_of(text, " ", lower)
+  4) substring_java(text, 0, upper)
+- The bug is that step (2) can produce upper > len(text) and step (3)/(4) do not guard against lower/upper being out-of-range.
+
+Two concrete fixes (pick one)
+
+Fix A — Return early if lower is beyond text length
+- Add a check right after handling null/empty:
+    if lower >= len(text):
+        return text
+- Rationale: if the requested lower start is beyond the string, the original Apache Commons behaviour is to just return the original string (see Lang-45). This prevents calling index_of or substring with out-of-range indices.
+
+Where to insert:
+Place immediately after the empty-string check and before any clamping of upper:
+    if len(text) == 0:
+        return StringUtils.EMPTY
+    if lower >= len(text):
+        return text
+
+Fix B — Keep indices clamped to valid range
+- Instead of allowing upper to be set to lower, ensure both bounds are clamped to [0, len(text)] before using them:
+    if upper == -1 or upper > len(text):
+        upper = len(text)
+    if lower < 0:
+        lower = 0
+    if upper < lower:
+        upper = lower
+    if upper > len(text):
+        upper = len(text)
+- Rationale: this ensures substring_java(text, 0, upper) and index_of(text, " ", lower) are always called with valid positions.
+
+Recommendation
+- Use Fix A (return early when lower >= len(text)) because it reflects the intended behaviour for the failing test (original bug case) and is the simplest change.
+
+What will stop the crash
+- After either fix, you will no longer call index_of or substring with a start/end value greater than len(text), so IndexError "String index out of range: 15" will not occur.

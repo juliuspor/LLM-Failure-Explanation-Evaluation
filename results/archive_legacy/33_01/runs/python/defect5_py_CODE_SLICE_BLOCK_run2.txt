@@ -1,0 +1,48 @@
+What happened (root cause)
+- At the top of your function you set inferred_type = type(array) when array is not None. type(array) returns the Python list class (i.e. list), not the element type T. That is the wrong thing to pass into ArrayUtils._copy_list_grow1, which expects the element/component type, not the container's class.
+- Because inferred_type becomes list instead of the element type, _copy_list_grow1 creates a new array/list whose component type is wrong. Later, when you assign new_list[len(new_list)-1] = element, the runtime detects the incompatible component type and the code fails (the code is trying to simulate a Java ClassCastException for wrong array component types).
+- The later check at lines 346–351 (the slice you showed) is only reached when inferred_type == object. That won't catch this problem because inferred_type == list, not object. So the real mismatch is never detected there and the wrong component type proceeds into _copy_list_grow1.
+
+Where it occurs in your code
+- The bad assignment is the branch:
+    if array is not None:
+        inferred_type = type(array)
+  (this is the first place the wrong type is chosen)
+- The wrong type is then passed to ArrayUtils._copy_list_grow1(array, inferred_type)
+- The assignment new_list[len(new_list) - 1] = element then fails (type mismatch), and the error is observed; the TypeError raise at lines 346–351 does not run for this case because inferred_type is list, not object.
+
+Why this is incorrect
+- type(array) describes the container (list), not the element T. You need the element type for array component type logic.
+- If array is empty you cannot infer element type from the array contents — using type(array) is doubly wrong (it will always be list even for non-empty arrays).
+- The code only treats the fully generic "object" case specially; it never handles the container-vs-element confusion.
+
+Concrete fixes (step-by-step)
+1. Decide how to obtain the element/component type:
+   - If you can inspect array contents: when array is not None and len(array) > 0, set inferred_type = type(array[0]).
+   - Else if element is not None, set inferred_type = type(element).
+   - Else if expected_type is provided, set inferred_type = expected_type.
+   - Else set inferred_type = object.
+
+2. Replace the current branching that sets inferred_type with this logic. Example replacement:
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+3. Optionally, make the equality check at lines 346–351 more robust:
+   - If you want to detect "we created an object-typed list but expected something narrower", keep the existing check but compare types with "is" or isinstance where appropriate. For example:
+        if inferred_type is object and expected_type is not object:
+            raise TypeError(...)
+
+4. If ArrayUtils._copy_list_grow1 requires a specific class object (not a typing.Type), ensure inferred_type is exactly the runtime class (e.g. element.__class__) — not a typing annotation.
+
+Why these steps fix it
+- Using type(array[0]) or type(element) gives the actual element class (the intended component type) to _copy_list_grow1, so the new list is created with the proper component type and assigning element will not fail.
+- Falling back to expected_type when you have neither array elements nor a provided element avoids misidentifying the container class as the element class.
+
+Summary
+- The bug is that inferred_type = type(array) uses the container's type (list) instead of the element/component type. Pass the element class (from array[0], element, or expected_type) to _copy_list_grow1 instead. This change fixes the type mismatch that causes the runtime failure.

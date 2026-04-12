@@ -1,0 +1,48 @@
+What happened (root cause)
+- In TimePeriodValues._update_bounds the code that updates the min/max index fields always overwrites the previously-computed value because there is an unconditional assignment of the current index after the comparison block.
+- Concretely, in the min-start block you have this sequence (lines taken from the slice you provided):
+  - line 340: if self._min_start_index >= 0:
+  - lines 341–345: read min_start from the existing min-start period
+  - line 346: if start < min_start:
+  - line 347:     self._min_start_index = index
+  - line 349: self._min_start_index = index
+- Because of the assignment on line 349 (outside the if), the code always sets self._min_start_index to the current index even when the current period’s start is not smaller. That destroys any earlier min computation and makes the stored index wrong.
+
+Why that causes the observed failures
+- Your tests expect get_min_start_index() (and other min/max index getters) to return the index of the true minimum/maximum value among all added periods.
+- The unconditional write at line 349 means every time a period is added you set _min_start_index to the new index regardless of whether it actually has the minimum start. That explains failures like "expected index 1, got 3" — the stored index was just overwritten by later adds.
+- The same coding pattern is used in other bound updates inside _update_bounds (for max_middle_index, min_end_index, max_end_index, etc.) so those will fail similarly if they include the same unconditional assignment or use the wrong index variable in the comparison/assignment.
+
+Where it occurred (precise locating)
+- Method: TimePeriodValues._update_bounds
+- Exact lines (from your slice):
+  - The conditional comparison starts at line 340
+  - The conditional assignment (when new value is smaller) is at line 347
+  - The unconditional overwrite is at line 349
+
+How to fix it (exact steps)
+1. Open TimePeriodValues._update_bounds.
+2. Locate the block that handles updating _min_start_index (the lines around 340–349).
+3. Remove the unconditional assignment at line 349 (the one outside the if), or make it part of the correct control flow such that:
+   - If self._min_start_index == -1 (no prior value), set self._min_start_index = index.
+   - Else, only set self._min_start_index = index if start < min_start (i.e., when the new period is actually smaller).
+   Example correct logic pattern:
+   - if self._min_start_index < 0:
+       self._min_start_index = index
+     else:
+       ... compute min_start ...
+       if start < min_start:
+           self._min_start_index = index
+4. Review all similar blocks in _update_bounds (min_end, max_start, max_end, min_middle, max_middle) for the same bug pattern or inconsistent variable names used in the comparison/assignment, and fix them the same way:
+   - Ensure you compare the new value against the currently-stored bound value.
+   - Only assign the stored index when the new value actually updates the bound, except for the initial assignment when index == -1.
+5. Run the test suite again.
+
+Why this exact change fixes it
+- Removing the unconditional overwrite preserves the previous min index unless the new period actually has a smaller start (or unless this is the first period and you need to initialize the index).
+- Applying that correction consistently across all bound updates corrects get_max_middle_index, get_min_middle_index, get_min_start_index, get_max_start_index, get_min_end_index, and get_max_end_index.
+
+One more thing to check
+- There was mention of "wrong index variable is used for comparison" in the test header. After you remove unconditional overwrites, also scan for accidental use of the wrong index variable name inside the blocks (e.g., using _max_start_index when you meant _max_middle_index, or using a loop variable other than the current index). Those would cause logical errors even if you fix the unconditional overwrite.
+
+If you want, paste the full _update_bounds method and I will show the corrected version with the minimal edits.

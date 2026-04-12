@@ -1,0 +1,46 @@
+What happened (where it failed)
+- The failure happens while building a fixed offset from hours and minutes. The code checks minutes at line 400, then later changes the minutes value at lines 406 and 408, multiplies by MILLIS_PER_MINUTE at line 409, and then the method throws the ValueError("Offset is too large") at line 411.
+- The root cause is the arithmetic that combines the hour and minute parts (lines 406 and 408). That arithmetic turns the small minutes value (0–59) into a much larger number before the multiplication, producing an unexpectedly large millisecond offset and triggering the overflow/limit check at line 411.
+
+Why it fails (root cause, simple)
+- minutes_offset is intended to be the minutes part (0–59). hours_in_minutes is the hour component converted to minutes (hours * 60).
+- Instead of computing total_minutes = hours_in_minutes + minutes_offset (with the correct sign), the code reassigns minutes_offset using hours_in_minutes in a way that makes minutes_offset large:
+  - One branch does minutes_offset = hours_in_minutes - minutes_offset
+  - The other branch does minutes_offset = hours_in_minutes + minutes_offset
+- Because minutes_offset is overwritten with a value on the order of hours_in_minutes (i.e., hours*60), the later multiplication at line 409 produces a much larger millisecond offset than intended. That large value triggers the "Offset is too large" error at line 411.
+
+Exactly where to change (concrete steps)
+1. Stop reusing the minutes_offset variable to hold the combined minutes. Keep minutes_offset as the 0–59 value.
+2. Compute a separate total_minutes variable and apply the sign to it.
+
+Suggested replacement (precise change)
+- Replace the current logic at/around lines 406–409 with something like:
+
+  - compute total_minutes = hours_in_minutes + minutes_offset
+    - if the offset sign is negative, total_minutes = -(hours_in_minutes + minutes_offset)
+  - then compute offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+(do not subtract minutes from hours_in_minutes; always add the absolute minutes to the hour minutes, then apply the sign)
+
+Why this fixes it
+- This keeps the minute part as 0–59 and forms a correct total minutes value hours*60 + minutes, with the appropriate sign. The multiplication at line 409 then gives the intended millisecond offset and avoids producing a wrongly large value that trips the overflow check at line 411.
+
+Example concrete code (one possible minimal patch)
+- Suppose there is a boolean negative that marks a negative offset. Replace the lines:
+
+  minutes_offset = hours_in_minutes - minutes_offset   # line 406
+  ...
+  minutes_offset = hours_in_minutes + minutes_offset   # line 408
+  offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+
+with:
+
+  total_minutes = hours_in_minutes + minutes_offset
+  if negative:
+      total_minutes = -total_minutes
+  offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Notes
+- Do not change the minutes range check at line 400 (minutes must still be 0–59).
+- Use a separate variable for the combined minutes to avoid confusing reuse.
+- After this change the ValueError("Offset is too large") at line 411 will only be raised for truly out-of-range offsets, not because of a bad combine-step.

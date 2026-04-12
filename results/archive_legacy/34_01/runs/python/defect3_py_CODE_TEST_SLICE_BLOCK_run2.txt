@@ -1,0 +1,46 @@
+What happened (what failed)
+- The IndexError is raised from code_point_at(code_units, pos) at lines 35–36 ("String index out of range: {index}").
+- That call happens inside the for pt in range(consumed): loop near the bottom of translate().
+- In the test you pass a single supplementary character '\U0001F630' which is encoded as a surrogate pair (2 UTF‑16 code units). That makes the loop path with consumed>0 run and eventually call code_point_at at an out‑of‑range index.
+
+Why it failed (root cause)
+- The code advances pos incorrectly after a translator reported it consumed code units.
+- Specifically, inside the while loop you do:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+- That calls code_point_at(code_units, pos) while pos may already be at or beyond length (because you increment pos inside the loop and do multiple iterations). As a result code_point_at receives an invalid index and raises the IndexError at lines 35–36.
+- In short: you call code_point_at with a bad pos because the loop mutates pos and uses it to compute the next increment, instead of using the initial codepoint or simply adding the known number of code units consumed.
+
+Where exactly (file/lines/variables)
+- The failing call is code_point_at(code_units, pos) inside the for pt in range(consumed) loop (the last five lines of translate()).
+- The exception originates at lines 35–36 of code_point_at (the slice block you provided):
+  35 |     if index < 0 or index >= len(code_units):
+  36 |         raise IndexError(f"String index out of range: {index}")
+- Variables involved: pos, consumed, code_units. In the failing case pos reaches length and then code_point_at(code_units, pos) raises.
+
+How to fix it (concrete steps)
+You have two correct, explicit options depending on what consumed represents:
+
+Option A — If consumed is the number of UTF‑16 code units consumed by the translator:
+- Replace the entire for loop with a single increment by consumed:
+    pos += consumed
+- Rationale: consumed already counts code units; advancing pos by consumed moves to the next unread code unit without calling code_point_at.
+
+Option B — If you want to advance by codepoints (using char_count of the codepoint at the start):
+- Read the codepoint once at the starting pos, compute its char_count, then advance by that:
+    codepoint = code_point_at(code_units, pos)
+    pos += char_count(codepoint)
+- Do not call code_point_at repeatedly while mutating pos.
+
+Concrete minimal patch (Option A, safest given current comments)
+Replace this block:
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+with:
+    pos += consumed
+
+Why this fix works for your test
+- For the surrogate pair test '\U0001F630', consumed should be 2 (two UTF‑16 code units). pos += consumed moves pos from 0 to 2, which equals length, and the while loop exits normally without calling code_point_at with an out‑of‑range index.
+
+One-line summary
+The code calls code_point_at(code_units, pos) while pos is being advanced inside the loop, which can make pos go out of bounds; replace the loop with pos += consumed (or compute the codepoint once before advancing) so you never call code_point_at with an invalid index.

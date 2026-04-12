@@ -1,0 +1,49 @@
+What happened (where it fails)
+- Input: "fr__POSIX". length = 8.
+- In to_locale (see line 231) the code does:
+  - if length == 2: ... then reads ch3 = locale_str[3] and ch4 = locale_str[4] (lines 237–238) and rejects them unless they are uppercase A–Z (line 239).
+- For "fr__POSIX" that code path sees ch3 == '_' (index 3) and ch4 == 'P' (index 4). Because ch3 is '_' it fails the A–Z check and raises ValueError at line 240. That is why the test fails.
+
+Why it fails (root cause)
+- The code assumes the country part is always two uppercase letters at indices 3 and 4. It does not allow an empty country (i.e. a second underscore immediately after the first underscore), so "fr__POSIX" is treated as invalid.
+- Concretely: the function expects patterns like "ll", "ll_CC", or "ll_CC_variant". It does not handle the valid pattern "ll__variant" (language + empty country + variant). The check at lines 237–240 enforces two-letter country and rejects the empty-country case.
+
+What to change (clear, actionable steps)
+1. Detect the underscore positions and allow an empty country:
+   - After confirming the language (locale_str[0:2]), check locale_str[2] == '_' (otherwise error).
+   - If locale_str[3] == '_' then the country is empty and the variant begins at locale_str[4:].
+     - Return Locale(locale_str[0:2], '', locale_str[4:]) (or raise if nothing after index 4).
+2. Otherwise (locale_str[3] != '_'), parse country = locale_str[3:5]:
+   - Validate those two chars are A–Z (keep the existing checks for ch3 / ch4).
+   - If there are no more chars, return Locale(language, country).
+   - If there are more chars, check locale_str[5] == '_' and return Locale(language, country, locale_str[6:]).
+3. Fix the incorrect conditional at line 231: do not use "if length == 2:" to decide whether to access indices 3 and 4. Instead branch on the presence of underscores as described, or use length checks like "if length >= 5" when you intend to access indices 3 and 4.
+
+Minimal example patch (pseudo-Python replacing the relevant block)
+- Replace the block around lines 231–247 with:
+
+  if length < 2 or locale_str[2] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  # language is locale_str[0:2]
+  if locale_str[3] == '_':
+      # empty country, variant follows
+      if length <= 4:
+          raise ValueError(f"Invalid locale format: {locale_str}")
+      return Locale(locale_str[0:2], '', locale_str[4:])
+  # country present
+  ch3 = locale_str[3]
+  ch4 = locale_str[4]
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  if length == 5:
+      return Locale(locale_str[0:2], locale_str[3:5])
+  if locale_str[5] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+This change:
+- Allows "fr__POSIX" and returns Locale('fr', '', 'POSIX').
+- Keeps validation for two-letter country when present.
+- Avoids the current incorrect assumption that country must always exist at indices 3–4.
+
+If you want, I can produce a full patched version of to_locale with unit tests covering "fr", "fr_FR", "fr__POSIX", and invalid inputs.

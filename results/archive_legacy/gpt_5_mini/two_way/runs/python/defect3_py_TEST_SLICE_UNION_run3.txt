@@ -1,0 +1,35 @@
+What happened (where it fails)
+- The failure occurs when translating a string that contains a Unicode character represented as a UTF-16 surrogate pair followed by another character, e.g. input_str = "\U0001F630A".
+- The error shows up as an IndexError coming from the index bounds check at to_utf16_code_units / code_point_at code (the check at line 35: "if index < 0 or index >= len(code_units): raise IndexError(...)").
+- The root cause is an indexing mismatch between "code units" (UTF-16 words) and the index arithmetic used by the translator loop that calls code_point_at.
+
+Why it happens (root cause, with exact lines/variables)
+- to_utf16_code_units produces a list of UTF-16 code units (code_units). code_point_at(index) checks bounds against len(code_units) at line 35 and then, at lines 39–43, detects a high surrogate (0xD800–0xDBFF) and combines it with the following low surrogate (0xDC00–0xDFFF) to return a single Unicode code point:
+  - line 35: bounds check uses index relative to code_units length
+  - lines 39–43: if high surrogate and a valid low surrogate follow, it returns the combined code point (>= 0x10000)
+- The translator loop that calls code_point_at is advancing its index by 1 unit after processing characters (this is the Java-like bug this test is exercising). That advance-by-1 assumes each loop step consumes one code unit. But when code_point_at combined a surrogate pair, two UTF-16 code units were consumed; index must be advanced by 2 to skip both units.
+- Because the caller only increments index by 1 after a surrogate pair, the next index points to the second code unit of the pair (the low surrogate). When code_point_at is called with that index, the bounds check (line 35) or the logic for checking surrogates can fail — producing IndexError or producing an invalid interpretation — because the caller's indexing no longer matches how code_point_at expects to be called (it expects indices into code_units where each surrogate unit counts separately).
+- In short: code_point_at (lines 35–44) works in terms of UTF-16 code units and will consume 2 units for a surrogate pair; the translator loop advances the index by only 1, so it later calls code_point_at with an index that is wrong/out of range.
+
+Concrete fixes (specific steps you can apply)
+1. Fix the caller (preferred): make the translator advance the index by the number of UTF-16 code units that were consumed.
+   - After calling cp = code_point_at(s, index), test whether cp is a supplementary code point (cp > 0xFFFF). If so, increase index by 2; otherwise increase index by 1.
+   - Example logic (pseudocode showing variables from your code):
+     - cp = code_point_at(s, index)
+     - if cp > 0xFFFF:
+         index += 2
+       else:
+         index += 1
+   - This keeps the caller’s indexing consistent with to_utf16_code_units/code_point_at (which treat surrogate pairs as two units).
+2. Alternative (cleaner): stop treating text as UTF-16 code units in the translator and work in terms of Python Unicode code points.
+   - Iterate over Python string characters (each char is a code point in Python) or use ord(s[i]) and advance by 1 per loop. This avoids dealing with surrogate pairs entirely because Python’s str is already Unicode code points.
+   - Replace uses of to_utf16_code_units/code_point_at with ord-based logic (or simply iterate characters).
+3. Another option: change code_point_at to return how many UTF-16 units it consumed (1 or 2) along with the code point, so the caller can advance by the exact consumed count.
+
+Why these fixes work
+- Fix (1) makes the caller and code_point_at agree about the indexing unit: both treat the underlying representation as UTF-16 code units, so surrogate pairs cause two-unit advancement.
+- Fix (2) removes the UTF-16 unit level entirely and uses Python’s native codepoint iteration, eliminating surrogate-pair special-casing and off-by-one/IndexError risks.
+
+Summary
+- The failing behavior is an index mismatch: code_point_at (lines 35–44) can consume two UTF-16 code units for a surrogate pair, but the translator only advances the index by one, causing later calls to use an invalid index and raise IndexError.
+- Fix by advancing index by 2 when cp > 0xFFFF (or rewrite to iterate code points with ord / Python string iteration).

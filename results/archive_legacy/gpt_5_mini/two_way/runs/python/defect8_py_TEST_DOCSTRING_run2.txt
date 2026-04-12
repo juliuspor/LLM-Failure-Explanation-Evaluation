@@ -1,0 +1,34 @@
+What happened
+- The failing input is "fr__POSIX" (language + empty country + variant).
+- LocaleUtils.to_locale rejects it because its validation expects the country code to be two uppercase letters when a separator exists, and it checks specific character positions instead of treating an empty country as valid.
+- Concretely, the method inspects characters by fixed indexes (e.g. checks locale_str[2] or locale_str[3] for an uppercase letter) and/or assumes there are exactly 2 characters for the country substring. For "fr__POSIX" those index checks hit the second underscore (locale_str[2] or locale_str[3] is '_' ), so the code complains "not uppercase letter" or raises ValueError for invalid format.
+
+Where this occurs (variables and behavior)
+- Input variable: locale_str == "fr__POSIX".
+- The code tries to validate language / country / variant by checking character positions (language = locale_str[0:2], then checking locale_str[2] or locale_str[3] for the country letters).
+- Because the country is empty, the bytes at those indexes are underscores ( '_' ), not uppercase letters, so the check fails.
+- If the implementation used parts = locale_str.split('_'), "fr__POSIX".split('_') yields ['fr', '', 'POSIX'] — a perfectly valid three-part representation meaning country == "" and variant == "POSIX". The bug is that the code does not treat that empty middle part as a legitimate empty country.
+
+Why you see the failing assertion
+- Your test expects Locale("fr", "", "POSIX").
+- The implementation instead raises ValueError (or otherwise rejects the string) because it treats the '_' at the country position as invalid.
+
+How to fix it (concrete steps)
+1. Parse with split and handle empty country explicitly:
+   - parts = locale_str.split('_')
+   - if len(parts) == 1: language = parts[0]; country = ""; variant = ""
+   - if len(parts) == 2: language = parts[0]; country = parts[1]; variant = ""
+   - if len(parts) >= 3: language = parts[0]; country = parts[1]; variant = '_'.join(parts[2:])
+   - Important: allow parts[1] to be the empty string (country == "") and treat parts[2] as the variant.
+2. Validate each component after parsing, not by fixed-index character checks:
+   - language must be length 2 and all lowercase (or other project rule), raise ValueError otherwise.
+   - if country != "": require two uppercase letters; if country == "" skip uppercase-letter check.
+   - variant may be any non-empty string if present (follow your documented JDK behavior).
+3. Replace index-based checks that look at locale_str[2] or locale_str[3] with the split-based approach above. That eliminates false failures for strings like "fr__POSIX" where an underscore appears where the index checks expect a letter.
+
+Minimal example change (pseudocode)
+- Before: code that assumes country letters at locale_str[3:5] or checks locale_str[3].isupper()
+- After: use parts = locale_str.split('_') and the component-wise rules from step 1–2
+
+Summary
+The root cause is index-based validation that cannot handle an empty country (double underscore). Treat the middle empty part as a valid empty country by splitting on '_' and validating components afterward. This will make "fr__POSIX" produce Locale("fr", "", "POSIX") as your test expects.

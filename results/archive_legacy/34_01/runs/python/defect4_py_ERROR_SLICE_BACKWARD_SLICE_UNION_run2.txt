@@ -1,0 +1,48 @@
+What failed
+- The test expected get_max_middle_index() to return 1 but it returned 3:
+  AssertionError: Expected max_middle_index=1, got 3
+- The getter at lines 449–451 simply returns the stored value:
+  449 def get_max_middle_index(self) -> int:
+  451     return self._max_middle_index
+
+Why this happened (root cause)
+- The value of self._max_middle_index is wrong when the test reads it. The getter only exposes the stored value; it does not compute or validate anything. Therefore the bug is where self._max_middle_index is set or updated (not in the getter).
+- The failing stack tags show two likely writers: slice_backward and slice_union. One of those methods (or both) is updating self._max_middle_index incorrectly. Typical concrete mistakes that produce the observed symptom:
+  - The code increments the field instead of assigning the intended value (e.g. self._max_middle_index += new_middle_index rather than self._max_middle_index = new_middle_index). That would make the value accumulate across calls and reach 3 instead of the expected 1.
+  - The code uses the wrong variable when assigning (e.g. uses a loop index i or a different "middle" index variable), so it assigns 3 instead of the intended 1.
+  - The field is not reset between operations: slice_backward sets it to 1 for one operation but slice_union runs afterwards and leaves 3, so the test that expects 1 sees the stale/overwritten value.
+  - Off-by-one or incorrect aggregation logic: where the code chooses max/min it uses the wrong comparator or wrong initial value, producing 3 instead of 1.
+
+Where to look (exact places to inspect)
+- Open the implementations of slice_backward and slice_union. Search for any assignment to self._max_middle_index (look for "= self._max_middle_index", "+=", "max(", or places where a local middle_index is computed then stored).
+- Check the lines inside slice_backward and slice_union where middle index values are computed and where self._max_middle_index is updated. Those are the lines that actually caused the wrong value.
+
+Concrete steps to reproduce and fix
+1. Reproduce:
+   - Run the failing test and capture the stack trace to see which method ran last before the assertion.
+   - Temporarily add a short debug log or assertion at the end of slice_backward and slice_union:
+     - print("slice_backward assigned _max_middle_index =", self._max_middle_index, "from", local_middle_index)
+     - or assert expected invariants (for debugging only).
+2. Inspect assignments:
+   - Find lines like:
+       self._max_middle_index += x
+       self._max_middle_index = i
+       self._max_middle_index = some_other_var
+     and confirm whether the assigned value is intended.
+3. Correct common mistakes:
+   - If you find "+=", replace with "=" if you should not accumulate:
+       self._max_middle_index = new_middle_index
+   - If the wrong variable is used, assign the correct value:
+       self._max_middle_index = middle_index  # not i or other_var
+   - If the field should be recalculated per operation, reset it at the start:
+       self._max_middle_index = -1  # or appropriate initial value
+4. Add unit checks:
+   - After updating self._max_middle_index, add a local assertion verifying it matches the expected local computation:
+       assert self._max_middle_index == computed_middle_index
+   - Add a regression test that runs the same sequence that produced 3 and asserts it yields 1.
+5. Re-run tests to confirm get_max_middle_index() now returns the expected value.
+
+Why this explanation is definitive
+- The getter merely returns self._max_middle_index (lines 449–451). The only way the getter returns 3 instead of 1 is that the stored field was set to 3 earlier. The slice_backward and slice_union methods are the only places in the failure trace that touch this value, so the incorrect assignment must be inside one of them. The steps above point you exactly to those assignments and show concrete fixes (replace += with =, use the correct variable, reset before use).
+
+If you paste the relevant code snippets from slice_backward and slice_union where self._max_middle_index is assigned, I will point to the exact line and provide the minimal code change.

@@ -1,0 +1,56 @@
+What happened (root cause)
+- The function rejects any negative minutes immediately at the top:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  So a caller passing minutes_offset = -15 triggers that ValueError and fails right away.
+- The design of the code shows you expect minutes to be combined with a possibly negative hour. The later arithmetic (lines 402–405 in your slice) treats the minute value as a magnitude that should be added or subtracted from the hour component:
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  That code assumes minutes_offset is a positive magnitude (0..59), then applies the sign of hours by subtracting when hours are negative. But because the function currently forbids negative minutes, callers that pass an intentionally negative minutes value (for example hours_offset = -1, minutes_offset = -15) are rejected before this logic runs. The test that failed passed minutes_offset = -15, so the top validation produced "Minutes out of range: -15".
+
+Where it occurred (lines / variables)
+- Validation failure occurs at the minutes validation near the top of for_offset_hours_minutes (the lines executing the raise with "Minutes out of range: {minutes_offset}").
+- The later arithmetic (lines 402–405 in your slice) shows how the code expects to combine hours_in_minutes and minutes_offset, but that logic is inconsistent with the strict validation.
+
+Why this is wrong
+- Either:
+  1) The API is intended to accept a signed minutes_offset (negative when the whole offset is negative). In that case the validation is too strict and incorrectly rejects valid negative minutes.
+  2) Or the API is intended to accept minutes as a magnitude 0..59 and rely on hours sign to set direction. In that case the calling code should never pass a negative minutes_offset; the failing test is using the wrong call pattern.
+- The code as written is inconsistent: it forbids negative minutes at entry, but later manipulates minutes as if it were always a non-negative magnitude to be added/subtracted. That mismatch caused the test to hit the invalid-input branch.
+
+Concrete fixes (pick one depending on intended API)
+1) If minutes_offset should be a magnitude (0..59) and sign comes from hours_offset:
+   - Keep the validation as-is (0..59), but ensure callers never pass negative minutes.
+   - Fix the combination code to compute total minutes clearly and safely:
+     sign = 1 if hours_offset >= 0 else -1
+     total_minutes = hours_offset * 60 + sign * minutes_offset
+   - Then convert to millis with safe_multiply(total_minutes, MILLIS_PER_MINUTE).
+
+   Example replacement for the arithmetic block:
+     hours_in_minutes = hours_offset * 60
+     sign = 1 if hours_in_minutes >= 0 else -1
+     total_minutes = hours_in_minutes + sign * minutes_offset
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+2) If minutes_offset may be signed (negative when the offset is negative):
+   - Allow minutes_offset in range -59..59 instead of 0..59.
+   - Then compute total minutes simply by:
+     total_minutes = hours_offset * 60 + minutes_offset
+   - Keep or add checks to ensure combined total_minutes still within allowed zone range before multiplying.
+
+   Example replacement:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+     total_minutes = hours_offset * 60 + minutes_offset
+     offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+Which to choose
+- If tests/callers pass minutes like -15 together with hours -1, choose fix (2).
+- If callers always pass minutes as a magnitude, choose fix (1) and update callers if any are passing negative minutes.
+
+Summary
+- The immediate failure was caused by the strict minutes validation rejecting minutes_offset = -15.
+- The code is inconsistent about whether minutes should be signed or unsigned; pick one consistent approach and implement the corresponding validation and combination logic shown above.

@@ -1,0 +1,31 @@
+What happens
+- At lines 396–397 the code enforces: if minutes_offset < 0 or minutes_offset > 59: raise ValueError(...). That means minutes_offset is assumed to be a non‑negative value in [0,59].
+- Later, at line 402 the code does: minutes_offset = hours_in_minutes - minutes_offset (and on line 404: minutes_offset = hours_in_minutes + minutes_offset in the other branch). hours_in_minutes carries the hour part already converted to minutes and bearing the sign of the parsed hour (e.g. -5 hours => hours_in_minutes == -300).
+- Because minutes_offset is forced to be non‑negative by the earlier check, subtracting it from a negative hours_in_minutes makes the combined minutes value more negative (larger magnitude negative). That combined value is passed to FieldUtils.safe_multiply and then converted to milliseconds; FieldUtils detects the result is outside allowed range and triggers the "Offset is too large" failure at line 407.
+
+Root cause (in a single sentence)
+- The code validates minutes_offset as a non‑negative 0..59 before applying the sign from hours_in_minutes, but then combines them by subtracting when hours_in_minutes is negative; the prevalidation and the sign handling are inconsistent, producing a too‑large (negative) value that triggers the "Offset is too large" error.
+
+Where exactly it happens
+- Validation: lines 396–397 (minutes_offset must be 0..59)
+- Combination that produces the problematic value: line 402 (minutes_offset = hours_in_minutes - minutes_offset) and line 404 (other branch)
+- Failure reported: line 407 ("Offset is too large") when safe_multiply is called with the combined minutes
+
+Recommended fixes (concrete steps)
+1. Treat the minute part as an unsigned magnitude and validate its absolute value, not its signed value. Replace the check at lines 396–397 with something like:
+   - if minutes_offset < 0 or minutes_offset > 59 -> if abs(minutes_offset) > 59 (or ensure minutes_offset is parsed as a non‑signed integer and then test 0 <= minutes_offset <= 59).
+2. Apply the sign consistently when combining hours and minutes. For example:
+   - Compute hours_in_minutes = sign * abs(hours) * 60
+   - Compute combined_minutes = hours_in_minutes + sign * minutes_offset
+   This avoids subtracting an unsigned minute from a signed hours_in_minutes (no confusing subtraction when hours_in_minutes is negative).
+3. After combining, pass combined_minutes to FieldUtils.safe_multiply and check for overflow as before.
+
+Concrete minimal change example
+- Parse sign = +1 or -1 from the input.
+- Ensure minutes_offset is parsed as a non‑negative integer and checked with if minutes_offset < 0 or minutes_offset > 59: raise ...
+- Then compute:
+    combined_minutes = sign * (abs(hours) * 60 + minutes_offset)
+  instead of doing hours_in_minutes - minutes_offset when hours_in_minutes is already signed.
+
+Why this fixes it
+- The minute part is validated as a magnitude, and the sign is applied exactly once when combining hours and minutes. That prevents making a negative hours_in_minutes more negative by subtracting an already‑signed or wrongly‑validated minutes value, and prevents the unexpected overflow that triggers the "Offset is too large" error.

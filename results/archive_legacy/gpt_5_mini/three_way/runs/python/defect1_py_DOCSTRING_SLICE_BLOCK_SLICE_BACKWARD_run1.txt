@@ -1,0 +1,60 @@
+What happened
+- The docstring for your factory allows negative minutes in some cases (for example (0, -15) -> -00:15 and (-2, -15) -> -02:15).
+- At lines 396–397 the code unconditionally rejects any negative minutes:
+
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+- Because of that check, valid inputs like (0, -15) and (-2, -15) raise ValueError even though they are allowed by the specification. The root cause is that the code tests minutes_offset < 0 without considering hours_offset.
+
+Where it occurs
+- Method: the factory that "Gets a time zone instance for the specified offset to UTC in hours and minutes" (per the docstring).
+- Exact lines: 396–397, variables: minutes_offset (and hours_offset is nearby/needed).
+
+Why it fails
+- The code enforces minutes_offset >= 0 even when the spec allows negative minutes for zero or negative hours. The condition should reject negative minutes only when hours_offset is positive (2, -15 is invalid), not reject negatives across the board.
+
+How to fix it (step-by-step)
+1. Allow negative minutes when hours_offset is zero or negative.
+2. Still reject minutes whose absolute value exceeds  valid minute range (0..59).
+3. Reject negative minutes only when hours_offset > 0.
+4. After computing a signed total offset, validate the overall magnitude (<= 23:59:59) if your code requires that.
+
+Suggested replacement for lines 396–397 (concrete code you can drop in)
+- Option A — minimal fix, replace the two lines with:
+
+    # minutes must be in range -59..+59, but a negative minute is only invalid
+    # when hours are positive per the API contract
+    if minutes_offset < -59 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    if minutes_offset < 0 and hours_offset > 0:
+        raise ValueError(f"Minutes negative while hours positive: hours={hours_offset}, minutes={minutes_offset}")
+
+- Option B — normalize to total seconds and validate (safer, centralizes sign logic):
+
+    total_seconds = hours_offset * 3600 + minutes_offset * 60
+    # sanity check minutes absolute value
+    if abs(minutes_offset) > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+    # disallow combinations where sign of minutes contradicts hours (e.g., 2, -15)
+    if hours_offset > 0 and minutes_offset < 0:
+        raise ValueError(f"Minutes negative while hours positive: hours={hours_offset}, minutes={minutes_offset}")
+    # enforce overall magnitude <= 23:59:59
+    if abs(total_seconds) > (23 * 3600 + 59 * 60 + 59):
+        raise ValueError(f"Resulting offset too large: {total_seconds} seconds")
+
+Tests you should run after the change
+- Allowed cases (should succeed):
+  - (2, 15) -> +02:15
+  - (0, 15) -> +00:15
+  - (0, -15) -> -00:15
+  - (-2, 15) -> -02:15
+  - (-2, -15) -> -02:15
+- Rejected cases (should raise ValueError):
+  - (2, -15)  (minutes negative while hours positive)
+  - (24, 0)   (hours out of range)
+  - (0, 60)   (minutes out of range)
+  - (-23, -60) (minutes out of range)
+
+Summary
+- The unconditional minutes_offset < 0 check at lines 396–397 is too strict and contradicts the docstring. Adjust the check so negative minutes are allowed for zero or negative hours, but still enforce minutes in -59..+59 and disallow the mixed-sign invalid case (positive hours with negative minutes).

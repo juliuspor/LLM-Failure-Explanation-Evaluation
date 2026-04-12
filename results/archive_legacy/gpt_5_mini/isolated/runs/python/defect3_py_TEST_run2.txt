@@ -1,0 +1,57 @@
+What’s happening
+- The tests fail because the translator treats a UTF-16 surrogate pair (an emoji like "\U0001F630") as two separate UTF-16 code units but then advances the loop index by one code unit instead of by the two code units that make up the pair. That leaves the loop positioned at the low surrogate (or past the end of the string) on the next iteration, which causes wrong output or an IndexError.
+
+Where it occurs (functions and variables)
+- hit03_translator.py — inspect two places:
+  1. code_point_at(chars, index) — this function is supposed to read a code point starting at index from the UTF-16 code-unit sequence `chars`. It should return the full Unicode code point for a surrogate pair when `chars[index]` is a high surrogate.
+  2. CsvEscaper.translate_string (or translate / translate_sequence) — the main loop that walks over `chars` using a variable named `index` (sometimes `pos`) and uses `code_point_at` to get the code point. That loop increments `index` after processing a character.
+
+Why that causes the failure (step-by-step for your failing test)
+- Input: input_str = "\U0001F630A" (emoji + ASCII "A").
+- The loop calls code_point_at(chars, index) at index 0:
+  - code_point_at correctly returns the full code point U+1F630 for the surrogate pair (high + low surrogate), or it might return the high-surrogate value — either way, the caller must know how many UTF-16 code units were consumed.
+- The caller (in CsvEscaper.translate_string) then does something like index += 1 (or unconditionally increments by 1).
+- Because the emoji is two UTF-16 code units, advancing index by 1 leaves index pointing at the low surrogate rather than at the "A". Next iteration:
+  - If code_point_at assumes there is another code unit after the current one (to form a pair), it tries to read past the string (IndexError) or misinterprets the low surrogate as a standalone code unit (invalid code point).
+  - This is the original bug you described: "index advances incorrectly."
+
+Conclusive root cause
+- Mismatch between:
+  - what code_point_at returns/represents (a code point read from possibly two UTF-16 code units), and
+  - how the caller updates `index` (always += 1 instead of advancing by the number of UTF-16 units consumed).
+- In short: the loop advances by one code unit even when a code point consumed two code units (surrogate pair). The code does not propagate the number of units consumed back to the caller.
+
+How to fix it (precise steps you can apply)
+Option A — make code_point_at return both the code point and units consumed:
+1. Change code_point_at signature to: code_point_at(chars, index) -> (code_point, units_consumed).
+   - If chars[index] is a high surrogate and chars[index+1] is a low surrogate: return (computed_code_point, 2).
+   - Otherwise: return (ord(chars[index]), 1).
+2. In CsvEscaper.translate_string, change the loop to:
+   - cp, units = code_point_at(chars, index)
+   - ...process cp...
+   - index += units
+   This guarantees correct advancement for surrogate pairs and single code units.
+
+Option B — let code_point_at only read one code unit and make a helper that decodes UTF-16 units to code points and returns the units consumed:
+1. Implement to_utf16_code_units() only if you actually need a UTF-16 view; otherwise iterate over Python str code points (Python 3 has immutable code points in str) using ord(c) — this avoids surrogate handling entirely.
+2. If you must operate on UTF-16 code units (e.g., to mimic Java behavior), ensure the translator loop uses the units count returned by the UTF-16-decoding helper. Same pattern: read -> get units -> index += units.
+
+Minimal concrete code patch (example)
+- Replace the increment line in CsvEscaper.translate_string (where currently you do):
+    index += 1
+  with:
+    if code_point > 0xFFFF:
+        index += 2
+    else:
+        index += 1
+  or better, use the returned units from code_point_at as in Option A.
+
+Extra checks to add (prevent regressions)
+- In code_point_at, when you see a high surrogate (0xD800–0xDBFF), check that index+1 < length and that the next unit is a low surrogate (0xDC00–0xDFFF); if not, treat it as an unmatched surrogate or raise a clear error.
+- Add tests that cover:
+  - surrogate pair followed by ASCII (your failing test),
+  - single surrogate pair at end of string,
+  - unmatched high surrogate in the middle (should be handled deterministically).
+
+Why this explanation should let you fix it now
+- The failing line is the index increment in CsvEscaper.translate_string (variable name index or pos). The mismatched behavior is between code_point_at (which returns a code point that may come from two UTF-16 code units) and the caller increment. Fixing the increment (or returning units from code_point_at and using them) resolves the IndexError and preserves the following character(s), which makes your tests pass.

@@ -1,0 +1,58 @@
+What happened (what fails)
+- The bug is in this block (inside translate, after a translator handled a codepoint):
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+- When the translator reports it consumed a surrogate pair, that pair uses two UTF‑16 code units in code_units. The loop above advances pos incorrectly and may call code_point_at with an index past the end of code_units, triggering IndexError: "String index out of range".
+
+Why it fails (root cause, with reasoning and exact variables)
+- translate_codepoint returns a count (consumed). The contract comment says “they have to understand codepoints and they just took care of a surrogate pair”, so consumed represents how many codepoints the translator consumed (or otherwise indicates a group that should move pos forward).
+- The loop iterates consumed times and inside each iteration calls code_point_at(code_units, pos) and then advances pos by char_count(code_point_at(...)). For a supplementary character (a surrogate pair):
+  - code_point_at(code_units, pos) will detect a high surrogate at index pos and read the low surrogate at pos+1 to compute the full codepoint (works only if pos+1 < len(code_units)).
+  - char_count(...) returns 2 for that codepoint.
+- If consumed > 1 (or if consumed is representing code units instead of codepoints), the loop will run multiple times and each iteration will advance pos again by 2. This can cause pos to jump past len(code_units) or cause a call to code_point_at with an index equal to len(code_units) (out of range). Example:
+  - At beginning pos points to the high surrogate (index i). First iteration: code_point_at(i) reads i and i+1 (OK) and pos increases by 2 to i+2. Second iteration: code_point_at(i+2) may be past end or unexpected depending on consumed, and if i+2 == len(code_units) you get the IndexError in code_point_at (it checks index >= len(code_units) and raises).
+- In short: the loop both iterates consumed times AND advances pos by char_count(...) each iteration, so pos advances too far (double-counting code units) and causes out-of-bounds access when surrogate pairs are involved.
+
+Where it occurs (lines / variables)
+- The problematic lines are the for loop:
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+  Variables involved: pos, consumed, code_units, code_point_at(), char_count().
+- The IndexError originates inside code_point_at(code_units, pos) when pos >= len(code_units).
+
+Concrete fixes (exact steps you can apply)
+Pick one of these fixes depending on what consumed means in your design:
+
+1) If consumed is the number of UTF‑16 code units consumed (i.e., how far to advance pos in code_units):
+   - Replace the loop with a single advance using consumed:
+     pos += consumed
+   Rationale: you were already told how many code units to skip; don't re-measure each unit and double-count.
+
+2) If consumed is the number of codepoints consumed (1 for a supplementary codepoint even though it uses 2 code units):
+   - Advance pos by the total code unit length of the consumed codepoints without re-calling code_point_at on the already advanced pos. Example:
+     start = pos
+     for pt in range(consumed):
+         cp = code_point_at(code_units, start)
+         start += char_count(cp)
+     pos = start
+   Rationale: compute and advance from the original starting index; don’t call code_point_at on a pos that you have already shifted inside the same loop iteration set.
+
+3) Another safe, minimal approach (if consumed is “one codepoint was consumed”):
+   - Replace the loop with:
+     pos += char_count(code_point_at(code_units, pos))
+   This handles the common case where consumed==1 and avoids multiple increments.
+
+Which to choose
+- Inspect what translate_codepoint returns:
+  - If it returns "how many UTF‑16 code units were consumed", use fix (1).
+  - If it returns "how many codepoints were consumed", use (2).
+  - If it always returns 1 when it consumes a codepoint (even surrogate pairs), (3) is fine.
+
+Why these fixes fix the bug
+- They stop double-counting and stop calling code_point_at with a pos past the end of code_units. You either use the returned consumed value directly (no extra per-unit re-evaluation), or if you must iterate codepoints, you base each code_point_at call on the original start position and advance a temporary index, avoiding an out-of-range lookup.
+
+Short reproduction notes
+- Failing case: input "\U0001F630A" (emoji followed by 'A'). The surrogate pair for emoji is two code units; the incorrect loop advances pos incorrectly and then code_point_at is called with pos == len(code_units) (index error). The unit test you included reproduces the failure.
+
+If you want, tell me what translate_codepoint returns (code units vs codepoints) and I’ll give the exact one-line replacement for your code.

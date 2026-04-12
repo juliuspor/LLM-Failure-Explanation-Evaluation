@@ -1,0 +1,48 @@
+What happened (where: LocaleUtils.to_locale, lines 248–252)
+- At line 248 the method unconditionally returns Locale(locale_str[0:2], locale_str[3:5]).
+- Because that return executes before the variant check at line 250, the code never reaches the variant branch that would handle strings like "fr__POSIX".
+- For the input "fr__POSIX" this produces the wrong slices:
+  - locale_str[0:2] -> "fr" (correct)
+  - locale_str[3:5] -> "_P" (wrong: you get an underscore plus the first variant char)
+- The result is a Locale with an incorrect country string ("_P") and the code never sets the variant to "POSIX". The variant-handling code at line 250 is never executed because of the earlier return.
+
+Why this is the root cause (no guessing)
+- The unconditional return at line 248 short-circuits the function. The subsequent if at line 250 and the return at line 252 are unreachable for any input that reaches line 248.
+- The code intended to distinguish at least three formats (language only, language_country, language__variant) but the control flow is wrong: it always takes the language_country path even when the string actually contains a blank country and a variant.
+
+Concrete fixes (exact steps you can apply)
+1. Decide format checks and reorder so you test for the variant case before returning the language_country case. For example:
+   - If len(locale_str) == 2: return Locale(language)
+   - Elif len(locale_str) > 2 and locale_str[2] == '_' and len(locale_str) == 5: return Locale(language, country)
+   - Elif locale_str[2:4] == '__' (two underscores) and len(locale_str) > 4: validate and return Locale(language, "", variant)
+   - Else: raise ValueError
+
+2. A minimal code change that fixes the present logic (replace the block at lines 248–252):
+
+Replace
+  return Locale(locale_str[0:2], locale_str[3:5])
+  if locale_str[5] != '_':
+      raise ValueError(f"Invalid locale format: {locale_str}")
+  return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+With (pseudo-Python you can paste directly)
+  # handle language_country_variant where country may be empty -> language__variant
+  if len(locale_str) >= 6 and locale_str[2:4] == '__':
+      # language + empty country + variant
+      return Locale(locale_str[0:2], '', locale_str[4:])
+  # handle language_country (xx_YY)
+  if len(locale_str) == 5 and locale_str[2] == '_':
+      return Locale(locale_str[0:2], locale_str[3:5])
+  # other cases remain as before (language-only, errors, etc.)
+
+3. Add tests:
+   - assert to_locale("fr") == Locale("fr")
+   - assert to_locale("fr_FR") == Locale("fr", "FR")
+   - assert to_locale("fr__POSIX") == Locale("fr", "", "POSIX")
+   - test malformed inputs raise ValueError
+
+Why this fix works
+- It prevents the early return for the "fr__POSIX" shape by explicitly checking for the double-underscore form and extracting the variant from the correct slice (locale_str[4:], not starting at index 6).
+- It restores the intended parsing branches so variant handling is reachable.
+
+If you want, I can create a complete corrected function body for LocaleUtils.to_locale using these checks.

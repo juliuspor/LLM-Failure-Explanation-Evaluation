@@ -1,0 +1,46 @@
+What happened (root cause)
+- The failing test is test_negative_zero which calls CodeConsumer.add_number(-0.0) and expects the output "-0.0".
+- The implementation of CodeConsumer.add_number converts "integral" floats to integers before appending (typical code looks like: if value.is_integer(): append(str(int(value))) else: append(str(value))). When value is -0.0, value.is_integer() is True and int(-0.0) produces 0, which drops the sign bit. That produces "0" instead of the required "-0.0".
+- In short: the code detects -0.0 as an integer and uses int(value) -> "0", losing the negative sign. The loss occurs inside add_number where the integer branch runs (the int(value) conversion).
+
+Where it occurs (what to look for)
+- The bug is inside CodeConsumer.add_number. Look for a branch that treats floats with no fractional part as integers, e.g.:
+    if value.is_integer():
+        s = str(int(value))
+        self.append(s)
+  That is the exact place where negative zero gets turned into "0".
+
+Why this fails the tests
+- test_negative_zero asserts that negative zero must preserve its sign and be printed as "-0.0".
+- Because add_number converts -0.0 to int and then to "0", the test gets "0" (or possibly "0.0" depending on formatting), so the comparison fails.
+
+How to fix it (concrete steps)
+1. Detect negative zero before you convert to int. The repo already has CodeConsumer.is_negative_zero (the tests call it), so use it in add_number.
+2. Add an early special-case in add_number to handle negative zero and append "-0.0" exactly, then return. Example change (pseudocode / exact lines to add):
+
+    # at start of add_number(self, value):
+    if self.is_negative_zero(value):
+        # preserve sign of negative zero exactly as required by tests
+        self.append("-0.0")
+        return
+
+3. Leave the existing integer branch for normal integers and positive zero untouched. Positive zero (0.0) will continue to be handled by the integer branch and produce "0" as tests expect.
+
+Why this fix is correct and minimal
+- It only changes add_number to handle the one exceptional float (-0.0) that loses its sign when converted with int().
+- It preserves current behavior for positive zero and all other integers/floats.
+- It uses the existing utility is_negative_zero, so no extra low-level bit fiddling is necessary.
+
+Example full check (what to verify after change)
+- add_number(-0.0) => "-0.0" (test_negative_zero)
+- add_number(0.0) => "0" (test_positive_zero)
+- add_number(42.0) => "42" (test_positive_integer)
+- add_number(-42.0) => "-42" (test_negative_integer)
+- Other float/scientific/infinite/NaN tests unchanged.
+
+Extra note on detection
+- is_negative_zero should implement detection like:
+    return value == 0.0 and math.copysign(1.0, value) < 0
+  or by checking the sign bit via struct.unpack if desired. Using math.copysign is simple and portable.
+
+That is the precise reason the test fails and the exact minimal change to make in CodeConsumer.add_number.

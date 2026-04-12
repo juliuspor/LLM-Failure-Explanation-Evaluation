@@ -1,0 +1,70 @@
+What happened (where it failed)
+- Method: to_locale(...)
+- Failing input: "fr__POSIX"
+- Failure: ValueError: Invalid locale format: fr__POSIX
+- Exact place the code raises: the check
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+  (the code that validates the two-character country at positions 3 and 4)
+
+Why it failed (root cause)
+- The code assumes that after the first '_' there must be two uppercase letters for the country. It treats positions 3 and 4 as required A–Z characters.
+- "fr__POSIX" uses the common JVM/Java locale form where the country is empty and represented by a second underscore: language '_' '_' variant. In that string:
+  - locale_str[0:2] == "fr"
+  - locale_str[2] == '_'
+  - locale_str[3] == '_'  (not an uppercase letter)
+  - the variant starts at locale_str[4] == 'P'
+- Because ch3 is '_' the test for A–Z fails, so the code raises ValueError. In short: the code does not accept an empty country (represented by a double underscore), so it rejects valid inputs like "fr__POSIX".
+- There is also a related slice bug in the variant return: the code uses locale_str[6:] for the variant when a variant exists, which only works when country is two letters. For empty country the variant starts earlier (index 4), so that slice would be wrong even if validation were corrected.
+
+Exactly where to change (step-by-step)
+1. Replace the strict ch3/ch4-only-A–Z test with logic that accepts either:
+   - two uppercase letters (country present), or
+   - an underscore at locale_str[3] (meaning an empty country: double underscore), which means the variant starts at index 4.
+2. When country is empty, set country = "" and compute the variant starting index accordingly (4), not 6.
+3. When country is present, keep the existing check and variant index (6) for language_country_variant strings.
+4. Also handle the length checks consistently (the initial combined condition is confusing; you can simplify by checking allowed patterns instead of mixing != and <).
+
+Minimal corrected code (drop into your method)
+    def to_locale(cls, locale_str: str) -> Optional[Locale]:
+        if locale_str is None:
+            return None
+
+        length = len(locale_str)
+        if length == 2:
+            return Locale(locale_str, "")
+        if length < 5:
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        # must have '_' at pos 2
+        if locale_str[2] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+
+        # Case: empty country indicated by second underscore (fr__VARIANT)
+        if locale_str[3] == '_':
+            # variant must exist
+            if length <= 4:
+                raise ValueError(f"Invalid locale format: {locale_str}")
+            country = ""
+            variant = locale_str[4:]
+            return Locale(locale_str[0:2], country, variant)
+
+        # Case: country present, must be two uppercase letters
+        if length < 5:
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+
+        if length == 5:
+            return Locale(locale_str[0:2], locale_str[3:5])
+        # if there's a variant, there must be a '_' at pos 5
+        if locale_str[5] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+Why this fix works
+- It accepts both "ll" (2 chars), "ll_CC" (5 chars), and "ll__VARIANT" (double underscore, variant after index 4).
+- It validates uppercase country codes when present.
+- It computes the variant slice from the correct index depending on whether the country is empty or present.
+
+That is the exact reason and the exact change needed: allow the double-underscore empty-country form and adjust the variant index accordingly.

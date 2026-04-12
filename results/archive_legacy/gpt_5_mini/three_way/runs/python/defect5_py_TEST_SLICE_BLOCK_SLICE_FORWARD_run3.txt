@@ -1,0 +1,67 @@
+What happened (what failed)
+- The failing test is test_add_null_to_null_with_expected_type which calls:
+  ArrayUtils.add(None, None, expected_type=str)
+- In the implementation you provided, execution hits the check at lines 346–351:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(
+          f"Cannot cast object list to {expected_type.__name__} list "
+          f"(ClassCastException: [Ljava.lang.Object; cannot be cast to "
+          f"[Ljava.lang.{expected_type.__name__};)"
+      )
+- Because both the input array and the element are None, the code sets inferred_type == object. The caller supplied expected_type=str, so expected_type != object is true. That triggers the TypeError at line 347–351 and the test fails.
+
+Why this check is wrong (root cause)
+- The check treats "inferred_type == object" as an error whenever an expected element type is supplied. But inferred_type==object here simply means "no concrete type could be inferred" (both array and element are None). It is valid for the method to create a list of the requested expected_type (a String[] in the original Java example) or at least to return a Python list containing None and not raise.
+- In short: the code confuses "unknown/inferred object type" with a genuine type mismatch and aborts instead of honoring the caller's expected_type when inference failed.
+
+Where this occurs (exact lines & variables)
+- Lines 346–351 in your slice block contain the guard that raises the TypeError.
+- Variables involved:
+  - inferred_type (set earlier based on the input array and element)
+  - expected_type (argument passed by the caller, str in the failing test)
+- The failure occurs when inferred_type == object and expected_type != object.
+
+Concrete fixes (explicit steps and small code examples)
+1. If inference fails (inferred_type == object) but caller supplied expected_type, use expected_type rather than raising.
+   Replace the current check with logic that assigns inferred_type = expected_type when inferred_type is object and expected_type is provided:
+   - Current (lines 346–351):
+     if inferred_type == object and expected_type != object:
+         raise TypeError(...)
+   - Replace with:
+     if inferred_type == object and expected_type is not None and expected_type != object:
+         inferred_type = expected_type
+   This lets the method construct/return a list with the requested element type instead of throwing.
+
+2. If you must validate compatibility between inferred_type and expected_type:
+   - Only raise when inferred_type is a concrete type incompatible with expected_type (e.g., one is subclass of the other), not when inferred_type == object.
+   - Example:
+     if inferred_type != object and expected_type is not None and not issubclass(inferred_type, expected_type):
+         raise TypeError(...)
+
+3. Ensure None-handling: when both array and element are None, constructing a list [None] is valid. The code should not attempt to cast None to a concrete type or do a strict runtime cast check that fails.
+
+4. Add or update unit tests:
+   - Keep test_add_null_to_null_with_expected_type (the failing test).
+   - Add tests for add(None, None, expected_type=SomeType) for multiple typess to ensure inferred_type is set to expected_type.
+   - Add tests where inferred_type is concrete but incompatible with expected_type to verify the intended error behavior.
+
+Why this fixes the problem
+- Assigning inferred_type = expected_type when inference is unknown matches caller intent: the caller explicitly requested a particular element type. It avoids raising a TypeError simply because inference couldn't determine a type.
+- The original raise was triggered not by an actual incompatibility but by lack of information (both inputs None). The fix distinguishes "unknown" from "incompatible."
+
+Minimal patch suggestion (pseudo-code)
+- Replace the raise block at lines 346–351 with:
+  if inferred_type == object and expected_type is not None and expected_type != object:
+      # If we couldn't infer a type but the caller provided one, use it
+      inferred_type = expected_type
+  elif inferred_type != object and expected_type is not None and expected_type != object:
+      # If we inferred a concrete type and caller asked for a different incompatible type, raise
+      if not issubclass(inferred_type, expected_type) and not issubclass(expected_type, inferred_type):
+          raise TypeError(f"...")
+
+What to watch for after change
+- Make sure the rest of the method constructs the returned list using inferred_type (which will now be the expected_type when appropriate).
+- Ensure other tests (adding concrete typed elements, mixing types) still behave as intended.
+
+Summary
+- The code raises at lines 346–351 when inferred_type == object and expected_type != object. This is incorrect because inferred_type==object only means "no type inferred" (both inputs were None). Change the logic to accept the caller's expected_type when inference failed, and only raise when there is a real type incompatibility.

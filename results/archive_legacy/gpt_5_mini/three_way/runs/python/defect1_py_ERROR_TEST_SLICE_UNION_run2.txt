@@ -1,0 +1,50 @@
+What happened (what failed)
+- The test called DateTimeZone.for_offset_hours_minutes(0, -15).
+- The method raises ValueError: "Minutes out of range: -15".
+- That ValueError is raised at the guard on line 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Why it failed (root cause)
+- The code rejects any negative minutes unconditionally at line 396.
+- Later code (lines 402 and 404) expects to be able to adjust minutes_offset for negative-hour cases, but that code is never reached because the early check already raised for negative minutes.
+- In short: the range check is too strict/wrong. It enforces minutes in [0, 59] rather than the intended range (which permits negative minutes in some cases, or at least permits minutes in [-59, 59]).
+
+Where exactly in the code
+- The failing check is at lines 396–397 in the shown slice.
+- The adjustment logic that would handle minute sign is at lines 402 and 404 but is unreachable when minutes_offset is negative because of the earlier raise.
+
+Concrete fixes (exact steps and code change)
+Option A — allow minutes in [-59, 59] and keep later logic:
+1. Change the guard to allow negative minutes:
+   Replace lines 396–397:
+     if minutes_offset < 0 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Run the unit tests. This permits minutes = -15 and lets the later code at lines 402/404 compute the final sign/magnitude.
+
+Option B — normalize sign immediately (if that matches intended behavior):
+1. Instead of allowing negative minutes through, convert them to an equivalent within [0,59] after validating absolute range. Example:
+   - Validate using abs(minutes_offset): if abs(minutes_offset) > 59: raise ...
+   - Then apply sign logic using hours and minutes (so (-2, -15) or (-2, 15) are both handled as negative total offset as documented).
+2. Implement by replacing the guard with:
+     if abs(minutes_offset) > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   and adjust subsequent logic to use the sign rules you want.
+
+Which to pick
+- Option A is the minimal change: it matches the test suite's expectation that minutes can be negative (in range -59..59) and allows the existing adjustment code (lines 402/404) to run.
+- Option B is safer if you want to canonicalize minute input right away and make the sign handling explicit.
+
+What to verify after the fix
+- Run the full test suite. Confirm cases:
+  - (0, -15) accepted and returns "-00:15".
+  - (-2, 15) and (-2, -15) produce "-02:15" if that is the desired documented behavior.
+  - Mixed sign invalid cases (2, -15) still raise if intended.
+  - Out-of-range minute values like -60 or 60 still raise ValueError.
+
+Summary
+- The immediate cause of the failure is the minutes range check at lines 396–397 rejecting negative minutes (e.g. -15).
+- Fix by allowing minutes in [-59, 59] (change the check to minutes_offset < -59) or validate by absolute value, then let the later sign-adjustment code (lines 402/404) execute.

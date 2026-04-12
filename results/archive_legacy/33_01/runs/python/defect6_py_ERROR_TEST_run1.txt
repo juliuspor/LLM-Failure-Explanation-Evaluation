@@ -1,0 +1,55 @@
+What happened
+- The test called MockCodeConsumer.add_number(-0.0).
+- Inside MockCodeConsumer.add_number (the code that decides how to turn a Python float into text), the implementation treats any value equal to 0 the same as plain zero. That typically looks like:
+  if number == 0:
+      text = '0'
+  else:
+      text = str(number)
+- Because -0.0 == 0 is True, that branch ran and produced '0'. get_code returned that string and the assertion failed: the test expected the preserved negative sign '-0.0', but got '0'.
+
+Why this is the root cause
+- IEEE 754 has distinct +0.0 and -0.0. In Python floats they compare equal (number == 0), so an equality test cannot distinguish the sign of zero. The code used equality to detect zero and therefore lost the sign information for -0.0.
+
+Where to change it (precise place and change)
+- Open MockCodeConsumer.add_number (the method that receives the float and converts it to text).
+- Replace any check that looks like:
+    if number == 0:
+        code_piece = '0'
+  with a sign-aware check that preserves -0.0.
+
+Example fixes (exact replacements)
+
+1) Using math.copysign (simple, clear)
+- Add at top: import math
+- Replace the zero branch with:
+    if number == 0.0:
+        if math.copysign(1.0, number) < 0.0:
+            code_piece = '-0.0'
+        else:
+            code_piece = '0.0'   # or '0' if you prefer that format
+    else:
+        code_piece = str(number)
+
+2) Using struct to inspect the sign bit (if you need raw IEEE bits)
+- import struct
+- Use:
+    if number == 0.0:
+        bits = struct.unpack('<Q', struct.pack('<d', number))[0]
+        sign_bit = (bits >> 63) & 1
+        code_piece = '-0.0' if sign_bit else '0.0'
+    else:
+        code_piece = str(number)
+
+Exactly what to test after the change
+- Run your original test:
+    cc = MockCodeConsumer()
+    cc.add_number(-0.0)
+    result = cc.get_code()
+    assert result == '-0.0'
+- Also test cc.add_number(0.0) to confirm it still gives the expected '0.0' or '0' string depending on your desired formatting.
+
+Why these fixes work
+- math.copysign(1.0, number) returns 1.0 for +0.0 and -1.0 for -0.0, so the code can distinguish the sign while still treating the value as zero numerically.
+- Inspecting the IEEE bit pattern (struct) directly checks the sign bit; either approach prevents the equality test from discarding the negative sign.
+
+If you share the current implementation of add_number (the few lines around the zero check), I can give an exact one-line patch to apply.

@@ -1,0 +1,34 @@
+What happened (where it fails)
+- The failure happens inside LocaleUtils.to_locale (def at line 193). The code reads length at line 227, then immediately does "if length == 2:" at line 236 and — still inside that branch — tries to access locale_str[3] at line 242. For the input "fr__POSIX" this causes an out-of-range access (IndexError) because the code only allowed for length == 2 but then indexes characters that require a longer string.
+
+Why it fails (root cause)
+- The conditional at line 236 is wrong. It restricts execution into the block that accesses characters at indices 3, 4, 5, 6 to the case length == 2, which is inconsistent: the code assumes the string is long enough but the guard says the opposite. That mismatch makes locale_str[3] (line 242) invalid and raises an exception.
+- There is also logic mismatch about the format "fr__POSIX": the code expects a two-letter language (0..1), a separator and a two-letter country (3..4), then optionally an underscore and variant at index 5+. But "fr__POSIX" represents an empty country (two underscores) and a variant starting earlier; the code's index checks (lines 242–252) don't correctly handle the double-underscore empty-country case.
+
+Precisely where to change (concrete fixes)
+1. Fix the wrong guard at line 236:
+   - Replace "if length == 2:" with branching that matches actual formats. For example:
+     - if length == 2: return Locale(locale_str[0:2])
+     - elif length >= 5 and locale_str[2] == '_' and locale_str[3].isupper() and locale_str[4].isupper(): handle ll_CC and ll_CC_VARIANT
+     - elif length >= 4 and locale_str[2:4] == '__': handle ll__VARIANT (empty country)
+2. Adjust the index assumptions:
+   - For ll_CC: expect country at [3:5], and, if present, variant should come after index 5 with an underscore at 5 (check locale_str[5] == '_').
+   - For ll__VARIANT: variant starts at index 4 (no extra underscore at 5). So for "fr__POSIX" take variant = locale_str[4:].
+3. Validate characters correctly:
+   - Use explicit bounds checks (length checks) before accessing locale_str[3], [4], [5], etc. Do not access those indices unless you checked length first.
+   - For country letters, use str.isalpha() and length checks rather than comparing characters to 'A'/'Z' only (or handle lowercase too if required).
+
+Minimal example of corrected branching (pseudocode):
+- if len == 2:
+    return Locale(lang=locale_str[0:2])
+- if len >= 5 and locale_str[2] == '_' and locale_str[3].isalpha() and locale_str[4].isalpha():
+    # ll_CC or ll_CC_VARIANT
+    if len == 5: return Locale(lang, country)
+    if locale_str[5] != '_': raise ...
+    return Locale(lang, country, locale_str[6:])
+- if len >= 4 and locale_str[2:4] == '__':
+    # ll__VARIANT (empty country)
+    return Locale(locale_str[0:2], '', locale_str[4:])
+- else: raise ValueError
+
+That addresses the exact lines and conditions causing the failure: stop using the length==2 guard at line 236, add correct length checks before lines 242–252, and explicitly handle the double-underscore empty-country case so "fr__POSIX" parses as Locale('fr', '', 'POSIX').

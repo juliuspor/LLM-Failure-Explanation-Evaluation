@@ -1,0 +1,66 @@
+What happened (where)
+- The immediate failure comes from this check near the top of the method:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+  That rejects any negative minutes. The test that raised "Minutes out of range: -15" called for_offset_hours_minutes(0, -15) or a negative minute combined with a non-positive hour, which the docstring allows. Because the code disallows all negative minutes, it raises the ValueError before any further logic runs.
+
+Why it fails (root causes)
+1) Wrong minutes-range validation:
+   - The docstring permits minutes in -59..+59, but the code currently rejects negative minutes unconditionally. That is the direct cause of the "Minutes out of range: -15" error.
+
+2) Incorrect sign handling when combining hours and minutes:
+   - Later the code mutates minutes_offset with:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           minutes_offset = hours_in_minutes - minutes_offset
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+     This logic produces incorrect results when hours are negative and minutes are negative:
+       e.g. hours_offset = -2 (hours_in_minutes = -120), minutes_offset = -15
+       The code computes -120 - (-15) = -105 (-> -1:45) but the proper result per the docstring is -135 minutes (-> -2:15).
+     The correct intent per the docstring is:
+       - If hours > 0, minutes must be >= 0 and total = hours*60 + minutes
+       - If hours == 0, total = minutes (can be positive or negative)
+       - If hours < 0, treat the minutes as additional negative minutes: total = hours*60 - abs(minutes)
+
+Exact places to change and the fix
+1) Change the minutes validation lines to accept -59..+59 and enforce illegal combinations when hours > 0:
+   Replace:
+       if minutes_offset < 0 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+   With:
+       if minutes_offset < -59 or minutes_offset > 59:
+           raise ValueError(f"Minutes out of range: {minutes_offset}")
+       if hours_offset > 0 and minutes_offset < 0:
+           raise ValueError("Minutes must be positive when hours are positive")
+
+   This matches the docstring rule that positive hours cannot pair with negative minutes.
+
+2) Avoid reusing minutes_offset for the total; compute total_minutes correctly and use abs(minutes):
+   Replace the block:
+       hours_in_minutes = hours_offset * 60
+       if hours_in_minutes < 0:
+           minutes_offset = hours_in_minutes - minutes_offset
+       else:
+           minutes_offset = hours_in_minutes + minutes_offset
+       offset = FieldUtils.safe_multiply(minutes_offset, DateTimeConstants.MILLIS_PER_MINUTE)
+   With:
+       hours_in_minutes = hours_offset * 60
+       if hours_offset < 0:
+           total_minutes = hours_in_minutes - abs(minutes_offset)
+       else:
+           total_minutes = hours_in_minutes + minutes_offset
+       offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+   Notes:
+   - Use hours_offset < 0 rather than hours_in_minutes < 0 to keep intent clear.
+   - Use abs(minutes_offset) for negative-hour case so both (-2,15) and (-2,-15) become -135 minutes, as the docstring specifies.
+   - Do not overwrite the input minutes_offset; use a separate total_minutes variable for clarity.
+
+Additional defensive check (optional but recommended)
+- After computing total_minutes you may want to ensure the resulting offset does not exceed the allowed +/- 23:59:59.000 range (which the existing safe_multiply/try-catch tries to protect). If you want explicit range checking, compute allowed range in minutes and raise if |total_minutes| > (23*60 + 59).
+
+Summary
+- The test fails because negative minutes are rejected too early.
+- Also the sign combining logic for negative hours is wrong when minutes are negative.
+- Fixes: allow minutes in [-59,59], explicitly forbid minutes < 0 when hours > 0, and compute total_minutes using abs(minutes) when hours < 0 (use a separate variable rather than overwriting minutes_offset).

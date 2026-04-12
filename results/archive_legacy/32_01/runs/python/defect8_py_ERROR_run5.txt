@@ -1,0 +1,74 @@
+I can’t point to the exact line numbers in your program until you paste the code, but I can explain exactly what that error means, where it typically happens, and give step‑by‑step checks and fixes you can apply right away — including the precise method names to look for and the exact changes to make.
+
+Short summary of the root cause
+- The string "fr__POSIX" is not a valid locale identifier for the parser you’re calling. The parser expects a language and (optionally) a territory or variant in a specific format; "fr__POSIX" contains an empty territory (two underscores) which makes the format invalid and triggers ValueError: Invalid locale format: fr__POSIX.
+
+Where this error typically occurs (check these calls in your code)
+- babel.core.Locale.parse(...) or babel.Locale.parse(...). Babel raises that exact message when the format is wrong.
+- locale.normalize(...) or locale.setlocale(locale.LC_ALL, ...) in the standard library normally behave differently, but if you convert or parse strings first you may also see related errors.
+- Any custom wrapper that calls Babel’s Locale.parse, or code that validates locale format against Babel’s expectations.
+
+What happened (step by step)
+1. Your code passed the string "fr__POSIX" into a locale-parsing function (for example: babel.core.Locale.parse("fr__POSIX")).
+2. Babel’s parser expects a language code optionally followed by a territory and/or variant using a specific pattern (for example: "fr", "fr_FR", "fr@POSIX", or "fr_FR@POSIX").
+3. "fr__POSIX" has two underscores: the territory field is empty, then a variant. Because the territory position is empty, the parser sees the format as invalid and raises ValueError with the message you saw.
+
+Concrete checks for you to run now
+1. Search your codebase for these exact calls:
+   - babel.core.Locale.parse(
+   - babel.Locale.parse(
+   - Locale.parse(
+   - any place that constructs or passes locale strings to Babel
+   Check the line numbers the search returns and inspect the argument that comes from configuration, environment, or user input.
+
+2. Reproduce the failure in a Python shell to confirm the source:
+   - Open Python in the same environment and run:
+     from babel.core import Locale
+     Locale.parse("fr__POSIX")
+   - You should see the same ValueError. This confirms Babel’s parser is the source.
+
+Exact fixes (pick one, follow the steps)
+A. Fix the origin of the bad string (recommended)
+   Steps:
+   1. Find where the locale string is produced (config file, environment variable, user input). Suppose that occurs on line 42 where you call Locale.parse(my_locale).
+   2. Change the code to normalize empty parts before parsing. Example replacement for that line:
+      # before (example)
+      loc = Locale.parse(my_locale)
+      # after
+      cleaned = my_locale.replace("__", "_")            # collapse double underscores
+      cleaned = cleaned.replace("@", "@")               # (no-op but shows intent)
+      loc = Locale.parse(cleaned)
+
+   3. Better normalization (handles more cases):
+      parts = my_locale.split('@', 1)
+      base = parts[0].replace("__", "_")                # remove empty territory
+      variant = ("@" + parts[1]) if len(parts) == 2 else ""
+      loc = Locale.parse(base + variant)
+
+   4. Add a test or assertion so future bad inputs fail early:
+      assert "_" not in base or base.count("_") <= 1, f"Bad locale format: {my_locale}"
+
+B. Convert to a valid explicit form
+   If the variant is intended and the territory is omitted, use the @variant form:
+   - Replace "fr__POSIX" with "fr@POSIX" or "fr_POSIX" depending on what the parser expects.
+   Steps:
+   1. Modify the input where it’s defined (config/environment). Example change in config:
+      LOCALE=fr@POSIX
+   2. If you cannot change the origin, sanitize before parsing:
+      my_locale = my_locale.replace("__", "@")  # transforms fr__POSIX -> fr@POSIX
+      loc = Locale.parse(my_locale)
+
+C. Validate and fail with a clear message earlier
+   Steps:
+   1. Before calling Locale.parse, validate the format:
+      import re
+      if not re.match(r"^[a-z]{2}(?:_[A-Z]{2})?(?:@.+)?$", my_locale):
+          raise ValueError(f"Invalid locale provided: {my_locale}")
+   2. This prevents Babel from being fed unrecognized formats and produces a clear error close to the code that reads the input.
+
+Why not just silently accept "fr__POSIX"?
+- The double underscore indicates a missing territory portion. The parser cannot infer what you mean (is it fr@POSIX? fr_POSIX? fr_FR@POSIX?) and so it refuses to parse to avoid ambiguous behavior.
+
+If you want I can:
+- Point to the exact line that must change if you paste the small code block (the function that builds/passes the locale string and the line where Locale.parse is called).
+- Provide a ready-to-drop-in sanitizer function (3–5 lines) that you can call before parse to handle common bad inputs like this.

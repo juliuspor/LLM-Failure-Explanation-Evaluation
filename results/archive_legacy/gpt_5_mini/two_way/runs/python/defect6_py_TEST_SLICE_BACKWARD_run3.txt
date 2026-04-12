@@ -1,0 +1,50 @@
+What happened
+- The failing tests are about negative zero (-0.0) being output as "-0.0" (preserve the sign). The code in CodeConsumer.add_number falls into the integer-formatting branch and prints "0", dropping the negative sign.
+- The relevant condition is at the shown slice (line 176):
+  if x == int(x) and not math.isinf(x) and not math.isnan(x):
+  Here x is the float passed into add_number.
+
+Why that causes the bug (root cause)
+- For x == -0.0, Python considers -0.0 equal to 0.0: -0.0 == 0 is True. int(-0.0) == 0 as well. So the condition x == int(x) evaluates True for -0.0.
+- Because the code treats x as an integer-valued float, it chooses the integer formatting path and writes "0" (or "0" without sign). That loses the negative sign of -0.0.
+- There is an is_negative_zero utility on CodeConsumer, but add_number does not check it before the integer branch, so the negative-zero special case is never used.
+
+Where it occurs
+- In CodeConsumer.add_number, at the if condition on or around line 176 (the integer-valued branch).
+- Variable names: x is the float input to add_number; the missed check is CodeConsumer.is_negative_zero(x).
+
+Concrete fixes (step-by-step)
+Option A — simplest and safest: handle negative zero first
+1. At the very start of add_number (before the integer-valued check), add:
+   if self.is_negative_zero(x):
+       self.append("-0.0")
+       return
+2. This ensures -0.0 is output as "-0.0" and never falls through to integer formatting.
+
+Option B — alter the integer branch condition to exclude negative zero
+1. Change the integer-detection condition from:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x):
+   to:
+   if x == int(x) and not math.isinf(x) and not math.isnan(x) and not self.is_negative_zero(x):
+2. If you do this, you must still handle negative zero elsewhere (e.g., after the condition append "-0.0").
+
+Option C — detect sign directly without using the utility
+1. Before the integer branch add:
+   if x == 0.0 and math.copysign(1.0, x) < 0.0:
+       self.append("-0.0")
+       return
+2. This avoids calling is_negative_zero but does the same check.
+
+Suggested patch (minimal, explicit)
+- Insert this at the top of add_number, before line 176:
+   if self.is_negative_zero(x):
+       self.append("-0.0")
+       return
+
+Why this is correct
+- It preserves the negative sign for -0.0 while leaving other number formatting logic unchanged.
+- It uses the existing is_negative_zero helper (which your tests exercise), keeps logic clear, and fixes the specific failure (tests expecting "-0.0" instead of "0").
+
+Additional notes
+- After fixing, re-run the full test suite (including tests that check positive zero, integers, floats, and negative-after-minus behavior) to ensure no unintended formatting changes.
+- If add_number ever needs to format "-0.0" differently (e.g., "-0" vs "-0.0"), adjust the appended string consistently and update tests accordingly.

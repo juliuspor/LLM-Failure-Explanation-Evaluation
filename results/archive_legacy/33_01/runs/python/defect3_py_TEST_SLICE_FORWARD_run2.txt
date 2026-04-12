@@ -1,0 +1,42 @@
+What happened (where)
+- The failing code path is in the function that reads code units from code_units[index] (lines shown). At line 43 the function returns the numeric code point computed from a UTF‑16 surrogate pair:
+  - line 41–43: when a high surrogate and a following low surrogate are found it does:
+    return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+  - line 44: otherwise it returns high
+
+- The test calls:
+  escaper = CsvEscaper(); result = escaper.translate_string('\U0001F630'); assert result == '\U0001F630'
+  The test expects translate_string to return the same Unicode string character (the emoji U+1F630).
+
+Why it fails (root cause)
+- The function returns an integer code point (for surrogate pairs) or the integer value stored in high, not a Python string character.
+- So translate_string ends up returning an int (e.g. 0x1F630 == 128560) instead of the one-character string '\U0001F630'. The assertion fails because the types/values differ: int vs str.
+- Concretely: at line 43 you return the numeric code point; at line 44 you return high (also numeric). The caller/test expects a string character, not an integer code point.
+
+Note about caller expectations
+- The test shows translate_string should return a Unicode string (a one-character string for that input).
+- The current code appears to be implementing a UTF‑16 decoding step that yields code point integers, but it never converts those integers into a Python character before returning.
+
+How to fix it (concrete steps)
+Option A — convert to a character inside this function (recommended given the test):
+1. Replace the integer returns with characters:
+   - At line 43 change
+     return 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+     to
+     return chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
+   - At line 44 change
+     return high
+     to
+     return chr(high)
+2. Ensure the caller (translate_string) expects and concatenates/works with strings (not ints).
+
+Option B — keep returning ints but make the caller convert them to strings:
+1. Change translate_string so that wherever it calls this function it wraps the returned integer in chr(...), e.g.
+   ch = chr(code_point)
+2. Adjust tests/callers to expect strings.
+
+One more thing to check (if you are decoding surrogate pairs in a loop)
+- If the caller iterates index over code_units, make sure when you consume the low surrogate you also advance the index by 2 (or communicate that the caller should skip the low surrogate). The snippet shown returns the combined code point but does not communicate index advancement; if the caller expects the function to advance index, you must change the function signature or return both (code_point, consumed) or otherwise coordinate index updates. If you leave index handling as-is, confirm the loop increments correctly to avoid double-processing the low surrogate.
+
+Summary
+- Root cause: the function returns integers (code points) at lines 43 and 44 instead of returning a one-character string; the test expects a string. Fix by wrapping the returned value with chr(...) (or convert at the caller) and ensure index handling is correct when a surrogate pair is consumed.

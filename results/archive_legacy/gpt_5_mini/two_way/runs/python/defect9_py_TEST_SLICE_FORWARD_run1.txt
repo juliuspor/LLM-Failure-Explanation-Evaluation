@@ -1,0 +1,37 @@
+What happened (root cause)
+- The inner search/selection loop (lines 102–114) contains this check:
+  or replacement_list[i] is None
+  (line 104).
+- That line causes the algorithm to skip any search entry whose replacement is None. In other words, if replacement_list[i] is None the code behaves as though search_list[i] does not exist at all.
+- Because of that, the code never considers that search pattern when finding the next match. This breaks mixed cases like search_list = ["a", "b"], replacement_list = ["c", None]. The matcher simply ignores the "b" pattern entirely instead of treating "b" as present with a None replacement (which should be handled according to the intended semantics).
+- The visible symptom is that the function does not produce the expected string for the mixed case (test_null_safety_inside_arrays_mixed): you expected "cbc" but the code does not apply the "a"→"c"/"b"→(no-op) combination correctly because it skipped "b" at selection time.
+
+Where it occurs (file/lines)
+- The problematic condition is at line 104 in the selection loop (excerpt shows lines 102–114).
+- The append of the chosen replacement is at line 92:
+  parts.append(replacement_list[replace_index])
+- The start update uses the chosen search length at line 94:
+  start = text_index + len(search_list[replace_index])
+
+Why that leads to a wrong result
+- By skipping search entries whose replacement is None, the algorithm changes which patterns are eligible for matching. That changes text_index/replace_index choices and therefore the sequence of replacements and substrings appended to parts.
+- The intended behavior (as in the Java StringUtils tests you referenced) is: if a replacement array element is None, the search pattern still exists in the search_list and must be considered when scanning text; the code should then decide what replacement to apply for that match (e.g. treat None as "no replacement" or as the empty string depending on the intended semantics). Omitting the pattern entirely is incorrect.
+
+Concrete fix (step-by-step)
+1. Remove the "or replacement_list[i] is None" clause from the selection/skipping condition (line 104). That makes each search_list[i] eligible for matching regardless of whether its replacement is None.
+2. When you actually append the replacement (line 92), check for None and handle it explicitly. Two reasonable behaviors:
+   - If "None means leave the original matched text unchanged": append search_list[replace_index] instead of replacement_list[replace_index] when replacement is None.
+   - If "None means replace with empty string": append "" (i.e., skip appending any replacement) when replacement is None.
+   Choose the one that matches the expected API (the tests you showed expect "no-op" for None in the second element).
+3. Concretely, change the append block around line 92 to something like:
+   if replacement_list[replace_index] is None:
+       parts.append(search_list[replace_index])   # no-op: keep matched substring
+   else:
+       parts.append(replacement_list[replace_index])
+   start = text_index + len(search_list[replace_index])
+4. Keep the other logic that marks when a search pattern has no more matches (lines 108–111) — those should still skip only when the pattern actually has no occurrences left, not when replacement is None.
+
+Why this fix works
+- It restores correct matching decisions (all search patterns are considered) while making the replacement behavior explicit and correct when a replacement is None. That will make the mixed-case test produce "cbc" as expected: 'a' is replaced with 'c', 'b' is seen as a searchable token but its replacement is treated as a no-op, leaving 'b' in place.
+
+If you want, paste the current function body and I will provide the exact patch to apply (with line numbers adjusted).

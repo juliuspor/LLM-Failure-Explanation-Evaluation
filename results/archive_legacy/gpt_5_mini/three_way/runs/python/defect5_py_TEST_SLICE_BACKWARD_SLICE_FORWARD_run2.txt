@@ -1,0 +1,51 @@
+What happened (where it fails)
+- The failing test calls ArrayUtils.add(None, None, expected_type=str).
+- In the slice you provided, the logic that decides inferred_type runs at lines 335–347. The code does:
+  - line 335: if array is not None: inferred_type = type(array)
+  - line 337: elif element is not None: inferred_type = type(element)
+  - line 340: inferred_type = object  (this is the branch when both are None)
+  - line 346–347: if inferred_type == object and expected_type != object: raise TypeError(...)
+
+- For the test case both array and element are None, so inferred_type is set to object (line 340). expected_type is str (provided by the caller). The condition at line 346 becomes true, so the code raises TypeError instead of returning a one-element list [None]. That is the immediate cause of the test failure.
+
+Why this is wrong (root causes)
+1. Wrong source for array element type:
+   - When array is not None, the code uses type(array) (line 335). For a Python list this returns list (the container type), not the element type. The intention is to infer the array element type, but type(array) is the wrong value to use.
+2. Incorrect handling of both-None case:
+   - When both array and element are None the code unconditionally sets inferred_type = object (line 340) and then rejects any caller-provided expected_type != object by raising TypeError (lines 346–347). But the caller passed expected_type=str and expected that a String-typed result (in Java terms) or at least a list containing None would be created. Raising here is unjustified: there is no need to error when both inputs are None but an expected_type is provided.
+3. Overstrict equality test against object:
+   - The check inferred_type == object is brittle and mixes container vs element type semantics. It causes the function to fail for a valid call pattern (both None + expected_type specified).
+
+Exactly where to change (concrete steps)
+1. Infer element type from the array contents, not from the container:
+   - Replace inferred_type = type(array) (line 335) with logic like:
+     - if array is not None and len(array) > 0: inferred_type = type(array[0])
+     - elif array is not None and len(array) == 0: inferred_type = None (or use expected_type if provided)
+2. When element is non-None use its type (line 337) — that part is OK.
+3. When both array and element are None:
+   - Do not set inferred_type = object and then raise when expected_type is provided.
+   - Instead set inferred_type = expected_type if expected_type is given; otherwise set inferred_type to object (or None) but do not raise.
+4. Remove the raise TypeError at lines 346–347. The function should accept expected_type being stronger than the inferred unknown and use expected_type to create/return the correctly-typed result.
+5. Additional handling:
+   - If array is empty and expected_type provided, use expected_type as the element type for newly created array.
+   - If array is non-empty but contains heterogeneous element types, you may choose the first non-None element's type or fall back to object/expected_type.
+
+Minimal code sketch of corrected logic around these lines
+- Pseudocode replacing the block:
+  if array is not None:
+      if len(array) > 0:
+          inferred_type = type_of_first_non_none_element(array)  # e.g. type(array[0]) or scan for non-None
+      else:
+          inferred_type = expected_type if expected_type is not None else object
+  elif element is not None:
+      inferred_type = type(element)
+  else:  # both array and element are None
+      inferred_type = expected_type if expected_type is not None else object
+  # do NOT raise TypeError here; use inferred_type to build the result
+
+Why this fix addresses the problem
+- It uses the actual element type when array has contents (not the list class).
+- It honors caller-provided expected_type when the element type is unknown (both inputs None or empty array), rather than rejecting the call.
+- It prevents the incorrect TypeError raised for valid use cases like ArrayUtils.add(None, None, expected_type=str) and will let the function return [None] (or an appropriately typed container) as the test expects.
+
+If you want, I can produce a precise patch for the file showing the exact line edits to replace the current block (lines ~335–347) with the corrected logic.

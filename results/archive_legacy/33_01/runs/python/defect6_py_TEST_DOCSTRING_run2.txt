@@ -1,0 +1,67 @@
+What happened (failure):
+- The test calls cc.add_number(-0.0) but cc.get_code() returned "0.0" (or "0") instead of the expected "-0.0". The assertion failed because the negative zero sign was lost.
+
+Root cause (exact place and why):
+- Inside MockCodeConsumer.add_number(...) there is a branch that treats zero specially using an equality test like:
+  if value == 0:
+      out = "0.0"
+  else:
+      out = str(value)
+  That equality check (value == 0 or value == 0.0) is the problem. In floating-point arithmetic -0.0 == 0.0 is True, so the code enters the zero branch and always produces "0.0". The check collapses negative zero to positive zero and so the sign bit is discarded. The loss happens at the equality test inside add_number (the line checking value == 0 or value == 0.0).
+
+How to confirm quickly:
+- Reproduce in a REPL:
+  >>> -0.0 == 0.0
+  True
+  >>> import math
+  >>> math.copysign(1.0, -0.0)
+  -1.0
+  This shows equality hides the sign, and copysign reveals it.
+
+Concrete fixes (step-by-step, exact changes):
+1. Open the file with MockCodeConsumer and find the add_number method. Locate the line that reads something like:
+     if value == 0 or value == 0.0:
+         output = "0.0"
+2. Replace that logic with a sign-aware check using math.copysign (preserves negative zero). Example replacement:
+
+   import math
+
+   def add_number(self, value):
+       # Old code (remove or replace):
+       # if value == 0.0:
+       #     token = "0.0"
+       # else:
+       #     token = str(value)
+
+       # New code:
+       if value == 0.0:
+           # preserve sign of zero
+           if math.copysign(1.0, value) < 0.0:
+               token = "-0.0"
+           else:
+               token = "0.0"
+       else:
+           token = str(value)
+
+       self._append(token)
+
+3. If you need a more general approach (preserve sign for all float formatting), use struct.unpack to inspect the sign bit, or use format/decimal only after deciding the sign. Example using struct:
+
+   import struct
+
+   def is_negative_zero(x):
+       return x == 0.0 and struct.unpack('<Q', struct.pack('<d', x))[0] >> 63 == 1
+
+   # then in add_number:
+   if is_negative_zero(value):
+       token = "-0.0"
+   elif value == 0.0:
+       token = "0.0"
+   else:
+       token = str(value)
+
+Why these fixes work:
+- math.copysign(1.0, value) returns -1.0 for -0.0 and +1.0 for +0.0. That lets you detect the sign without using equality that collapses them. The struct approach reads the IEEE-754 sign bit directly.
+
+Summary:
+- The test failed because add_number used value == 0.0 and unconditionally emitted "0.0". Equality hides the negative-zero sign. Fix by detecting the sign with math.copysign (or by inspecting the sign bit) and emitting "-0.0" when appropriate.

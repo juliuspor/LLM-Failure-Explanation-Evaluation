@@ -1,0 +1,49 @@
+What went wrong (root cause)
+- On entry you try to pick a component type into the variable inferred_type with:
+  - inferred_type = type(array) when array is not None.
+- type(array) returns the Python type of the container object (e.g. list), not the type of the elements stored in the list.
+- ArrayUtils._copy_list_grow1(array, inferred_type) expects a component/element type (the element class, e.g. int, str, MyClass) so it can create a new backing array/list of that element type.
+- Because inferred_type becomes list (the container type) when array is provided, the new backing array is created with the wrong element type. When you then do new_list[len(new_list) - 1] = element a type/array-store mismatch occurs and the code fails (this is where you end up with the ClassCast/ArrayStore-like failure shown in the slice).
+- The conditional that raises a TypeError (lines 346–351) never catches this because inferred_type is not object; it is list, so the code assumes a correctly-typed array even though the element-type is wrong.
+
+Where it happens
+- The bad assignment is chosen at the branch:
+    if array is not None:
+        inferred_type = type(array)
+  (this is the wrong line: you want the element type, not the container type).
+- The incorrect value is passed into ArrayUtils._copy_list_grow1(array, inferred_type).
+- The error manifests when you write into new_list: new_list[len(new_list) - 1] = element.
+- The TypeError-raising block at lines 346–351 is not triggered because inferred_type is list, not object, so it does not protect you from the wrong-type array creation.
+
+Concrete example that reproduces the bug
+- Suppose array = [1, 2] and element = "x".
+- inferred_type becomes type(array) == list.
+- _copy_list_grow1 creates a backing array that expects list elements.
+- Assigning "x" into that array triggers the runtime failure (mismatch between backing element type and actual element).
+
+How to fix it (exact steps)
+1. When array is provided and non-empty, derive inferred_type from an element of array, not from the array object:
+   - use type(array[0]) (or better: inspect all elements if you want to be safer).
+2. If array is provided but empty, fall back to:
+   - type(element) if element is not None, or
+   - expected_type if provided, or
+   - object as last resort.
+3. Ensure the check that raises TypeError (lines 346–351) uses the correct inferred_type semantics (i.e., inferred_type should represent the element class).
+
+Suggested corrected code snippet (replace the inference block)
+    if array is not None and len(array) > 0:
+        inferred_type = type(array[0])
+    elif element is not None:
+        inferred_type = type(element)
+    elif expected_type is not None:
+        inferred_type = expected_type
+    else:
+        inferred_type = object
+
+Notes and edge cases
+- If array can contain heterogeneous element types, decide on a policy (use the first element's type, compute a common base type, or always require expected_type).
+- If array is a sequence-like wrapper whose elements are themselves lists/arrays and you actually intended to copy array’s element type (not the container), the same rule applies: infer from array[0] element type.
+- If expected_type is a typing.Type, make sure you pass that exact class object into _copy_list_grow1 (not a typing object wrapper).
+
+Summary
+The failure comes from using type(array) (the container’s type) as the element type. Use the element’s type (for example type(array[0])) or expected_type when the array is empty to produce a correctly-typed new list and avoid the runtime cast/array-store error.

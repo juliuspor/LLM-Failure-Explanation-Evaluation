@@ -1,0 +1,53 @@
+What happened
+- The exception is thrown inside GrayPaintScale.get_paint when your code builds a color to return.
+- The color library you call (the place that raises "Color parameter outside of expected range: Red Green Blue") rejects the color values you passed because at least one channel is outside the allowed range (usually 0–255 for integer RGB, or 0.0–1.0 for normalized floats).
+- In your test you call gps.get_paint(-0.5). Instead of clamping -0.5 to black (0), get_paint computed channel values that are negative and then passed those invalid values to the color constructor/validator. That triggers the ValueError before the test can assert color == (0, 0, 0).
+
+Where exactly it fails
+- The failure occurs in GrayPaintScale.get_paint (the method you call in the test).
+- The precise call that raises is the line that hands color values to your color/paint constructor or a helper like PIL.ImageColor.getrgb / QColor(...) / whatever color API you use. For example, something like:
+  return Color(r, g, b)
+  or
+  return (r, g, b) passed into a library which validates the tuple.
+- The variables involved are:
+  - the input value (the -0.5 you pass from the test),
+  - the intermediate channel values (r, g, b) computed from that input,
+  - the call that constructs/validates the color (Color(...), ImageColor.getrgb(...), or similar).
+
+Why it happened (root cause)
+- get_paint does not clamp or otherwise constrain the input value before converting it to RGB channels. With value = -0.5 it produced negative channel values (for instance r = -127) and then passed those into the color API.
+- The color API enforces its allowed range and raised a ValueError with the message you saw. In short: an out-of-range color channel was passed to a color constructor because negative input was not handled.
+
+How to fix it (concrete steps)
+1. Normalize or clamp the input at the start of GrayPaintScale.get_paint:
+   - If expected input range is [0.0, 1.0], do:
+     value = max(0.0, min(1.0, value))
+   - If expected range is [0, 255], clamp to that instead.
+2. Compute integer channel values after clamping, and convert to ints (if using 0–255 integers):
+   gray = int(round(value * 255))
+   r = g = b = gray
+3. Return a valid RGB triple (or the color object your API expects) with values in the allowed range:
+   return (r, g, b)
+   or if the code uses a color constructor: return Color(r, g, b)
+4. Add a unit test for out-of-range inputs (your existing test) to ensure get_paint(-0.5) returns (0, 0, 0) and get_paint(1.5) returns (255, 255, 255).
+
+Example corrected get_paint implementation
+- If your API expects a 0–255 integer tuple:
+
+def get_paint(self, value):
+    # clamp input to [0.0, 1.0]
+    v = max(0.0, min(1.0, value))
+    gray = int(round(v * 255))
+    return (gray, gray, gray)
+
+- If your API expects normalized floats 0.0–1.0:
+
+def get_paint(self, value):
+    v = max(0.0, min(1.0, value))
+    return (v, v, v)
+
+Why that fix works
+- Clamping prevents negative or >1 values from producing out-of-range channel numbers.
+- Converting to the appropriate numeric type (int vs float) matches what the color API expects, avoiding validation errors.
+
+If you paste the exact get_paint implementation you have, I can show the minimal edit with exact line numbers.

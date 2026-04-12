@@ -1,0 +1,52 @@
+What happened (where it fails)
+- The method for_offset_hours_minutes (shown above) rejects any negative minutes at lines 400–401:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later (lines 406–408) the code assumes minutes_offset is a non‑negative magnitude and applies the sign via the hours value:
+  - hours_in_minutes = hours_offset * 60
+  - if hours_in_minutes < 0:
+  -     minutes_offset = hours_in_minutes - minutes_offset
+  - else:
+  -     minutes_offset = hours_in_minutes + minutes_offset
+
+Root cause (why it fails)
+- The validation and the combination logic disagree about how the minutes argument should be supplied:
+  - The validator requires minutes_offset to be non‑negative (0..59).
+  - The combination code treats minutes_offset as an absolute number and applies the sign by subtracting it when hours are negative.
+- If a caller supplies signed minutes (for example hours_offset = -5 and minutes_offset = -30) — a reasonable and common representation — the method immediately raises ValueError at lines 400–401 instead of accepting that input and computing the correct total offset.
+- Conversely, if the API was intended to require minutes as a signed value, the later subtraction (line 406) is wrong because it double-applies the sign (it subtracts a already-negative minutes), producing an incorrect total.
+
+Where to change it (precise fixes with steps)
+Pick one consistent API and implement it:
+
+Option A — Keep minutes as a magnitude (0..59) and apply sign from hours (current combination code)
+1. Keep the validation at lines 400–401 (minutes must be 0..59).
+2. Do not accept negative minutes from callers — document it.
+3. No change needed to combination code except possibly rename variable to totalMinutes to avoid confusion (avoid reusing the parameter name).
+   - Replace:
+     minutes_offset = hours_in_minutes - minutes_offset
+     minutes_offset = hours_in_minutes + minutes_offset
+   - With:
+     total_minutes = hours_in_minutes - minutes_offset  # when hours negative
+     total_minutes = hours_in_minutes + minutes_offset  # when hours non-negative
+   - Use total_minutes for multiplication at line 409.
+
+Option B — Accept signed minutes in the range -59..59 and compute total by simple addition (recommended if callers may pass signed minutes)
+1. Change the validation at lines 400–401 to allow negative minutes:
+   - if minutes_offset < -59 or minutes_offset > 59:
+   -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+2. Simplify the combination to a single addition (no branching on hours sign):
+   - hours_in_minutes = hours_offset * 60
+   - total_minutes = hours_in_minutes + minutes_offset
+   - offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+3. Return cls.for_offset_millis(offset) as before.
+
+Why Option B is safer
+- It avoids sign logic duplication and errors: a single total_minutes = hours_in_minutes + minutes_offset is correct whether minutes is signed or not.
+- It matches typical representations where hours and minutes can each carry a sign, or callers may supply negative minutes.
+
+Summary (what to change and why)
+- The method currently mixes two incompatible conventions: forbidding negative minutes while later applying a sign based only on hours.
+- Fix by choosing one convention and making both validation and combination agree:
+  - Either keep minutes as 0..59 and compute with hours sign (but stop reusing the parameter name), or
+  - Allow signed minutes (-59..59) and compute total_minutes = hours_in_minutes + minutes_offset (recommended).

@@ -1,0 +1,37 @@
+What happened (where it failed)
+- The code checks the minute component at lines 396–397 using the variable minutes_offset:
+  - 396: if minutes_offset < 0 or minutes_offset > 59:
+  - 397: raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Later (lines 402 and 404) the same variable minutes_offset is reused to hold a combined value of hours and minutes:
+  - 402: minutes_offset = hours_in_minutes - minutes_offset
+  - 404: minutes_offset = hours_in_minutes + minutes_offset
+- That reuse changes minutes_offset from the validated minute value (0–59) into a total-minute value (hours*60 ± minutes). That total can be far outside 0–59 and then is multiplied into milliseconds (line 405) and checked against allowed offset size (line 407), which can trigger the "Offset is too large" ValueError.
+
+Why this is the root cause (no guessing)
+- The variable minutes_offset is intended to represent a minute-of-hour when first validated (lines 396–397).
+- Later the code treats minutes_offset as if it were "total minutes" by adding/subtracting it from hours_in_minutes (lines 402/404). Reusing the same name destroys the meaning of the earlier validation.
+- When hours and minutes have different signs (for example a negative hour with positive minutes or vice versa), the arithmetic on the reused variable produces an incorrect total minutes value (possibly with the wrong sign), and the computed offset exceeds the allowed range. That causes the later check at line 407 to raise "Offset is too large".
+
+Exactly where to change it (concrete steps)
+1. Keep the minute-of-hour and the total-minute values in separate variables. For example:
+   - Keep minutes_offset for the validated minute (0–59).
+   - Introduce total_minutes (or minutes_total) for hours_in_minutes ± minutes_offset.
+2. Compute total_minutes after you validate minutes_offset:
+   - hours_in_minutes = hours * 60
+   - if hour sign negative and minute is non-zero, handle sign explicitly (same logic as existing code but using two variables)
+   - total_minutes = hours_in_minutes + or - minutes_offset
+3. Multiply total_minutes by MILLIS_PER_MINUTE and then perform the overflow / range check and conversion to offset millis.
+
+Minimal example fix (replace the reuse at lines 402–405):
+- Validate minutes_offset as before (lines 396–397).
+- Then:
+  - minutes_total = hours_in_minutes + minutes_offset   (or hours_in_minutes - minutes_offset if that is the intended branch)
+  - offset = FieldUtils.safe_multiply(minutes_total, DateTimeConstants.MILLIS_PER_MINUTE)
+  - continue with the existing overflow check and cls.for_offset_millis(offset)
+
+Why this fix works
+- It preserves the original validation of the minute component.
+- It prevents accidental overwriting of the minute value so the sign and arithmetic logic are correct.
+- It makes the code clearer and prevents the “Offset is too large” error caused by miscomputing the total minutes.
+
+If you want, paste the surrounding function and I will produce an exact one-line patch or a corrected code snippet using your existing variable names.

@@ -1,0 +1,56 @@
+What happened (what failed and where)
+- The failure occurs inside LocaleUtils.to_locale (method start shown at line 188). The code computes length = len(locale_str) (line 222) and later tries to read characters at fixed indices to validate the country code:
+  - ch3 = locale_str[3]
+  - ch4 = locale_str[4]
+  These lines are shown at 237–239.
+- For the input "fr__POSIX" the code raises ValueError with the message "Invalid locale format: fr__POSIX". The cause is that the code expects a two-letter country at positions 3–4 and therefore checks that ch3 and ch4 are uppercase letters. In "fr__POSIX" position 3 is '_' (the second underscore of the double-underscore form), not an uppercase letter, so the uppercase-letter check fails and a ValueError is thrown.
+
+Why it happened (root cause)
+- The implementation assumes only these forms:
+  - "ll" (language only)
+  - "ll_CC" (language + country)
+  - "ll_CC_variant" (language + country + variant)
+- It does not special-case the Java-style language__variant form where the country is empty and there are two consecutive underscores (e.g. "fr__POSIX"). In that form the country should be the empty string and the variant should be the substring after the second underscore.
+- Concretely:
+  - The code validates characters at fixed indices (locale_str[3] and locale_str[4]) as uppercase country letters without first checking whether the input uses the empty-country pattern (locale_str[2] == '_' and locale_str[3] == '_').
+  - As a result, when the empty-country pattern occurs, the character at index 3 is '_' and fails the uppercase-letter test, causing the strict validation to reject a valid input.
+
+Additional issue to watch for
+- The code indexes fixed positions (3 and 4) without ensuring the string is long enough. That can cause IndexError for short, invalid inputs unless earlier length checks prevent it. Always check length before indexing.
+
+Exactly where to change and how (step-by-step)
+1. In LocaleUtils.to_locale, before you fetch or validate ch3 and ch4, add a branch to detect the empty-country pattern: check if locale_str[2] == '_' and locale_str[3] == '_'. That identifies language__variant inputs.
+2. When you detect that pattern:
+   - Set language = locale_str[0:2]
+   - Set country = ""
+   - Set variant = locale_str[4:] (everything after the second underscore)
+   - Skip the country-uppercase validation for positions 3–4 because there is no country.
+3. For the normal country-present path, keep validating that locale_str[3] and locale_str[4] are uppercase letters (but only after ensuring the string is long enough).
+4. Also ensure you do bounds checks before any indexing (i.e., check length >= 5 before reading locale_str[3:5]).
+
+Minimal example patch (illustrative)
+Replace the country-validation block with logic like:
+
+    # assume language was parsed and checked already and we know locale_str[2] == '_'
+    if len(locale_str) >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+        # language__variant form: empty country
+        country = ""
+        variant = locale_str[4:] if len(locale_str) > 4 else ""
+    else:
+        # normal country or country+variant form: require at least two chars for country
+        if len(locale_str) < 5:
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        ch3 = locale_str[3]
+        ch4 = locale_str[4]
+        if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        country = locale_str[3:5]
+        variant = locale_str[6:] if len(locale_str) > 5 and locale_str[5] == '_' else ""
+
+What to add to tests
+- You already have the failing test test_locale_with_empty_country_variant and other language__variant tests. After applying the change those should pass.
+- Add an explicit test asserting that a lone "ll_" or malformed lengths raise ValueError to ensure bounds checks remain strict.
+
+Summary
+- Root cause: the code validates fixed indices 3 and 4 as uppercase country letters unconditionally and so rejects the valid language__variant form (double underscore with empty country).
+- Fix: detect the double-underscore empty-country pattern (locale_str[2] == '_' and locale_str[3] == '_'), handle country = "" and take the variant from the remainder; otherwise validate country letters only after confirming the string is long enough.

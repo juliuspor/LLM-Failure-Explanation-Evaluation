@@ -1,0 +1,63 @@
+What fails
+- At line 396–397 the code rejects any negative minutes:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(...)
+  This contradicts the docstring, which allows negative minutes for some combinations (e.g. (0, -15) or (-2, -15)). The current validation makes legitimate inputs fail early.
+
+- The computation that combines hours and minutes (lines 402–404)
+  hours_in_minutes = hours_offset * 60
+  if hours_in_minutes < 0:
+      minutes_offset = hours_in_minutes - minutes_offset
+  else:
+      minutes_offset = hours_in_minutes + minutes_offset
+  is wrong for the negative-hour cases and also reuses minutes_offset as the accumulator (losing the original minute sign). Example that shows the bug:
+  - Input: hours_offset = -2, minutes_offset = 15
+    hours_in_minutes = -120
+    branch taken: minutes_offset = -120 - 15 = -135  (correct result)
+  - Input: hours_offset = -2, minutes_offset = -15
+    hours_in_minutes = -120
+    branch taken: minutes_offset = -120 - (-15) = -105  (WRONG: expected -135)
+  So when the hour is negative and minutes_offset is negative, the code produces the wrong total offset because it uses subtraction blindly and ignores the intended sign semantics from the docstring.
+
+Where it occurred (lines)
+- Validation rejecting negative minutes: lines 396–397
+- Combining hours and minutes and overwriting minutes_offset: lines 402–405
+- The wrong value is then multiplied and passed into for_offset_millis at line 408.
+
+Why it fails (root cause)
+1. The minutes validation is too strict: it forbids negative minutes altogether even though the API allows negative minutes in some combinations (doc allows negative minutes when hours is zero or negative).
+2. The arithmetic logic mixes up sign rules for negative hours vs. negative minutes and overwrites minutes_offset. The code treats the minute addition/subtraction asymmetrically, producing incorrect totals when hours and minutes are both negative (or more generally when the signs interact).
+3. Reusing minutes_offset as the intermediate combined-minute count makes it harder to reason about and introduces the bug.
+
+Concrete fixes (step-by-step)
+1. Fix the minutes range check to allow negative minutes:
+   - Replace the current check with: if minutes_offset < -59 or minutes_offset > 59: raise ValueError(...)
+   (This matches the doc's allowed -59..+59.)
+
+2. Enforce invalid sign combo explicitly (doc says positive hours with negative minutes is invalid):
+   - After the minutes range check add:
+     if hours_offset > 0 and minutes_offset < 0:
+         raise ValueError("Minutes must not be negative when hours are positive")
+
+3. Compute the total minutes explicitly using absolute magnitudes and a sign derived from hours (and minutes when hours == 0), instead of mutating minutes_offset. For example:
+   - If hours_offset > 0:
+       total_minutes = hours_offset * 60 + abs(minutes_offset)
+   - Else if hours_offset < 0:
+       total_minutes = -(abs(hours_offset) * 60 + abs(minutes_offset))
+   - Else (hours_offset == 0):
+       total_minutes = minutes_offset  # sign of minutes determines sign
+   This follows the doc examples: both (-2,15) and (-2,-15) become -135 minutes; (2,15) becomes +135; (0,-15) becomes -15.
+
+4. Replace the multiplication line with:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+5. Use a separate variable (total_minutes) instead of overwriting minutes_offset so the original inputs remain available for validation/error messages.
+
+Example of the corrected logic in words
+- Allow minutes -59..+59.
+- Reject the combination hours>0 with minutes<0.
+- Compute total minutes as:
+  - total_minutes = sign * (abs(hours)*60 + abs(minutes)) when hours != 0, with sign = +1 for positive hours and -1 for negative hours.
+  - If hours == 0, total_minutes = minutes (minutes sign dictates resulting sign).
+
+These changes fix the incorrect results produced at lines 402–405 and make the behavior match the docstring and the example combinations.

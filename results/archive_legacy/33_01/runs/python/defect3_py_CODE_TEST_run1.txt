@@ -1,0 +1,43 @@
+What happened (what fails)
+- The bug is in the for loop that advances pos after a translator consumed some codepoints:
+
+  for pt in range(consumed):
+      pos += char_count(code_point_at(code_units, pos))
+
+- Given a surrogate pair (like U+1F630, which is encoded as two UTF‑16 code units), a translator returns consumed==1 (it consumed one codepoint). The loop is supposed to advance pos by the number of code units that that one codepoint occupied (2). Instead, the loop calls code_point_at(code_units, pos) on a pos that changes inside the loop, causing the second iteration to inspect the wrong location (or go past the end), leading to incorrect pos, wrong behavior, and test failure.
+
+Why it fails (root cause, exact location and variables)
+- Location: the for pt in range(consumed): ... loop just after the comment about translators.
+- Variables involved: pos, consumed, code_units.
+- Problem: the loop re-reads code_point_at at the *mutated* pos each iteration. For a surrogate pair:
+  - Iteration 0: pos=0, code_point_at(...,0) -> U+1F630, char_count(...) -> 2, so pos becomes 2.
+  - Iteration 1: now pos==2 (past the pair). The code calls code_point_at(code_units, 2) which is out of the original codepoint boundary (or out-of-range). That produces wrong behavior (wrong increment or an error).
+- In short: the code advances pos inside the loop, but still uses pos to determine how much to advance again. That double-counts / reads the wrong codepoint positions and can step past the buffer.
+
+Concrete sequence that breaks your test
+- input_seq is U+1F630 -> to_utf16_code_units gives two code units at indices 0 and 1.
+- Suppose translate_codepoint returns consumed==1 (translator handled the codepoint).
+- Loop should move pos from 0 to 2 and finish. Instead it:
+  - First iteration sets pos = 0 + 2 = 2.
+  - Second iteration tries code_point_at(code_units, 2) -> bad (out-of-range or wrong value), so pos changes incorrectly or an exception occurs.
+- The result is that the translate_string output is not the original U+1F630, so the assert fails.
+
+Exact fix (step-by-step, minimal and concrete)
+Replace the for-loop that mutates pos with code that computes the new pos from the original start position, not from the incremented pos. Example change:
+
+    # before: wrong
+    for pt in range(consumed):
+        pos += char_count(code_point_at(code_units, pos))
+
+    # after: correct
+    p = pos
+    for _ in range(consumed):
+        cp = code_point_at(code_units, p)
+        p += char_count(cp)
+    pos = p
+
+Why this fixes it
+- The fixed code uses a temporary p initialized to the current pos and repeatedly advances p by the correct char_count of each original consumed codepoint. It never calls code_point_at on a pos that has been advanced past the start of the next codepoint to be measured. That yields the correct total number of code units consumed (2 for the surrogate pair) and sets pos correctly to 2, satisfying the test.
+
+Extra defensive suggestion (optional)
+- If code_point_at can raise or be undefined when called past length, add a length check before calling it, but the main bug is the loop logic described above.

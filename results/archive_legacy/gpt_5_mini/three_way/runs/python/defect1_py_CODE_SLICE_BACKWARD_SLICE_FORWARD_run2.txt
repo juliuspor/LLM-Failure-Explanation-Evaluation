@@ -1,0 +1,58 @@
+What fails
+- The method raises ValueError at line 396 ("Minutes out of range: {minutes_offset}") when the caller passes a negative minutes_offset (for example for_offset_hours_minutes(-1, -30)).
+- That happens because the method insists minutes_offset is between 0 and 59 (line 396), but many callers represent a negative offset by passing a negative minutes argument together with a negative hours argument. The check rejects that valid intent before the code ever builds the combined offset.
+
+Why it happens (root cause)
+- The code assumes minutes_offset is always non‑negative and that the sign comes only from hours_offset. It validates minutes_offset >= 0 at line 396.
+- If a caller instead passes minutes_offset negative (common when expressing -1 hour 30 minutes as hours_offset = -1, minutes_offset = -30), the validation fails immediately and a ValueError is raised.
+- After validation the code reuses the minutes_offset parameter to store the total minutes (lines 402–404). That reuse is confusing and mixes the original meaning of the parameter with the computed total, but it is not the primary cause of the ValueError seen at line 396.
+
+Where it occurs in the source
+- The failure originates at this validation: line 396
+    if minutes_offset < 0 or minutes_offset > 59:
+        raise ValueError(f"Minutes out of range: {minutes_offset}")
+- The attempted combination logic is at lines 401–405:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  (then multiplied at line 405)
+
+How to fix it (concrete steps)
+Choose one of two clear, explicit semantics and implement it:
+
+A) Require minutes_offset to be non‑negative (current intention)
+- Document this requirement in the method docs and in callers convert any negative minutes arguments to a positive value before calling.
+- Keep the range check but avoid reusing the parameter name for total minutes. Example fix:
+    def for_offset_hours_minutes(cls, hours_offset, minutes_offset):
+        if hours_offset == 0 and minutes_offset == 0:
+            return cls.UTC
+        if hours_offset < -23 or hours_offset > 23:
+            raise ValueError(...)
+        if minutes_offset < 0 or minutes_offset > 59:
+            raise ValueError(...)
+        total_minutes = hours_offset * 60 + ( -minutes_offset if hours_offset < 0 else minutes_offset )
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+        return cls.for_offset_millis(offset)
+
+B) Accept minutes_offset with its own sign (more flexible, less surprising)
+- Allow minutes_offset to be negative and validate its absolute value is <= 59.
+- Compute total minutes by simply adding hours_offset*60 + minutes_offset (no sign gymnastics). Example:
+    def for_offset_hours_minutes(cls, hours_offset, minutes_offset):
+        if hours_offset == 0 and minutes_offset == 0:
+            return cls.UTC
+        if hours_offset < -23 or hours_offset > 23:
+            raise ValueError(...)
+        if abs(minutes_offset) > 59:
+            raise ValueError(...)
+        total_minutes = hours_offset * 60 + minutes_offset
+        offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+        return cls.for_offset_millis(offset)
+
+Which to pick
+- If existing callers pass minutes as signed values (e.g. -30 for -1:30), choose B.
+- If you want to keep the current API (unsigned minutes, sign given by hours), pick A but update documentation and avoid reusing minutes_offset for total_minutes.
+
+Summary
+- The code fails because it rejects negative minutes values at line 396 while some callers legitimately pass negative minutes when hours_offset is negative. Fix by choosing and enforcing a clear semantic (minutes signed or unsigned), validating correctly, and computing total_minutes in a separate variable instead of reusing minutes_offset.

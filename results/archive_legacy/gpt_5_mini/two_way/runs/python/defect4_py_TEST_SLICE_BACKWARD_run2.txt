@@ -1,0 +1,52 @@
+What happened (symptom)
+- Your tests expect the largest "middle" value to be at index 1 (middle = 150) but the code returns index 3 (middle = 75). That is exactly the Java failure noted in the header ("Expected max_middle_index=1, got 3").
+
+Where it happened (method, variables, lines)
+- The bug is in TimePeriodValues._update_bounds (the method that updates the _min/_max index bookkeeping).
+- The relevant variables are:
+  - middle — the current item's middle timestamp (a time in milliseconds).
+  - max_middle — the currently recorded maximum middle value (a time in milliseconds).
+  - max_middle_index (self._max_middle_index) — the index corresponding to max_middle.
+  - index — the loop index of the period being examined.
+- The wrong comparison is done between the current item's middle and the stored index variable (max_middle_index) instead of the stored value (max_middle). This happens in the "max middle" branch of _update_bounds.
+
+Why it fails (root cause, plain)
+- The code compares a time value (middle) to an index (max_middle_index). Example with your test sequence:
+  - After seeing middle=150 at index 1, max_middle is set to 150 and max_middle_index = 1.
+  - Later the code tests middle=75 (index 3) with the stored max_middle_index (which is 1), not with max_middle (150).
+  - Because 75 > 1 is true, the code erroneously treats the item at index 3 as the new maximum and sets max_middle_index = 3.
+- In short: a numeric comparison uses the wrong variable (index) instead of the recorded value, so later middles are compared against an index rather than the actual maximum middle time.
+
+Concrete location in the code
+- The mistake is inside TimePeriodValues._update_bounds in the "max middle" update branch. Your slice shows that method surrounding lines ~331–349 and that the min-start logic is nearby; the analogous max-middle comparison uses the wrong variable name for the comparison.
+
+How to fix it (exact steps)
+1. Find the block in TimePeriodValues._update_bounds that updates the "max middle" state. It will look like:
+   - compute middle for the current period
+   - if self._max_middle_index >= 0: read previously stored max_middle (or derive it)
+   - then compare the current middle to the stored max to decide whether to update self._max_middle_index
+2. Replace the incorrect comparison that uses max_middle_index on the right-hand side with max_middle (the stored middle value). Concretely change:
+   - from: if middle > self._max_middle_index:   (or similar use of max_middle_index in the comparison)
+   - to:   if middle > max_middle:
+3. Ensure you update the index variable correctly:
+   - when the comparison is true set self._max_middle_index = index
+   - do NOT compare middle to the index variable anywhere
+
+Suggested patch (illustrative)
+- Before (buggy):
+  if middle > self._max_middle_index:
+      self._max_middle_index = index
+- After (correct):
+  if middle > max_middle:
+      self._max_middle_index = index
+
+Why this fix works
+- Now middles are compared to the previously recorded maximum middle value (max_middle), so only a period with a larger middle timestamp will replace the recorded maximum index. That prevents a later smaller middle (75) from winning just because its numeric value is larger than an index like 1.
+
+How to verify
+- Run your existing unit tests. The failing test test_max_middle_index_simple should now pass (get_max_middle_index() == 1).
+- Also run the other boundary index tests to make sure this change didn't break other branches.
+
+Notes and gotchas
+- Double-check initialization: max_middle must be initialized consistently (for example, to the first item's middle when self._max_middle_index == -1) so comparisons are well-defined.
+- Watch for similar mistakes in other comparisons (min/max start/end and min middle): make sure those branches compare timestamps to timestamps (e.g., start to min_start) and do not compare timestamps to index variables by accident.

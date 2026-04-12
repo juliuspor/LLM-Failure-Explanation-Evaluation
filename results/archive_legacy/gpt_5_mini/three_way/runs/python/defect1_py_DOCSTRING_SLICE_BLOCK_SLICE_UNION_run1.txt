@@ -1,0 +1,43 @@
+What happened (root cause)
+- At lines 396–397 the code rejects any negative minutes unconditionally:
+  - if minutes_offset < 0 or minutes_offset > 59:
+  -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+- That contradicts the documented behavior and later code paths (lines 402 and 404) that expect negative minutes to be handled for certain sign combinations (for example (-2, -15) should become -02:15).
+- Result: callers that pass a negative minutes_offset (valid per the docstring when hours is zero or negative) immediately get ValueError at lines 396–397, and the later logic that adjusts minutes based on hours never runs.
+
+Why it fails (concise)
+- The unconditional check at line 396 forbids negative minutes in all cases, but the design/logic requires allowing negative minutes when hours <= 0 (and forbidding negative minutes only when hours > 0). Because of that overly strict validation, valid inputs like (0, -15) or (-2, -15) are rejected too early.
+
+Where it occurs
+- The failure is in this validation at lines 396–397. Later code (lines 402 and 404) assumes negative minutes may be present and attempts to combine hours and minutes into a total minute offset, but it never gets that far for negative minutes because of the early raise.
+
+Concrete fixes (step-by-step)
+1. Replace the unconditional minutes range check with a conditional that allows negative minutes when hours <= 0, and rejects negative minutes when hours > 0. For example:
+   - Old (lines 396–397):
+     - if minutes_offset < 0 or minutes_offset > 59:
+     -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+   - New:
+     - if minutes_offset > 59 or minutes_offset < -59:
+     -     raise ValueError(f"Minutes out of range: {minutes_offset}")
+     - if hours_offset > 0 and minutes_offset < 0:
+     -     raise ValueError("Minutes must be non-negative when hours are positive")
+     - if hours_offset < 0 and minutes_offset > 0:
+     -     ;# this is allowed by your docstring as -2,15 -> -02:15 so no raise here
+   (Or more simply: allow minutes in [-59, +59], and then disallow the specific bad combination hours > 0 && minutes < 0.)
+
+2. Keep the later normalization logic at lines 402 and 404 that computes the combined minute offset; that code expects minutes may be negative and must run.
+
+3. Add or update unit tests to cover these combinations:
+   - (2, 15) -> +02:15
+   - (2, -15) -> raises ValueError
+   - (0, -15) -> +00:15? (per docstring zero,-15 should be -00:15) — ensure test matches intended sign handling
+   - (-2, -15) -> -02:15
+   - (-2, 15) -> -02:15
+
+4. Update the error messages so they reflect the actual constraints enforced (line numbers where messages are raised).
+
+Extra note about the docstring vs. behavior
+- Confirm whether (0, -15) is intended to be -00:15 (docstring says so). If yes, ensure normalization code produces that and that your tests assert that sign behavior. The immediate bug is only the early unconditional rejection at lines 396–397; fixing it as shown will allow the normalization logic at lines 402/404 to run and produce the intended offsets.
+
+Summary
+- The unconditional minutes check at lines 396–397 rejects negative minutes in all cases, which contradicts the documented allowed combinations and prevents the later adjustment logic (lines 402/404) from running. Change the validation to allow minutes in [-59, +59] and explicitly reject only the invalid sign combinations (hours > 0 && minutes < 0), then keep the existing normalization and offset-size checks.

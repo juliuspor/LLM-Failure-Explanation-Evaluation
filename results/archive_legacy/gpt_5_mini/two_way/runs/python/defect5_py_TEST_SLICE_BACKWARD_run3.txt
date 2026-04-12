@@ -1,0 +1,68 @@
+What happened (root cause)
+- At lines 335–338 the code sets inferred_type = type(array) when array is not None. That uses the list object's type (e.g. <class 'list'>), not the element type (e.g. <class 'str'>). So inferred_type is the container class, not the element class.
+- At line 340 the code falls back to inferred_type = object when neither array nor element give a concrete type (this happens when array is None and element is None).
+- At lines 346–347 there is a guard:
+  if inferred_type == object and expected_type != object:
+      raise TypeError(...)
+  In the test case test_add_null_to_null_with_expected_type the call is ArrayUtils.add(None, None, expected_type=str). Because inferred_type was set to object (line 340), the condition inferred_type == object is true and expected_type != object is true, so the code raises TypeError instead of creating a String[] (or in Python, a list that can hold strings).
+- In short: the code treats a completely unknown input (array=None, element=None) as an error when an expected_type is supplied, because inferred_type was set to object and compared directly to expected_type. Also the code uses type(array) rather than the type of elements inside the array.
+
+Where it occurs
+- type(array) usage: line 336 (inferred_type = type(array)) — wrong meaning, should check element type or array element class, not container type.
+- fallback to object: line 340 (inferred_type = object) — makes it impossible to accept expected_type on null inputs.
+- error raise: lines 346–347 — raises TypeError when expected_type is provided but inferred_type is object.
+
+Why this causes the failing test
+- test_add_null_to_null_with_expected_type calls ArrayUtils.add(None, None, expected_type=str). The implementation ends up raising TypeError instead of returning [None] (or an appropriately typed list). That's the failure flagged by the tests.
+
+Concrete, actionable fixes (step-by-step)
+1. Infer element type properly:
+   - If array is not None:
+     - If the array has at least one non-None element, set inferred_type = type(first_non_none_element).
+     - If the array is empty or contains only None, do not use type(array) — prefer expected_type if provided, or leave unknown.
+2. Use expected_type when available:
+   - If inferred_type is unknown (None or object) and expected_type is provided (not object/None), set inferred_type = expected_type rather than treating it as an error.
+3. Only raise TypeError when there is a real conflict:
+   - If inferred_type is known and expected_type is also known and they are incompatible, then raise.
+   - Do not raise simply because both array and element are None while expected_type is provided.
+4. Handle element None specially:
+   - When element is None, you still can create a single-element list of the expected_type (or an element-type-agnostic list in Python). Do not treat None element as a cause for failure when expected_type exists.
+
+Suggested code sketch (replace the problematic block)
+- Instead of:
+    if array is not None:
+        inferred_type = type(array)
+    elif element is not None:
+        inferred_type = type(element)
+    else:
+        inferred_type = object
+    if inferred_type == object and expected_type != object:
+        raise TypeError(...)
+- Use:
+    inferred_type = None
+    if array is not None:
+        # find a concrete element type inside array
+        for x in array:
+            if x is not None:
+                inferred_type = type(x)
+                break
+    if inferred_type is None and element is not None:
+        inferred_type = type(element)
+    # If still unknown, prefer expected_type when provided
+    if inferred_type is None and expected_type is not None:
+        inferred_type = expected_type
+    # Only raise if both inferred_type and expected_type exist and are incompatible
+    if inferred_type is not None and expected_type is not None and inferred_type is not expected_type:
+        raise TypeError(...)
+
+Why this fix works
+- It uses the actual element type instead of the list type.
+- It accepts expected_type as authoritative when no element or non-None array element exists.
+- It only errors when there is a real type conflict, not when everything is None but expected_type is provided.
+
+References to variables and lines
+- type(array) at line 336 — incorrect: returns container type.
+- inferred_type = object at line 340 — causes expected_type to be rejected at lines 346–347.
+- The error raise at lines 346–347 — the immediate cause of the failing test.
+
+That addresses exactly why the test fails and gives precise steps and code to fix it.

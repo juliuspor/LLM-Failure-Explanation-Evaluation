@@ -1,0 +1,66 @@
+What happened (where it failed)
+- The code raises a ValueError when called with "fr__POSIX".
+- Failure occurs after the initial checks, inside the branch that handles non-2-length strings. Concretely, the code reads ch3 = locale_str[3] and ch4 = locale_str[4] and then checks
+  if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+    raise ValueError(...)
+- For "fr__POSIX" (indices: 0='f',1='r',2='_',3='_',4='P',...), ch3 == '_' so the uppercase-letter check fails and a ValueError is raised. This is at the ch3/ch4 validation (the lines just before the return on line 243 and 245–247 in your slice).
+
+Why it happened (root cause)
+- The code assumes that if there is an underscore at index 2 (language separator), positions 3 and 4 must always be uppercase letters (a country code). That assumption doesn't allow the valid "language__variant" form where the country is empty and two underscores appear in a row (e.g. "fr__POSIX").
+- In other words, the validator does not handle the empty country case. It treats the second underscore (at index 3) as an invalid character instead of recognizing it marks an empty country and the start of the variant.
+
+Exact variables/lines involved
+- locale_str = "fr__POSIX"
+- locale_str[2] == '_' passes
+- ch3 = locale_str[3] is '_' (checked as uppercase at the validation lines just before returning Locale at line 243 and before the code at lines 245–247)
+- The uppercase-country check (ch3/ch4 between 'A' and 'Z') is the failing validation.
+
+How to fix it (concrete steps)
+1. After you verify locale_str[2] == '_' (current code path), check whether locale_str[3] == '_'. If so, treat the country as empty and parse the variant starting after that second underscore:
+   - country = ""
+   - variant = locale_str[4:]
+   - return Locale(locale_str[0:2], "", variant)
+   Make sure to validate that variant is non-empty if you want to reject "fr__" (variant empty) cases.
+
+2. Else (locale_str[3] is not '_'), continue with the existing country validation: require ch3 and ch4 to be uppercase letters and handle length 5 (language + '_' + country) or >5 (language + '_' + country + '_' + variant).
+
+3. Optional cleanup: simplify the initial length check. The current condition
+   if length != 2 and length != 5 and length < 7:
+is confusing and error-prone. Use clearer checks for allowed patterns:
+   - language only: length == 2
+   - language_country: length == 5 and locale_str[2] == '_'
+   - language_country_variant: length >= 7 and locale_str[2] == '_' and locale_str[5] == '_'
+   - language__variant: length >= 4 and locale_str[2] == '_' and locale_str[3] == '_'
+or simply try to parse by separators and validate parts.
+
+Minimal concrete patch (pseudo-code showing exact insertion point)
+Replace this block (after you validated locale_str[2] == '_'):
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(...)
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    else:
+        if locale_str[5] != '_':
+            raise ValueError(...)
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+With this (handle empty country first):
+    if locale_str[3] == '_':
+        # empty country, variant starts at index 4
+        if length <= 4:
+            raise ValueError(f"Invalid locale format: {locale_str}")  # requires non-empty variant
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    ch3 = locale_str[3]
+    ch4 = locale_str[4]
+    if ch3 < 'A' or ch3 > 'Z' or ch4 < 'A' or ch4 > 'Z':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    if length == 5:
+        return Locale(locale_str[0:2], locale_str[3:5])
+    else:
+        if locale_str[5] != '_':
+            raise ValueError(f"Invalid locale format: {locale_str}")
+        return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+
+That change will allow "fr__POSIX" and similar "language__variant" inputs while keeping the existing validations for country and variant.

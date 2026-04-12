@@ -1,0 +1,49 @@
+What happened (where it failed)
+- The IndexError is raised at lines 35–36:
+  - 35: if index < 0 or index >= len(code_units):
+  - 36:     raise IndexError(f"String index out of range: {index}")
+- That check fails because index is larger than or equal to len(code_units). In other words, the code is trying to read code_units[index] (line 38) but index is out of range for the list code_units.
+
+Why this happened (root cause)
+- code_units is the list of UTF-16 code units produced by to_utf16_code_units(s) (line 12).
+- The caller is using an index that counts "characters" or Unicode code points, while code_units counts UTF-16 code units. Characters encoded as surrogate pairs occupy two UTF-16 code units.
+- If the caller passed an index measured in characters (for example, "the 5th character") but the UTF-16 representation contains surrogate pairs before that position, the code-unit list will be shorter than the character count at that position — so index >= len(code_units) and the check at line 35 correctly raises IndexError.
+- Concretely: index is not the same domain as len(code_units). The code assumes they match, but they don't when the string contains characters outside the Basic Multilingual Plane (which use two UTF-16 code units).
+
+Exactly where to look
+- to_utf16_code_units: line 12 creates code_units. Lines 35–44 attempt to read a code point from code_units using index.
+- The mismatch occurs because whoever calls this logic uses an index based on the original string's character count (or code-point count), not the UTF-16 code-unit count.
+
+How to fix it (step-by-step)
+Pick one of these fixes depending on what you intend:
+
+1) If you want to index by character/code point (common in Python)
+   - Change the caller to pass a character index, and keep work in terms of the original Python string.
+   - Don’t convert to UTF-16 first; use s[index] and ord(s[index]) or iterate over s directly, handling surrogate pairs only if you explicitly encode to UTF-16 bytes.
+   - Steps:
+     1. Remove uses of code_units and index into s directly: cp = ord(s[index]).
+     2. If you must produce the UTF-16 code units, call to_utf16_code_units(s) only when you really need the code-unit representation.
+
+2) If you want to index by UTF-16 code unit (you already have code_units)
+   - Ensure the index passed in is a code-unit index, not a character index.
+   - Validate or convert indexes before calling this code.
+   - Steps:
+     1. In the caller, compute code_units = to_utf16_code_units(s).
+     2. Use the length len(code_units) to bound any indexes you pass here.
+     3. Or provide a mapping function char_index_to_code_unit_index(s, char_index) that converts a character position to a code-unit position by encoding s[:char_index] as UTF-16 and counting code units.
+
+3) If you must accept both kinds of indexes, normalize at function entry
+   - Explicitly document whether index is a character index or a UTF-16 code-unit index.
+   - If index is character-based, map it to a code-unit index:
+     Steps:
+     1. Encode s[:index] to UTF-16 (e.g. s[:index].encode('utf-16-le')).
+     2. Divide byte length by 2 to get the code-unit offset.
+     3. Use that offset to index code_units.
+
+One-line defensive change (if you only need to avoid the crash)
+- Before accessing code_units[index], ensure index is within len(code_units) after converting/validating its domain:
+  - If index is character-based: convert to code-unit offset as in step 3 and then run the existing check at lines 35–36.
+  - If index should already be a code-unit index: verify the caller and raise a clearer exception upstream documenting what index means.
+
+Summary
+- The IndexError occurs because index and len(code_units) are counting different things (characters vs. UTF-16 code units). Fix by using consistent indexing: either operate on the Python string (characters/code points) or on the UTF-16 code-unit list, and convert indexes explicitly when switching between those representations.

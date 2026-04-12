@@ -1,0 +1,46 @@
+What happened (where it fails)
+- The failing input "fr__POSIX" reaches LocaleUtils.to_locale and the code assumes there is always a 2-letter country at positions 3–4.
+- At the slice shown you have these lines (approximate line numbers from your slice_forward):
+  - line 243: return Locale(locale_str[0:2], locale_str[3:5])
+  - line 245: if locale_str[5] != '_':
+  - line 247: return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+- For "fr__POSIX" the characters by index are:
+  - 0='f', 1='r', 2='_', 3='_', 4='P', 5='O', ...
+- The code slices locale_str[3:5] expecting two uppercase country letters, but for "fr__POSIX" locale_str[3] is '_' (empty country). Because the implementation never checks for an empty country, it then tests locale_str[5] (which is 'O') and expects it to be '_' before parsing a variant. That test fails and a ValueError is raised; the error message complains about an underscore in the wrong position (exactly what you observed: "position 3 is '_' not uppercase letter").
+
+Why this is the root cause (simple)
+- The function treats the substring at indices 3–4 as a country code unconditionally, so it does not handle the valid form language__variant (empty country with a double underscore).
+- The code uses fixed-position checks (locale_str[3:5], locale_str[5]) that are incorrect when the country is empty, so it mis-parses or rejects valid inputs like "fr__POSIX".
+
+How to fix it (concrete steps)
+1. Detect the empty-country case explicitly before slicing the two-character country:
+   - If locale_str[3] == '_' (i.e., you have a double underscore at indices 2 and 3), treat country as "" and parse the variant from index 4 onward.
+   - Example logic:
+     - if locale_str[3] == '_':
+         return Locale(locale_str[0:2], "", locale_str[4:])
+2. Otherwise, keep the existing two-letter country parsing and variant detection:
+   - Ensure you still validate that locale_str[3:5] are uppercase letters when present.
+   - If after a two-letter country there is another underscore (e.g., index 5 == '_'), parse variant from index 6 onward.
+3. Update the tests to confirm both language__variant and language_country_variant work.
+
+Concrete patch sketch (replace the problematic block)
+- Before attempting to read a 2-char country, do:
+
+    # language at [0:2] already validated
+    if locale_str[3] == '_':
+        # empty country, variant starts at 4
+        return Locale(locale_str[0:2], "", locale_str[4:])
+    # else expect 2-char country at 3:5
+    country = locale_str[3:5]
+    # validate country uppercase...
+    if len(locale_str) == 5:
+        return Locale(locale_str[0:2], country)
+    if locale_str[5] != '_':
+        raise ValueError(f"Invalid locale format: {locale_str}")
+    return Locale(locale_str[0:2], country, locale_str[6:])
+
+Why this will fix it
+- The explicit check for locale_str[3] == '_' handles the exact case of language__variant (double underscore) and prevents wrong index-based assumptions (locale_str[3:5] being letters and checking locale_str[5] for '_'). It preserves the existing behavior for normal language_country and language_country_variant formats.
+
+References to exact names/lines
+- Problem occurs in LocaleUtils.to_locale where slices locale_str[3:5] and the check locale_str[5] are used (your slice_forward lines 243, 245–247). The variables referenced are locale_str and the to_locale return construction Locale(locale_str[0:2], locale_str[3:5], ...).

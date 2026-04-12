@@ -1,0 +1,41 @@
+What happened (where, exactly)
+- The error was raised on line 251: raise ValueError(f"Invalid locale format: {locale_str}").
+- The code around lines 248–252 parses a locale string by fixed-position slicing:
+  - line 248: return Locale(locale_str[0:2], locale_str[3:5])
+  - line 250: if locale_str[5] != '_':
+  - line 252: return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+- The input that caused the failure was "fr__POSIX".
+
+Why it failed (root cause)
+- The parser assumes the locale string is in fixed positions: language = locale_str[0:2], region = locale_str[3:5], optional variant starts at locale_str[6:].
+- "fr__POSIX" has two underscores between language and variant. Its characters by index:
+  - 0:'f', 1:'r', 2:'_', 3:'_', 4:'P', 5:'O', ...
+- That makes locale_str[3:5] == "_P" (an underscore plus 'P'), not a two-letter region code. The code then checks locale_str[5] expecting it to be '_' (the underscore separating region and variant) but locale_str[5] is 'O'. Because the substrings don't match the expected positions/form, the code hits the explicit ValueError at line 251.
+- In short: the parser uses fixed index slicing and the input "fr__POSIX" does not match that positional format (it has an empty region), so the region slice is wrong and the format-check at line 250 fails.
+
+What to change (concrete fixes, step-by-step)
+1. Stop relying on fixed index slices. Split the string by underscores so you handle empty parts explicitly.
+   - Example replacement logic (conceptual code):
+     - parts = locale_str.split('_', 2)  # at most 3 pieces: language, region, variant
+     - if len(parts) == 1:
+         - language = parts[0]
+         - return Locale(language)
+     - if len(parts) >= 2:
+         - language = parts[0]
+         - region = parts[1]  # could be '' if input was "fr__POSIX"
+     - if len(parts) == 3:
+         - variant = parts[2]
+2. Add validation after splitting:
+   - Ensure language is present and has the expected form (e.g., 2 letters).
+   - If region is present, ensure it is either empty (explicitly allowed) or a valid two-letter code; decide whether an empty region is allowed or should be treated as missing.
+   - If variant is present, ensure it's non-empty.
+   - On validation failure, raise a clear error message naming the offending part and the rule (e.g., "Invalid region in locale 'fr__POSIX': region empty").
+3. Decide a policy for inputs like "fr__POSIX":
+   - If you want to allow an empty region and treat the second underscore as the separator for variant, use split and accept empty parts: parts = locale_str.split('_', 2); language=parts[0]; region = parts[1] or None; variant = parts[2] if len(parts)==3 else None.
+   - If empty region should be rejected, explicitly raise a ValueError saying "empty region not allowed".
+4. Optionally use a small regex or the stdlib locale parsing to validate formats if you prefer a single check:
+   - e.g. re.fullmatch(r'[a-z]{2}(?:_[A-Z]{2}(?:_.+)?)?', locale_str) to enforce "ll" or "ll_CC" or "ll_CC_variant".
+5. Update the error message at line 251 to be more specific (e.g., "Invalid locale format: {locale_str} — expected 'll', 'll_CC', or 'll_CC_variant'").
+
+Summary in one sentence
+The code fails because it slices fixed character positions for language and region (lines 248–252) but the input "fr__POSIX" has an empty region so the fixed-position slices produce invalid pieces (region becomes "_P"), causing the check on line 250 to fail and raise the ValueError on line 251; fix it by splitting on '_' and validating parts instead of using fixed indexes.

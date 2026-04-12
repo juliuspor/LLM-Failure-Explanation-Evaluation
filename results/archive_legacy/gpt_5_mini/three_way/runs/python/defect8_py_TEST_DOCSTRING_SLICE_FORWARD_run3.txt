@@ -1,0 +1,32 @@
+What happened (where it fails)
+- The code assumes the country code is always two characters at fixed positions and slices using fixed indices (see the snippet you provided).
+- For input "fr__POSIX" the string layout is:
+  index: 0 1 2 3 4 5 6 7 8
+  char : f r _ _ P O S I X
+- The parser does locale_str[3:5] to get the country (lines around 243). For "fr__POSIX" that yields "_P", i.e. the first country character is '_' (index 3), which is not an uppercase letter. The validation then fails and raises ValueError ("position 3 is '_' not uppercase letter"), which is exactly the error described in your test comment.
+
+Why it fails (root cause)
+- The code never handles the "language__variant" form (empty country, double underscore). It always expects a two-character country at indices 3 and 4 when an underscore at index 2 is present.
+- For an empty country there is no two-letter code at indices 3:5; instead index 3 is the second underscore. The fixed-index slicing and subsequent validation therefore treat that underscore as part of the country and reject it.
+
+Exactly where to change (lines & variables)
+- The problematic area is the block around lines 243–247:
+  - line 243: return Locale(locale_str[0:2], locale_str[3:5])  (handles "ll_CC")
+  - line 245: if locale_str[5] != '_': raise ValueError(...)  (expects "ll_CC_variant")
+  - line 247: return Locale(locale_str[0:2], locale_str[3:5], locale_str[6:])
+- These assume a two-letter country is always present. You need to add handling before these fixed slices to catch the double-underscore case.
+
+Concrete fix (step-by-step)
+1. Before slicing out a two-letter country, detect the empty-country pattern: check if locale_str[2] == '_' and locale_str[3] == '_'.
+2. If so, return a Locale with language = locale_str[0:2], country = "", variant = locale_str[4:].
+3. Otherwise proceed with the existing logic that extracts a two-letter country from locale_str[3:5] and validates it.
+
+Example code snippet to insert (place this before the country-slicing/validation block):
+- if len(locale_str) >= 4 and locale_str[2] == '_' and locale_str[3] == '_':
+    return Locale(locale_str[0:2], "", locale_str[4:])
+
+What this fixes
+- For "fr__POSIX" the check will detect the double underscore and return Locale("fr", "", "POSIX") (variant = locale_str[4:] = "POSIX"), avoiding the incorrect country slice "_P" and the subsequent bad validation.
+
+Why this is safe
+- It only triggers when the second underscore is present (explicit empty country), so it won't affect normal "ll", "ll_CC", or "ll_CC_variant" parsing, and it addresses precisely the missing case your test targets.

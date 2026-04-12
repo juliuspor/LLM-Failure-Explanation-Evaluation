@@ -1,0 +1,57 @@
+What happened
+- The IndexError is raised from to_utf16_code_units at the check on line 35:
+  if index < 0 or index >= len(code_units):
+      raise IndexError(f"String index out of range: {index}")
+  The code tried to call to_utf16_code_units (via code_point_at) with index == 2, but len(code_units) was 2, so index 2 is out of bounds and the function correctly raised.
+
+Why it happened (root cause)
+- The code mixes two different index spaces: UTF-16 code-unit indices and Python string/code-point indices.
+- The translator loop in CsvEscaper.translate_string advances the loop index incorrectly when it sees a surrogate pair:
+  - It advances the index to skip the low surrogate, but the outer loop (or the calling code_point_at) also advances the index, so the next call uses an index equal to len(code_units).
+  - In short: the index gets incremented one time too many for the UTF-16 array, so code_point_at/to_utf16_code_units receives an index that is equal to the array length (index == len), causing the explicit bounds check at line 35 to fail and raise IndexError.
+- This matches the described bug: "surrogate pair handling bug where index advances incorrectly." The code is trying to treat a surrogate pair as two units in some places and as one in others; the mismatch produces an out-of-range access.
+
+Where it occurred (specific names/lines)
+- Failure raised at to_utf16_code_units, line 35 (the bounds-check raising IndexError).
+- The caller is code_point_at (used by CsvEscaper.translate_string). The index variable passed into code_point_at is advanced incorrectly inside CsvEscaper.translate_string when handling surrogate pairs.
+
+How to fix it (concrete steps)
+1. Pick one index convention and stick to it:
+   - Option A (recommended): Operate on Python code points (the native str iteration). Avoid building and indexing a UTF-16 code_units list entirely. This eliminates surrogate-pair bookkeeping and is simpler in Python.
+   - Option B: If you must simulate UTF-16 units, make all indices and all index arithmetic refer to UTF-16 code-unit indices consistently.
+
+2. If you keep the current UTF-16 approach, change how you advance the index inside translate_string:
+   - Use a while loop that controls a single index variable i.
+   - When you detect a high surrogate at i and a low surrogate at i+1, consume both and set i += 2, then continue the loop without any additional increment.
+   - When you consume a single code unit, set i += 1.
+   - Ensure there is no extra increment elsewhere (no for-loop implicit increment or duplicate increment).
+
+3. Verify bounds before reading the next unit:
+   - Before accessing code_units[index + 1], check index + 1 < len(code_units) (the code already does this in to_utf16_code_units line 39; make sure callers do not pass index == len(code_units)).
+
+4. Add a unit test that reproduces the failing case (you already have it): "\U0001F630A" (emoji + 'A'). Run tests after making the change.
+
+Minimal code edits to try first
+- Replace a for i in range(...) loop in translate_string with:
+  i = 0
+  while i < len(code_units):
+      # process at i
+      if is_high_surrogate(code_units[i]) and i + 1 < len(code_units) and is_low_surrogate(code_units[i+1]):
+          # handle surrogate pair
+          i += 2
+          continue
+      # handle a single unit
+      i += 1
+
+Or, simpler and safer in Python: stop using UTF-16 indexing and implement translate_string as:
+
+  for ch in input_str:
+      # ch is a full Unicode character (may be an emoji)
+      # escape or copy ch as needed
+
+This latter option removes surrogate-pair index logic entirely and prevents this IndexError.
+
+Summary
+- The immediate cause is an index advanced past the last UTF-16 code unit (index == len) and then used, triggering the bounds check at line 35 in to_utf16_code_units.
+- Root cause is inconsistent index handling when skipping low surrogates inside CsvEscaper.translate_string (double increment).
+- Fix by using a single consistent indexing scheme (prefer Python code-point iteration) or change the loop to advance i by exactly 1 or 2 as appropriate and not twice.

@@ -1,0 +1,80 @@
+I can’t point to the exact line number in your file because the code itself wasn’t included — the docstring alone doesn’t show the implementation. That said, the docstring and the failure mode you describe strongly point to a few specific, common root causes and a short list of concrete checks and fixes you can run now. Below I list the likely reasons, exactly where to look in a typical implementation, what you will see, and step‑by‑step fixes (including a corrected example function you can drop in).
+
+Most likely root causes (with precise places to inspect)
+
+1) value is out of the expected range before conversion
+- Where to look: the code that computes r, g, b from value (e.g. r = int(value * 255) or r = int(value))
+- What happens: if value < 0 or value > 1 (for a [0,1] → 0–255 mapping) you get r, g, or b outside 0–255 and the function’s range check raises ValueError.
+- How to confirm: add a temporary print or logger immediately after computing r,g,b:
+  print("computed r,g,b:", r, g, b, "from value:", value)
+
+2) value is the wrong type (None, string, NaN, list)
+- Where to look: any line that converts or compares value (e.g. if value < 0 or r = int(value * 255))
+- What happens: comparisons or int() will raise TypeError or ValueError, or produce NaN which then produces invalid ints or fails range checks.
+- How to confirm: check callers / call stack to see what is passed in; add an assertion at the top:
+  assert isinstance(value, (int, float)), "value must be numeric"
+
+3) integer conversion/truncation causes off‑by‑one or negative values
+- Where to look: lines using int(), round(), floor() to map floats to 0–255
+- What happens: int(-0.1 * 255) gives a negative number, or round/float/float precision produces 256 from 1.0 due to rounding errors.
+- How to confirm: test boundary inputs explicitly: value = 0.0, 1.0, -0.01, 1.0000001.
+
+4) improper range check logic
+- Where to look: the code that raises ValueError, e.g.
+  if not 0 <= r <= 255: raise ValueError("...")
+- What happens: if r is a float or NaN, that check can behave unexpectedly or be skipped; or the code checks the wrong variable (e.g. checks value instead of r/g/b).
+- How to confirm: inspect the exact if-statement and test cases that trigger the raise; print the checked variable and the reason immediately before raising.
+
+Specific debugging steps (do these in order)
+
+1) Reproduce the failure with the actual input that caused it. Capture the value passed in and the stack trace. That tells you where in your code (file:line) the exception was raised.
+
+2) Add a small instrumented snippet at the top of the function:
+   # at function start
+   print("paint_for_value called with:", repr(value), "type:", type(value))
+   if not isinstance(value, (int, float)):
+       raise TypeError(f"value must be numeric, got {type(value)!r}")
+
+3) Immediately after computing r,g,b add:
+   print("computed r,g,b:", r, g, b)
+   if any(not isinstance(c, int) for c in (r,g,b)):
+       raise TypeError("RGB channels must be int, got types: "
+                       f"{type(r)}, {type(g)}, {type(b)}")
+   if any(c < 0 or c > 255 for c in (r,g,b)):
+       raise ValueError(f"RGB out of range: {(r,g,b)} from value {value!r}")
+
+4) Run unit tests for boundary inputs: value = -0.1, 0, 0.5, 1.0, 1.0000001, float("nan"), None, "0.5".
+
+Concrete example — common bug and corrected implementation
+
+Faulty version (example of a common mistake)
+def paint_for_value(value):
+    # BUG: assumes value is already 0-255, but callers pass a 0..1 float
+    r = int(value)          # line A
+    g = int(value)          # line B
+    b = int(value)          # line C
+    if r < 0 or r > 255:
+        raise ValueError("RGB out of range")
+    return (r, g, b)
+
+Symptoms: passing value = 0.5 produces (0,0,0) instead of ~128; passing value = 1.0 yields (1,1,1) instead of (255,255,255). Or passing a float >1 gives ValueError.
+
+Corrected version (explicit, robust mapping and checks)
+def paint_for_value(value):
+    # Expect numeric input in [0.0, 1.0]; map to 0..255 grayscale
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"value must be numeric, got {type(value)!r}")
+    if value != value:  # NaN check
+        raise ValueError("value is NaN")
+    # clamp or validate depending on desired behavior; here we validate:
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"value {value!r} outside permitted range [0.0, 1.0]")
+    # round to nearest int and ensure in 0..255
+    channel = int(round(value * 255))
+    channel = max(0, min(255, channel))
+    return (channel, channel, channel)
+
+If your intended contract is that value is already 0..255 integers, change the top checks accordingly; if it’s 0..1 floats, use the mapping above. Be explicit in code and in the docstring so callers and the function agree.
+
+What I can do next
+- If you paste the actual function (the lines that compute r,g,b and the raise statement), I will point to the exact line number and the exact expression that causes the failure and give a one‑line patch you can apply.

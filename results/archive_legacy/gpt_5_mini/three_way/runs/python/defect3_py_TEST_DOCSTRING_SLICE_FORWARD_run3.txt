@@ -1,0 +1,32 @@
+What happened (short): the translator treats UTF-16 surrogate pairs as two separate code units but only advances the loop index by one. As a result the low surrogate gets visited as if it were a standalone high surrogate, and the loop eventually tries to read past the end of the array and raises an IndexError (or produces incorrect output).
+
+Where it occurs (exact names/lines you gave):
+- The helper that reads a code point from UTF‑16 code units is the function shown in [SLICE_FORWARD], lines 38–44 (local variable names: high, low, index, code_units). That function correctly returns a single Unicode code point when it sees a high+low surrogate pair.
+- The bug is not in that function itself (it checks index + 1 < len(code_units) and returns the composed code point). The bug is in the caller: the translate loop(s) that iterate the code_units / string and call code_point_at (or code_point_at wrapper), but then always advance the loop index by exactly 1 regardless of whether a surrogate pair was consumed.
+
+Why that breaks (step by step, using your test input "\U0001F630A"):
+1. In UTF‑16 this string is three code units: [high_surrogate, low_surrogate, 'A'].
+2. At index = 0 the caller calls code_point_at(code_units, 0). The function (lines 38–44) detects a valid high (0xD800–0xDBFF) and low (0xDC00–0xDFFF) and returns the composed code point U+1F630.
+3. The caller treats that returned value as one code point, but then increments the index by 1 (not 2). The next loop iteration sets index = 1 — now pointing at the low surrogate.
+4. The caller calls code_point_at(code_units, 1). Because the low surrogate value is not in the high-surrogate range (0xD800–0xDBFF), code_point_at returns that low surrogate numeric value as if it were a standalone code unit. That is incorrect behavior for UTF‑16.
+5. The loop then continues and may attempt index+1 access when index is the last index, or produce wrong output. In some loop implementations that also increment index internally or do extra checks you can also get an IndexError when trying to form a surrogate pair that doesn’t exist (because of the misaligned index).
+
+Root cause (one sentence): the caller fails to advance the index by two when code_point_at consumed a surrogate pair; the loop treats the pair as one code point but still moves forward only one code unit.
+
+Exactly what to change (concrete steps):
+1. In the translate loop (the method that iterates the input and calls code_point_at or to_utf16_code_units), after you call code_point_at(code_units, index) examine the returned code point:
+   - If the returned code point is > 0xFFFF (i.e. it came from a surrogate pair), increment index by 2.
+   - Otherwise increment index by 1.
+   Example logic:
+     cp = code_point_at(code_units, index)
+     if cp > 0xFFFF:
+         index += 2
+     else:
+         index += 1
+2. Alternatively, change code_point_at to return both (codepoint, consumed_units) so the caller does not need to infer consumption from the value.
+3. Simpler Python approach: iterate over Python string characters (which are real code points on modern Python builds) rather than manual UTF‑16 code units; then you won't need surrogate handling logic at all.
+
+Why those steps fix it:
+- They ensure the loop index moves past both the high and low surrogate when code_point_at returned a composed code point, preventing re-processing of the low surrogate and preventing out-of-range accesses.
+
+One more concrete pointer to search in your codebase: look for the function/method named translate_string or CharSequenceTranslator.translate that contains a loop with an integer index and a call to code_point_at or to_utf16_code_units. That's where the index increment is wrong and needs the change above.

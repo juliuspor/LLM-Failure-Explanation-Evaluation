@@ -1,0 +1,63 @@
+What happened (what failed)
+- The test calls DateTimeZone.for_offset_hours_minutes with a negative minutes value (for example (0, -15) and (-2, -15)).
+- The method immediately rejects any negative minutes at the check on lines 396–397:
+  if minutes_offset < 0 or minutes_offset > 59:
+      raise ValueError(f"Minutes out of range: {minutes_offset}")
+- Because that check requires minutes_offset >= 0, any negative minutes cause a ValueError and the tests fail.
+
+Why it happens (root cause)
+- The minutes range check is wrong: it restricts minutes to [0, 59] while the expected/allowed range is [-59, 59]. The test suite and docstring expect negative minute values to be accepted (e.g. -15) in at least some contexts.
+- This check occurs before any logic that would combine hour and minute signs, so the method never gets to handle negative minutes correctly.
+
+Where it occurs (exact place)
+- In for_offset_hours_minutes, lines 396–397 in your slice block:
+  396 |         if minutes_offset < 0 or minutes_offset > 59:
+  397 |             raise ValueError(f"Minutes out of range: {minutes_offset}")
+
+Other related implementation issues you should fix while you're here
+- The code later tries to combine hours and minutes by reusing minutes_offset to hold total minutes:
+    hours_in_minutes = hours_offset * 60
+    if hours_in_minutes < 0:
+        minutes_offset = hours_in_minutes - minutes_offset
+    else:
+        minutes_offset = hours_in_minutes + minutes_offset
+  This is confusing and error-prone:
+  - hours_in_minutes is already in minutes; then subtracting minutes_offset when hours_in_minutes < 0 is awkward and can produce wrong signs depending on the incoming minutes sign.
+  - It also reuses the minutes_offset variable name for total minutes, which reduces clarity and is a source of subtle bugs.
+
+Concrete, step-by-step fixes
+1. Allow negative minutes in the range check:
+   - Replace the current check with:
+     if minutes_offset < -59 or minutes_offset > 59:
+         raise ValueError(f"Minutes out of range: {minutes_offset}")
+   This lets -59..+59 through.
+
+2. Enforce/normalize allowed sign combinations before combining:
+   - If hours_offset > 0 and minutes_offset < 0: raise ValueError (tests expect ValueError for (2, -15)).
+   - If hours_offset < 0 and minutes_offset > 0: treat the minutes as negative (combine magnitude). The docstring/test expect (-2, 15) and (-2, -15) to result in -02:15.
+
+   Concretely:
+   - If hours_offset == 0: total_minutes = minutes_offset
+   - elif hours_offset > 0:
+         if minutes_offset < 0: raise ValueError(...)
+         total_minutes = hours_offset * 60 + minutes_offset
+     else:  # hours_offset < 0
+         # make minutes contribute to the negative magnitude
+         total_minutes = hours_offset * 60 - abs(minutes_offset)
+
+   Use a separate variable total_minutes instead of overloading minutes_offset for clarity.
+
+3. Compute millis safely:
+   offset = FieldUtils.safe_multiply(total_minutes, DateTimeConstants.MILLIS_PER_MINUTE)
+
+4. Keep the existing special-case for (0, 0) returning UTC (that part is fine).
+
+Why these fixes will pass the tests
+- Step 1 makes negative minute inputs like -15 valid.
+- Step 2 implements the sign rules the tests expect:
+  - (0, -15) → total_minutes = -15
+  - (-2, 15) and (-2, -15) → total_minutes = -2*60 - 15 = -135
+  - (2, -15) → raises ValueError
+- Step 3 yields the correct millisecond offsets used by get_offset(0) and the id generation path, so the assertions about offsets and id strings pass.
+
+If you want, I can provide a corrected implementation of for_offset_hours_minutes implementing the exact changes above.
